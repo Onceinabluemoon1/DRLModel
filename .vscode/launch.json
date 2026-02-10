@@ -12,7 +12,6 @@
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",
             "args": [
-                "-n", "1000",
                 "--seed", "42"
             ]
         }
