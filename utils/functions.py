@@ -25,7 +25,7 @@ def _first_N_multi_indices(d, N):
     return out
 
 
-def build_legendre_sum(coeffs, d):
+def build_legendre_sum(coeffs, n_feats):
     """
     Returns a function f(x) where x is R^d (assumed each coord in [-1, 1]),
     and f(x) = sum_{k=0}^{N-1} coeffs[k] * prod_j P_{alpha_k[j]}(x_j),
@@ -33,27 +33,25 @@ def build_legendre_sum(coeffs, d):
     Args:
         coeffs: (D_h,), the coefficients for the legendre basis functions
             represents the coeff of a single annotator's preference
-        d: number of dimensions for item to have preference over
+        n_feats: number of item features, or dimension of the function input space
     Returns:
         function
     """
     coeffs = np.asarray(coeffs, dtype=float)  # (D_h,)
     assert coeffs.ndim == 1 and coeffs.size > 0
-    assert d >= 1, "Error: Dimension d must be >= 1."
-    multi_indices = _first_N_multi_indices(d, coeffs.size)  #
+    assert n_feats >= 1, "Error: Dimension d must be >= 1."
+    multi_indices = _first_N_multi_indices(n_feats, coeffs.size)  #
 
     def f(x):
         """
-
         Args:
-            x: (..., d), the input to the function
+            x: (..., n_feats), the input to the function
         Returns:
             total: (...,) the output of the function
         """
 
         x = np.asarray(x, dtype=float)
-        if x.shape[-1] != d:
-            raise ValueError(f"x must have last dimension {d}, got {x.shape}.")
+        assert x.shape[-1] == n_feats
         # Evaluate sum_k c_k * ∏_j P_{alpha_k[j]}(x_j)
         total = 0.0
         for c, alpha in zip(coeffs, multi_indices):
@@ -87,13 +85,13 @@ def test_legendre_sum():
     coeffs6 = np.array([0, 0, 0, 0, 0, 1, 0])  # P1 on x5
     coeffs7 = np.array([0, 0, 0, 0, 0, 0, 1])  # P1 on x6 (7th basis)
 
-    f1 = build_legendre_sum(coeffs1, d=10)
-    f2 = build_legendre_sum(coeffs2, d=10)
-    f3 = build_legendre_sum(coeffs3, d=10)
-    f4 = build_legendre_sum(coeffs4, d=10)
-    f5 = build_legendre_sum(coeffs5, d=10)
-    f6 = build_legendre_sum(coeffs6, d=10)
-    f7 = build_legendre_sum(coeffs7, d=10)
+    f1 = build_legendre_sum(coeffs1, n_feats=10)
+    f2 = build_legendre_sum(coeffs2, n_feats=10)
+    f3 = build_legendre_sum(coeffs3, n_feats=10)
+    f4 = build_legendre_sum(coeffs4, n_feats=10)
+    f5 = build_legendre_sum(coeffs5, n_feats=10)
+    f6 = build_legendre_sum(coeffs6, n_feats=10)
+    f7 = build_legendre_sum(coeffs7, n_feats=10)
 
     # Monte Carlo estimate of inner products
     rng = np.random.default_rng(0)
@@ -118,20 +116,20 @@ def test_legendre_sum():
     print("Legendre sum test passed")
 
 
-def get_legendre_functions(coeffs, x_dim, test=False):
+def get_legendre_functions(coeffs, n_feats, test=False):
     """
     Get the functions for each annotator.
     Args:
         coeffs: (nC2, D_h)
-        x_dim: dimension of the input space
+        n_feats: number of item features, or dimension of the function input space
         test: whether to test the Legendre sum function
     Returns:
-        list of functions
+        list of functions mapping (..., x_dim) -> R
     """
     if test:
         test_legendre_sum()
 
-    return [build_legendre_sum(coeff, d=x_dim) for coeff in coeffs]
+    return [build_legendre_sum(coeff, n_feats=n_feats) for coeff in coeffs]
 
 
 def bradley_terry_model(rewards, rng, beta=1.0):

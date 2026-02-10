@@ -1,22 +1,11 @@
 import os
 from typing import Optional, Tuple, Union
 
+import einops
 import numpy as np
 
 from utils.array import _load_array
 from utils.viz import _run_tsne_and_save
-
-
-def sample_random_x_values(
-    n_samples: int,
-    n_feats: int,
-    rng: np.random.Generator,
-) -> np.ndarray:
-    """
-    Sample x values from a Uniform distribution on the unit cube [-1, 1]^x_dim.
-    Returns shape (n_samples, x_dim).
-    """
-    return rng.uniform(-1, 1, size=(n_samples, n_feats))
 
 
 def sample_annotator_coefficients(
@@ -25,14 +14,14 @@ def sample_annotator_coefficients(
     seed: int,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Sample from a (potentially) N-dimensional Gaussian Mixture Model with UNIFORM component selection.
+    Sample from a Dh-dimensional GMM over K components with UNIFORM component selection.
 
-    - Let K = number of annotators, D = dimensionality.
+    - Let K = number of annotators, Dh = dimension used for legendre coeffs.
     - The uniform component selection implies that we randomly choose an annotator to sample from.
-    - Each annotator k is a D-dimensional Normal(mean_k, diag(std_k^2)) when stds are scalar per annotator.
+    - Each annotator k is a Dh-dimensional Normal(mean_k, diag(std_k^2)) when stds are scalar per annotator.
 
     Returns:
-        theta_samples: shape (n_samples, D)
+        theta_samples: shape (n_samples, Dh)
         annotator_indices: shape (n_samples,), the chosen annotator per sample
     """
     mean_std_data_dir = "synthetic_data/"
@@ -40,14 +29,14 @@ def sample_annotator_coefficients(
     means_file = os.path.join(mean_std_data_dir, "means.csv")
     stds_file = os.path.join(mean_std_data_dir, "stds.csv")
 
-    # Load means and stds if provided, infer and validate K and D
-    means = _load_array(means_file)  # (K, D)
-    assert means.ndim == 2, f"Error: {means_file} must be a 2D array of shape (K,D)."
-    K, D = means.shape
+    # Load means and stds if provided, infer and validate K and Dh
+    means = _load_array(means_file)  # (K, Dh)
+    assert means.ndim == 2, f"Error: {means_file} must be a 2D array of shape (K,Dh)."
+    K, Dh = means.shape
 
-    stds = _load_array(stds_file)
-    assert stds.ndim == 2, f"Error: {stds_file} must be a 2D array of shape (K,D)."
-    assert stds.shape == (K, D), f"Error: {stds_file} must have shape (K,D)."
+    stds = _load_array(stds_file)  # (K, Dh)
+    assert stds.ndim == 2, f"Error: {stds_file} must be a 2D array of shape (K,Dh)."
+    assert stds.shape == (K, Dh), f"Error: {stds_file} must have shape (K,Dh)."
 
     # (n_samples, D) and (n_samples,)
     theta_samples, annotator_indices = sample_gmm(
@@ -69,7 +58,7 @@ def sample_annotator_coefficients(
         + str(K)
         + "\n"
         + " and the dimension of the latent space is D_h = "
-        + str(D)
+        + str(Dh)
         + "\n"
         + "The number of annotations performed = "
         + str(n_samples)
@@ -84,7 +73,8 @@ def sample_annotator_coefficients(
     )
     print(f"t-SNE plot saved to: {tsne_png}")
 
-    return theta_samples, annotator_indices
+    info = {"K": K, "Dh": Dh}
+    return theta_samples, annotator_indices, info
 
 
 def sample_gmm(
@@ -96,30 +86,28 @@ def sample_gmm(
     """
     Sample from a (potentially) N-dimensional Gaussian Mixture Model with UNIFORM component selection.
 
-    - Let K = number of components, D = dimensionality.
-    - Each component k is a D-dimensional Normal(mean_k, diag(std_k^2)) when stds are scalar per component.
+    - Let K = number of components, Dh = dimensionality.
+    - Each component k is a Dh-dimensional Normal(mean_k, diag(std_k^2)) when stds are scalar per component.
     - The component (mode) is chosen uniformly among the components.
 
     Returns:
-        samples: shape (n_samples, D)
+        samples: shape (n_samples, Dh)
         component_indices: shape (n_samples,), the chosen component per sample
     """
-    means_arr = np.asarray(means, dtype=float)
-    assert means_arr.ndim == 2, "Error: means must be a 2D array of shape (K,D)."
-    K, D = means_arr.shape
+    means = np.asarray(means, dtype=float)
+    assert means.ndim == 2, "Error: means must be a 2D array of shape (K,Dh)."
+    K, Dh = means.shape
 
     # Normalize stds into shape (K, D) for broadcasted sampling
     if np.isscalar(stds):
-        stds_arr = np.full((K, D), float(stds), dtype=float)
+        stds_arr = np.full((K, Dh), float(stds), dtype=float)
     else:
         stds_arr_raw = np.asarray(stds, dtype=float)
         if stds_arr_raw.ndim == 1:
-            if stds_arr_raw.shape[0] != K:
-                raise ValueError("stds length must match number of components K.")
-            stds_arr = np.repeat(stds_arr_raw[:, None], D, axis=1)
+            assert stds_arr_raw.shape[0] == K, "stds must be shape (K,)"
+            stds_arr = einops.repeat(stds_arr_raw, "K -> K D", D=Dh)
         elif stds_arr_raw.ndim == 2:
-            if stds_arr_raw.shape != (K, D):
-                raise ValueError("stds must be shape (K,) or (K, D) or a scalar.")
+            assert stds_arr_raw.shape == (K, Dh), "stds must be shape (K, D)."
             stds_arr = stds_arr_raw
         else:
             raise ValueError("stds must be scalar, shape (K,), or shape (K, D).")
@@ -129,12 +117,12 @@ def sample_gmm(
     # Uniformly sample an annotator for each annotation
     component_indices = rng.integers(0, K, size=n_samples)  # (n_samples,)
 
-    samples = np.empty((n_samples, D), dtype=float)
+    samples = np.empty((n_samples, Dh), dtype=float)
     for k in range(K):
         mask = component_indices == k
         count = int(mask.sum())
         if count == 0:
             continue
-        samples[mask] = rng.normal(loc=means_arr[k], scale=stds_arr[k], size=(count, D))
+        samples[mask] = rng.normal(loc=means[k], scale=stds_arr[k], size=(count, Dh))
 
     return samples, component_indices
