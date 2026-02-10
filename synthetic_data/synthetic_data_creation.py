@@ -10,7 +10,7 @@ import tyro
 
 from utils.array import _save_array
 from utils.functions import bradley_terry_model, get_legendre_functions
-from utils.sampling import sample_annotator_coefficients, sample_random_x_values
+from utils.sampling import sample_annotator_coefficients
 
 
 @dataclass
@@ -23,7 +23,7 @@ class Args:
 
     n_samples: int = 100  # number of items
     n_feats: int = 1  # dimension of the input space
-    seed: Optional[int] = None  # random seed
+    seed: Optional[int] = 0  # random seed
 
 
 def main() -> None:
@@ -37,10 +37,8 @@ def main() -> None:
     data_dir = os.path.abspath(data_dir)
     print(f"n={args.n_samples}, n_feats={args.n_feats}, seed={args.seed}")
 
-    # *sample items from Gaussian N(0, 1) -> (n, d)
-    x_samples = sample_random_x_values(
-        n_samples=args.n_samples, n_feats=args.n_feats, rng=rng
-    )
+    # *sample items from Uniform [-1, 1] -> (n, n_feats)
+    x_samples = rng.uniform(-1, 1, size=(args.n_samples, args.n_feats))
     print(f"x_samples: {x_samples.shape}")
 
     # *sample pairs of items -> (nC2, 2, n_feats)
@@ -48,20 +46,22 @@ def main() -> None:
     x_pairs = np.stack([np.stack(pair) for pair in x_pairs])
     print(f"x_pairs: {x_pairs.shape}")
 
-    # *sample the legendre coefficients for each annotator -> (nC2, D_h) and (nC2,)
-    num_annotations = sp.special.comb(args.n_samples, 2, exact=True)
-    annotator_coeffs, annotator_indices = sample_annotator_coefficients(
-        n_samples=num_annotations,
-        rng=rng,
-        seed=args.seed,
+    # * for each pair preference label: sample legendre coeff from GMM
+    # 1) sample an annotator (1 of K components) -> (nC2,)
+    # 2) sample legendre coeffs for that annotator (Dh-dim Normal) -> (nC2, D_h)
+    annotator_coeffs, annotator_indices, info = sample_annotator_coefficients(
+        n_samples=len(x_pairs), rng=rng, seed=args.seed
     )
+    print(f"K={info['K']}, Dh={info['Dh']}")
 
-    # based on the theta samples, use legendre polynomials to create lambda functions for each annotation
+    # * for each pair: build reward function from coeffs sampled from GMM
+    # reward function: (..., n_feats) -> R, i.e. f: R^n_feats -> R
     reward_fns = get_legendre_functions(annotator_coeffs, args.n_feats, test=False)
 
     # evaluate rewards of each pair, get pref labels: (nC2, 2) -> (nC2,)
-    rewards = np.stack([f(x_pair) for f, x_pair in zip(reward_fns, x_pairs)])
+    rewards = np.stack([rew_fn(x_pair) for rew_fn, x_pair in zip(reward_fns, x_pairs)])
     prefs = bradley_terry_model(rewards, rng, beta=1.0)
+    print(f"prefs: {prefs.shape}")
 
     # Default outputs to data/
     out_path = os.path.join(data_dir, "samples.npy")
