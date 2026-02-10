@@ -54,8 +54,9 @@ def main() -> None:
     )
     print(f"K={info['K']}, Dh={info['Dh']}")
 
-    # * for each pair: build reward function from coeffs sampled from GMM
-    # reward function: (..., n_feats) -> R, i.e. f: R^n_feats -> R
+    # * create reward functions for each annotation
+    # based on the sampled coeffs, use legendre polynomials to create reward function
+    # that maps (..., n_feats) -> R
     reward_fns = get_legendre_functions(annotator_coeffs, args.n_feats, test=False)
 
     # evaluate rewards of each pair, get pref labels: (nC2, 2) -> (nC2,)
