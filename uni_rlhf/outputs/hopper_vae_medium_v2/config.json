@@ -1,0 +1,63 @@
+{
+  "seed": 42,
+  "batch_size": 16,
+  "num_epochs": 40,
+  "lr": 0.001,
+  "weight_decay": 0.0001,
+  "val_fraction": 0.2,
+  "hidden_dim": 64,
+  "num_tcn_blocks": 4,
+  "kernel_size": 5,
+  "dropout": 0.1,
+  "latent_dim": 16,
+  "label_embed_dim": 16,
+  "label_hidden_dim": 64,
+  "pref_hidden_dim": 128,
+  "normalize_obs": true,
+  "normalize_act": true,
+  "num_workers": 0,
+  "device": "cuda",
+  "obs_loss_weight": 1.0,
+  "act_loss_weight": 1.0,
+  "pref_loss_weight": 1.0,
+  "beta_max": 0.05,
+  "beta_warmup_epochs": 10,
+  "dataset_stats": {
+    "num_examples": 1743,
+    "seg_len": 200,
+    "obs_dim": 11,
+    "act_dim": 3,
+    "label_counts": {
+      "0": 861,
+      "1": 882
+    },
+    "x1_return_mean": 629.570556640625,
+    "x2_return_mean": 627.4447021484375,
+    "obs_mean_shape": [
+      11
+    ],
+    "obs_std_shape": [
+      11
+    ],
+    "act_mean_shape": [
+      3
+    ],
+    "act_std_shape": [
+      3
+    ]
+  },
+  "model_config": {
+    "obs_dim": 11,
+    "act_dim": 3,
+    "seq_len": 200,
+    "hidden_dim": 64,
+    "num_tcn_blocks": 4,
+    "kernel_size": 5,
+    "dropout": 0.1,
+    "label_embed_dim": 16,
+    "label_hidden_dim": 64,
+    "latent_dim": 16,
+    "num_label_classes": 2,
+    "pref_hidden_dim": 128
+  }
+}
