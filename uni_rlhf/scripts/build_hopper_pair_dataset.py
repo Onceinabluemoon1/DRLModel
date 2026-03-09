@@ -245,21 +245,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--hdf5-path",
         type=Path,
-        default=Path("/home/tini/.d4rl/datasets/hopper_medium-v2.hdf5"),
     )
     parser.add_argument(
         "--label-dir",
         type=Path,
-        default=Path(
-            "/mnt/c/Users/tini/Documents/code/ML/Disentangled_Reward_Learning/uni_rlhf/data/hopper-medium-v2_human_labels"
-        ),
     )
     parser.add_argument(
         "--output-path",
         type=Path,
-        default=Path(
-            "/mnt/c/Users/tini/Documents/code/ML/Disentangled_Reward_Learning/uni_rlhf/data/processed/hopper_medium_v2_pairwise_clean.npz"
-        ),
     )
     parser.add_argument("--seg-len", type=int, default=200)
     parser.add_argument(
