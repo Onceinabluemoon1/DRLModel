@@ -266,3 +266,75 @@ python -m uni_rlhf.scripts.train_hopper_vae --normalize-obs --normalize-act
 * The builder also removes comparisons whose fixed-length windows cross episode boundaries.
 * For the current Hopper setup, all model training is done on fixed-length 200-step segments.
 
+## VPL
+
+This is easier with conda.
+
+## Conda packages
+
+```bash
+conda install -n vpl -c conda-forge numpy=1.22.4 -y
+conda install -n vpl -c conda-forge scipy=1.11.4 -y
+conda install -n vpl -c conda-forge scikit-learn=1.3.2 -y
+conda install -n vpl -c conda-forge h5py=3.10.0 -y
+conda install -n vpl -c conda-forge matplotlib=3.7.4 -y
+conda install -n vpl -c conda-forge scikit-image=0.21.0 -y
+conda install -n vpl -c conda-forge opencv=4.9 -y
+conda install -n vpl -c conda-forge pybullet -y
+conda install -n vpl -c conda-forge transforms3d -y
+conda install -n vpl -c conda-forge meshcat -y
+conda install -n vpl -c conda-forge pillow=10.0.1 -y
+conda install -n vpl -c conda-forge pyyaml=6.0.1 -y
+conda install -n vpl -c conda-forge tqdm=4.66.1 -y
+```
+
+### Pip packages
+
+```bash
+pip install jax==0.4.21
+pip install jaxlib==0.4.21
+pip install flax==0.7.2
+pip install optax==0.1.7
+pip install chex==0.1.7
+pip install distrax==0.1.3
+pip install ml-dtypes==0.3.1
+pip install absl-py==2.0.0
+pip install ml-collections==0.1.1
+pip install cloudpickle==3.0.0
+pip install gym==0.23.1
+pip install timeout-decorator==0.5.0
+pip install wandb==0.16.0
+pip install protobuf==4.25.0
+pip install imageio==2.32.0
+pip install -e ./VPL/dependencies/d4rl --no-deps
+```
+
+## Required data
+The Raven offline dataset should exist at:
+VPL/jaxrl_m/envs/dataset/sort.hdf5
+
+```bash
+conda activate vpl
+export PYTHONPATH=$PWD/VPL:$PWD/VPL/dependencies/ravens:$PYTHONPATH
+export WANDB_MODE=offline
+
+python -m pref_learn.create_dataset \
+  --env=sort-easy-v0 \
+  --data_dir=./VPL/pref_datasets \
+  --num_query=5000 \
+  --query_len=1 \
+  --set_len=16
+
+python VPL/pref_learn/train.py \
+  --comment=sort_final_reward_results \
+  --env=sort-easy-v0 \
+  --dataset_path=./VPL/pref_datasets/sort-easy-v0/relabelled_queries_num5000_q1_s16 \
+  --model_type=VAEClassifier \
+  --logging.output_dir=./VPL/logs3 \
+  --seed=42 \
+  --learned_prior=True \
+  --use_annealing=True \
+  --n_epochs=500
+
+python VPL/scripts/extract_raven_latents.py
+```

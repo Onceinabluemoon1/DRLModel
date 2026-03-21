@@ -209,3 +209,18 @@ __marimo__/
 
 # Data
 data/
+
+# Conda local env exports
+conda-environment.yaml
+conda-environments.yaml
+
+# W&B / experiment outputs
+wandb/
+**/wandb/
+wandb-metadata.json
+wandb-summary.json# VPL generated artifacts
+VPL/jaxrl_m/learners/*.lnk
+VPL/logs3/**/wandb/
+VPL/latent_analysis/**/*.npy
+VPL/latent_analysis/**/metrics.txt
+VPL/pref_datasets/
