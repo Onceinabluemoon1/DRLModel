@@ -1,9 +1,16 @@
 import os
 import pickle
+from typing import Optional, Sequence, Tuple
 
 import numpy as np
 from tqdm import tqdm
+
 from jaxrl_m.learners.d4rl_utils import new_get_trj_idx
+
+
+SegmentKey = Tuple[int, int, int]
+PairKey = Tuple[SegmentKey, SegmentKey]
+
 
 def sample_from_env(env, num_query, len_set, len_query, data_dir):
     assert len_query == 1
@@ -44,6 +51,61 @@ def sample_from_env(env, num_query, len_set, len_query, data_dir):
     return batch, query_path
 
 
+def _segment_key(trj_idx: int, time_idx: int, len_query: int) -> SegmentKey:
+    return int(trj_idx), int(time_idx), int(len_query)
+
+
+def _pair_key(seg_a: SegmentKey, seg_b: SegmentKey) -> PairKey:
+    return tuple(sorted((seg_a, seg_b)))  # order-invariant left/right pair id
+
+
+def _sample_segment(
+    dataset,
+    trj_idx_list: np.ndarray,
+    trj_len_list: np.ndarray,
+    valid_trj_indices: np.ndarray,
+    len_query: int,
+    skip_flag: int,
+    first_reward_sum: Optional[float],
+):
+    trj_idx = int(np.random.choice(valid_trj_indices))
+    len_trj = int(trj_len_list[trj_idx])
+    if len_trj <= len_query:
+        return None
+
+    time_idx = int(np.random.choice(len_trj - len_query + 1))
+    start_idx = int(trj_idx_list[trj_idx][0] + time_idx)
+    end_idx = start_idx + len_query
+    assert end_idx <= trj_idx_list[trj_idx][1] + 1
+
+    reward_seq = dataset["rewards"][start_idx:end_idx]
+    if first_reward_sum is not None:
+        reward_sum = float(np.sum(reward_seq))
+        if skip_flag == 1 and first_reward_sum == reward_sum:
+            return None
+        if skip_flag == 2 and first_reward_sum == reward_sum:
+            return None
+        if skip_flag == 3 and first_reward_sum == reward_sum:
+            return None
+
+    obs_seq = dataset["observations"][start_idx:end_idx]
+    next_obs_seq = dataset["next_observations"][start_idx:end_idx]
+    act_seq = dataset["actions"][start_idx:end_idx]
+    timestep_seq = np.arange(1, len_query + 1)
+
+    return {
+        "trj_idx": trj_idx,
+        "time_idx": time_idx,
+        "start_idx": start_idx,
+        "reward_seq": reward_seq,
+        "obs_seq": obs_seq,
+        "next_obs_seq": next_obs_seq,
+        "act_seq": act_seq,
+        "timestep_seq": timestep_seq,
+        "seg_key": _segment_key(trj_idx, time_idx, len_query),
+    }
+
+
 def get_queries_from_multi(
     env,
     dataset,
@@ -52,118 +114,151 @@ def get_queries_from_multi(
     len_set,
     data_dir=None,
     skip_flag=1,
+    ensure_unique_pairs: bool = True,
+    ensure_unique_segments_within_set: bool = True,
+    max_sampling_attempts_per_pair: int = 1000,
 ):
+    """Sample query pairs and group them into sets.
+
+    Improvements over the original implementation:
+      * avoids repeated unordered query pairs across the full dataset when
+        ``ensure_unique_pairs`` is True
+      * avoids reusing the same segment within a set when
+        ``ensure_unique_segments_within_set`` is True
+      * stores trajectory/time metadata for easier auditing
+
+    Note: query uniqueness is enforced on the unordered segment pair
+    ((traj_1, time_1), (traj_2, time_2)), so swapping left/right counts as a repeat.
+    """
     _num_query = num_query
-    num_query *= len_set
+    total_pairs = num_query * len_set
 
     os.makedirs(data_dir, exist_ok=True)
-    trj_idx_list = new_get_trj_idx(dataset)  # get_nonmdp_trj_idx(env)
+    trj_idx_list = np.array(new_get_trj_idx(dataset))
     labeler_info = np.zeros(len(trj_idx_list) - 1)
+    valid_trj_indices = np.arange(len(trj_idx_list) - 1)[np.logical_not(labeler_info)]
 
-    # to-do: parallel implementation
-    trj_idx_list = np.array(trj_idx_list)
     trj_len_list = trj_idx_list[:, 1] - trj_idx_list[:, 0] + 1
-
     assert max(trj_len_list) > len_query
 
-    total_reward_seq_1, total_reward_seq_2 = np.zeros((num_query, len_query)), np.zeros(
-        (num_query, len_query)
-    )
+    total_reward_seq_1 = np.zeros((total_pairs, len_query))
+    total_reward_seq_2 = np.zeros((total_pairs, len_query))
 
     observation_dim = dataset["observations"].shape[-1]
-    total_obs_seq_1, total_obs_seq_2 = np.zeros(
-        (num_query, len_query, observation_dim)
-    ), np.zeros((num_query, len_query, observation_dim))
-    total_next_obs_seq_1, total_next_obs_seq_2 = np.zeros(
-        (num_query, len_query, observation_dim)
-    ), np.zeros((num_query, len_query, observation_dim))
+    total_obs_seq_1 = np.zeros((total_pairs, len_query, observation_dim))
+    total_obs_seq_2 = np.zeros((total_pairs, len_query, observation_dim))
+    total_next_obs_seq_1 = np.zeros((total_pairs, len_query, observation_dim))
+    total_next_obs_seq_2 = np.zeros((total_pairs, len_query, observation_dim))
 
     action_dim = dataset["actions"].shape[-1]
-    total_act_seq_1, total_act_seq_2 = np.zeros(
-        (num_query, len_query, action_dim)
-    ), np.zeros((num_query, len_query, action_dim))
+    total_act_seq_1 = np.zeros((total_pairs, len_query, action_dim))
+    total_act_seq_2 = np.zeros((total_pairs, len_query, action_dim))
 
-    total_timestep_1, total_timestep_2 = np.zeros(
-        (num_query, len_query), dtype=np.int32
-    ), np.zeros((num_query, len_query), dtype=np.int32)
+    total_timestep_1 = np.zeros((total_pairs, len_query), dtype=np.int32)
+    total_timestep_2 = np.zeros((total_pairs, len_query), dtype=np.int32)
 
-    start_indices_1, start_indices_2 = np.zeros(num_query), np.zeros(num_query)
-    time_indices_1, time_indices_2 = np.zeros(num_query), np.zeros(num_query)
+    start_indices_1 = np.zeros(total_pairs, dtype=np.int32)
+    start_indices_2 = np.zeros(total_pairs, dtype=np.int32)
+    time_indices_1 = np.zeros(total_pairs, dtype=np.int32)
+    time_indices_2 = np.zeros(total_pairs, dtype=np.int32)
+    traj_indices_1 = np.zeros(total_pairs, dtype=np.int32)
+    traj_indices_2 = np.zeros(total_pairs, dtype=np.int32)
 
     query_path = os.path.join(
         data_dir, f"queries_num{_num_query}_q{len_query}_s{len_set}"
     )
-    # already_queried = []
-    for query_count in tqdm(range(num_query), desc="get queries"):
-        temp_count = 0
-        labeler = -1
-        while temp_count < 2:
-            trj_idx = np.random.choice(
-                np.arange(len(trj_idx_list) - 1)[np.logical_not(labeler_info)]
-            )
-            len_trj = trj_len_list[trj_idx]
 
-            if len_trj > len_query and (
-                temp_count == 0 or labeler_info[trj_idx] == labeler
-            ):
-                labeler = labeler_info[trj_idx]
-                time_idx = np.random.choice(len_trj - len_query + 1)
-                start_idx = trj_idx_list[trj_idx][0] + time_idx
-                end_idx = start_idx + len_query
+    used_pair_keys = set()
 
-                assert end_idx <= trj_idx_list[trj_idx][1] + 1
+    for set_idx in tqdm(range(_num_query), desc="get query sets"):
+        set_segment_keys = set()
+        for within_set_idx in range(len_set):
+            pair_slot = set_idx * len_set + within_set_idx
+            first_segment = None
+            first_reward_sum = None
 
-                reward_seq = dataset["rewards"][start_idx:end_idx]
-                obs_seq = dataset["observations"][start_idx:end_idx]
-                next_obs_seq = dataset["next_observations"][start_idx:end_idx]
-                act_seq = dataset["actions"][start_idx:end_idx]
-                # timestep_seq = np.arange(time_idx + 1, time_idx + len_query + 1)
-                timestep_seq = np.arange(1, len_query + 1)
-
-                # skip flag 1: skip queries with equal rewards.
-                if skip_flag == 1 and temp_count == 1:
-                    if np.sum(total_reward_seq_1[-1]) == np.sum(reward_seq):
-                        continue
-                # skip flag 2: keep queries with equal reward until 50% of num_query.
+            for attempt in range(max_sampling_attempts_per_pair):
+                candidate_first = _sample_segment(
+                    dataset,
+                    trj_idx_list,
+                    trj_len_list,
+                    valid_trj_indices,
+                    len_query,
+                    skip_flag=0,
+                    first_reward_sum=None,
+                )
+                if candidate_first is None:
+                    continue
                 if (
-                    skip_flag == 2
-                    and temp_count == 1
-                    and query_count < int(0.5 * num_query)
+                    ensure_unique_segments_within_set
+                    and candidate_first["seg_key"] in set_segment_keys
                 ):
-                    if np.sum(total_reward_seq_1[-1]) == np.sum(reward_seq):
-                        continue
-                # skip flag 3: keep queries with equal reward until 20% of num_query.
+                    continue
+                first_segment = candidate_first
+                first_reward_sum = float(np.sum(first_segment["reward_seq"]))
+                break
+            if first_segment is None:
+                raise RuntimeError(
+                    "Failed to sample the first segment for a query pair. "
+                    "Try reducing set_len / num_query or disabling "
+                    "ensure_unique_segments_within_set."
+                )
+
+            second_segment = None
+            for attempt in range(max_sampling_attempts_per_pair):
+                candidate_second = _sample_segment(
+                    dataset,
+                    trj_idx_list,
+                    trj_len_list,
+                    valid_trj_indices,
+                    len_query,
+                    skip_flag=skip_flag,
+                    first_reward_sum=first_reward_sum,
+                )
+                if candidate_second is None:
+                    continue
+                if candidate_second["seg_key"] == first_segment["seg_key"]:
+                    continue
                 if (
-                    skip_flag == 3
-                    and temp_count == 1
-                    and query_count < int(0.2 * num_query)
+                    ensure_unique_segments_within_set
+                    and candidate_second["seg_key"] in set_segment_keys
                 ):
-                    if np.sum(total_reward_seq_1[-1]) == np.sum(reward_seq):
-                        continue
+                    continue
+                pair_key = _pair_key(first_segment["seg_key"], candidate_second["seg_key"])
+                if ensure_unique_pairs and pair_key in used_pair_keys:
+                    continue
+                second_segment = candidate_second
+                break
+            if second_segment is None:
+                raise RuntimeError(
+                    "Failed to sample a unique second segment for a query pair. "
+                    "Try reducing num_query / set_len, relaxing uniqueness, or "
+                    "increasing max_sampling_attempts_per_pair."
+                )
 
-                if temp_count == 0:
-                    start_indices_1[query_count] = start_idx
-                    time_indices_1[query_count] = time_idx
-                    total_reward_seq_1[query_count] = reward_seq
-                    total_obs_seq_1[query_count] = obs_seq
-                    total_next_obs_seq_1[query_count] = next_obs_seq
-                    total_act_seq_1[query_count] = act_seq
-                    total_timestep_1[query_count] = timestep_seq
-                else:
-                    # if (start_idx, start_indices_1[query_count]) in already_queried:
-                    #     continue
-                    start_indices_2[query_count] = start_idx
-                    time_indices_2[query_count] = time_idx
-                    total_reward_seq_2[query_count] = reward_seq
-                    total_obs_seq_2[query_count] = obs_seq
-                    total_next_obs_seq_2[query_count] = next_obs_seq
-                    total_act_seq_2[query_count] = act_seq
-                    total_timestep_2[query_count] = timestep_seq
+            pair_key = _pair_key(first_segment["seg_key"], second_segment["seg_key"])
+            used_pair_keys.add(pair_key)
+            if ensure_unique_segments_within_set:
+                set_segment_keys.add(first_segment["seg_key"])
+                set_segment_keys.add(second_segment["seg_key"])
 
-                temp_count += 1
-                # already_queried.append(
-                #     (start_indices_2[query_count], start_indices_1[query_count])
-                # )
+            start_indices_1[pair_slot] = first_segment["start_idx"]
+            start_indices_2[pair_slot] = second_segment["start_idx"]
+            time_indices_1[pair_slot] = first_segment["time_idx"]
+            time_indices_2[pair_slot] = second_segment["time_idx"]
+            traj_indices_1[pair_slot] = first_segment["trj_idx"]
+            traj_indices_2[pair_slot] = second_segment["trj_idx"]
+
+            total_reward_seq_1[pair_slot] = first_segment["reward_seq"]
+            total_reward_seq_2[pair_slot] = second_segment["reward_seq"]
+            total_obs_seq_1[pair_slot] = first_segment["obs_seq"]
+            total_obs_seq_2[pair_slot] = second_segment["obs_seq"]
+            total_next_obs_seq_1[pair_slot] = first_segment["next_obs_seq"]
+            total_next_obs_seq_2[pair_slot] = second_segment["next_obs_seq"]
+            total_act_seq_1[pair_slot] = first_segment["act_seq"]
+            total_act_seq_2[pair_slot] = second_segment["act_seq"]
+            total_timestep_1[pair_slot] = first_segment["timestep_seq"]
+            total_timestep_2[pair_slot] = second_segment["timestep_seq"]
 
     seg_reward_1 = total_reward_seq_1.copy()
     seg_reward_2 = total_reward_seq_2.copy()
@@ -182,16 +277,11 @@ def get_queries_from_multi(
 
     rational_labels = get_labels(seg_reward_1, seg_reward_2)
 
-    start_indices_1 = np.array(start_indices_1, dtype=np.int32)
-    start_indices_2 = np.array(start_indices_2, dtype=np.int32)
-    time_indices_1 = np.array(time_indices_1, dtype=np.int32)
-    time_indices_2 = np.array(time_indices_2, dtype=np.int32)
-
     batch = {}
     batch["labels"] = rational_labels.reshape(_num_query, len_set, 1)
     batch["observations"] = seg_obs_1.reshape(
         _num_query, len_set, len_query, observation_dim
-    )  # for compatibility, remove "_1"
+    )
     batch["next_observations"] = seg_next_obs_1.reshape(
         _num_query, len_set, len_query, observation_dim
     )
@@ -207,11 +297,16 @@ def get_queries_from_multi(
     batch["timestep_2"] = seq_timestep_2.reshape(_num_query, len_set, len_query)
     batch["start_indices"] = start_indices_1.reshape(_num_query, len_set)
     batch["start_indices_2"] = start_indices_2.reshape(_num_query, len_set)
+    batch["time_indices"] = time_indices_1.reshape(_num_query, len_set)
+    batch["time_indices_2"] = time_indices_2.reshape(_num_query, len_set)
+    batch["traj_indices"] = traj_indices_1.reshape(_num_query, len_set)
+    batch["traj_indices_2"] = traj_indices_2.reshape(_num_query, len_set)
 
     with open(query_path, "wb") as fp:
         pickle.dump(batch, fp)
 
     return batch, query_path
+
 
 
 def get_labels(seg_reward_1, seg_reward_2):
