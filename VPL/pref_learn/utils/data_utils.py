@@ -1,6 +1,7 @@
+
 import os
 import pickle
-from typing import Optional, Sequence, Tuple
+from typing import Optional, Tuple
 
 import numpy as np
 from tqdm import tqdm
@@ -13,6 +14,7 @@ PairKey = Tuple[SegmentKey, SegmentKey]
 
 
 def sample_from_env(env, num_query, len_set, len_query, data_dir):
+    """Fallback random sampler used by some environments."""
     assert len_query == 1
     observation_dim = env.reward_observation_space.shape[-1]
     action_dim = env.action_space.shape[-1]
@@ -26,25 +28,22 @@ def sample_from_env(env, num_query, len_set, len_query, data_dir):
     ).reshape(num_query, len_set, len_query, observation_dim)
     seg_act_1 = np.stack(
         [env.action_space.sample() for _ in range(num_query * len_set)], axis=1
-    ).reshape(num_query, len_set, len_query, observation_dim)
+    ).reshape(num_query, len_set, len_query, action_dim)
     seg_act_2 = np.stack(
         [env.action_space.sample() for _ in range(num_query * len_set)], axis=1
-    ).reshape(num_query, len_set, len_query, observation_dim)
+    ).reshape(num_query, len_set, len_query, action_dim)
     labels = np.zeros((num_query, len_set))
 
     query_path = os.path.join(
         data_dir, f"queries_num{num_query}_q{len_query}_s{len_set}"
     )
-    batch = {}
-    batch["labels"] = labels.reshape(num_query, len_set, 1)
-    batch["observations"] = seg_obs_1.reshape(
-        num_query, len_set, len_query, observation_dim
-    )
-    batch["observations_2"] = seg_obs_2.reshape(
-        num_query, len_set, len_query, observation_dim
-    )
-    batch["actions"] = seg_act_1.reshape(num_query, len_set, len_query, action_dim)
-    batch["actions_2"] = seg_act_2.reshape(num_query, len_set, len_query, action_dim)
+    batch = {
+        "labels": labels.reshape(num_query, len_set, 1),
+        "observations": seg_obs_1.reshape(num_query, len_set, len_query, observation_dim),
+        "observations_2": seg_obs_2.reshape(num_query, len_set, len_query, observation_dim),
+        "actions": seg_act_1.reshape(num_query, len_set, len_query, action_dim),
+        "actions_2": seg_act_2.reshape(num_query, len_set, len_query, action_dim),
+    }
     with open(query_path, "wb") as fp:
         pickle.dump(batch, fp)
 
@@ -56,7 +55,8 @@ def _segment_key(trj_idx: int, time_idx: int, len_query: int) -> SegmentKey:
 
 
 def _pair_key(seg_a: SegmentKey, seg_b: SegmentKey) -> PairKey:
-    return tuple(sorted((seg_a, seg_b)))  # order-invariant left/right pair id
+    # Order invariant so swapping left/right does not create a "new" query pair.
+    return tuple(sorted((seg_a, seg_b)))
 
 
 def _sample_segment(
@@ -79,8 +79,9 @@ def _sample_segment(
     assert end_idx <= trj_idx_list[trj_idx][1] + 1
 
     reward_seq = dataset["rewards"][start_idx:end_idx]
+    reward_sum = float(np.sum(reward_seq))
+
     if first_reward_sum is not None:
-        reward_sum = float(np.sum(reward_seq))
         if skip_flag == 1 and first_reward_sum == reward_sum:
             return None
         if skip_flag == 2 and first_reward_sum == reward_sum:
@@ -103,6 +104,7 @@ def _sample_segment(
         "act_seq": act_seq,
         "timestep_seq": timestep_seq,
         "seg_key": _segment_key(trj_idx, time_idx, len_query),
+        "reward_sum": reward_sum,
     }
 
 
@@ -120,15 +122,12 @@ def get_queries_from_multi(
 ):
     """Sample query pairs and group them into sets.
 
-    Improvements over the original implementation:
-      * avoids repeated unordered query pairs across the full dataset when
+    This version fixes the main issue in the original code:
+      * no repeated unordered query pairs across the full dataset when
         ``ensure_unique_pairs`` is True
-      * avoids reusing the same segment within a set when
+      * no repeated segment within a set when
         ``ensure_unique_segments_within_set`` is True
-      * stores trajectory/time metadata for easier auditing
-
-    Note: query uniqueness is enforced on the unordered segment pair
-    ((traj_1, time_1), (traj_2, time_2)), so swapping left/right counts as a repeat.
+      * stores trajectory/time metadata needed for auditing and downstream analysis
     """
     _num_query = num_query
     total_pairs = num_query * len_set
@@ -175,9 +174,8 @@ def get_queries_from_multi(
         for within_set_idx in range(len_set):
             pair_slot = set_idx * len_set + within_set_idx
             first_segment = None
-            first_reward_sum = None
 
-            for attempt in range(max_sampling_attempts_per_pair):
+            for _ in range(max_sampling_attempts_per_pair):
                 candidate_first = _sample_segment(
                     dataset,
                     trj_idx_list,
@@ -195,8 +193,8 @@ def get_queries_from_multi(
                 ):
                     continue
                 first_segment = candidate_first
-                first_reward_sum = float(np.sum(first_segment["reward_seq"]))
                 break
+
             if first_segment is None:
                 raise RuntimeError(
                     "Failed to sample the first segment for a query pair. "
@@ -205,7 +203,7 @@ def get_queries_from_multi(
                 )
 
             second_segment = None
-            for attempt in range(max_sampling_attempts_per_pair):
+            for _ in range(max_sampling_attempts_per_pair):
                 candidate_second = _sample_segment(
                     dataset,
                     trj_idx_list,
@@ -213,7 +211,7 @@ def get_queries_from_multi(
                     valid_trj_indices,
                     len_query,
                     skip_flag=skip_flag,
-                    first_reward_sum=first_reward_sum,
+                    first_reward_sum=first_segment["reward_sum"],
                 )
                 if candidate_second is None:
                     continue
@@ -229,6 +227,7 @@ def get_queries_from_multi(
                     continue
                 second_segment = candidate_second
                 break
+
             if second_segment is None:
                 raise RuntimeError(
                     "Failed to sample a unique second segment for a query pair. "
@@ -263,50 +262,28 @@ def get_queries_from_multi(
     seg_reward_1 = total_reward_seq_1.copy()
     seg_reward_2 = total_reward_seq_2.copy()
 
-    seg_obs_1 = total_obs_seq_1.copy()
-    seg_obs_2 = total_obs_seq_2.copy()
-
-    seg_next_obs_1 = total_next_obs_seq_1.copy()
-    seg_next_obs_2 = total_next_obs_seq_2.copy()
-
-    seq_act_1 = total_act_seq_1.copy()
-    seq_act_2 = total_act_seq_2.copy()
-
-    seq_timestep_1 = total_timestep_1.copy()
-    seq_timestep_2 = total_timestep_2.copy()
-
-    rational_labels = get_labels(seg_reward_1, seg_reward_2)
-
-    batch = {}
-    batch["labels"] = rational_labels.reshape(_num_query, len_set, 1)
-    batch["observations"] = seg_obs_1.reshape(
-        _num_query, len_set, len_query, observation_dim
-    )
-    batch["next_observations"] = seg_next_obs_1.reshape(
-        _num_query, len_set, len_query, observation_dim
-    )
-    batch["actions"] = seq_act_1.reshape(_num_query, len_set, len_query, action_dim)
-    batch["observations_2"] = seg_obs_2.reshape(
-        _num_query, len_set, len_query, observation_dim
-    )
-    batch["next_observations_2"] = seg_next_obs_2.reshape(
-        _num_query, len_set, len_query, observation_dim
-    )
-    batch["actions_2"] = seq_act_2.reshape(_num_query, len_set, len_query, action_dim)
-    batch["timestep_1"] = seq_timestep_1.reshape(_num_query, len_set, len_query)
-    batch["timestep_2"] = seq_timestep_2.reshape(_num_query, len_set, len_query)
-    batch["start_indices"] = start_indices_1.reshape(_num_query, len_set)
-    batch["start_indices_2"] = start_indices_2.reshape(_num_query, len_set)
-    batch["time_indices"] = time_indices_1.reshape(_num_query, len_set)
-    batch["time_indices_2"] = time_indices_2.reshape(_num_query, len_set)
-    batch["traj_indices"] = traj_indices_1.reshape(_num_query, len_set)
-    batch["traj_indices_2"] = traj_indices_2.reshape(_num_query, len_set)
+    batch = {
+        "labels": get_labels(seg_reward_1, seg_reward_2).reshape(_num_query, len_set, 1),
+        "observations": total_obs_seq_1.reshape(_num_query, len_set, len_query, observation_dim),
+        "next_observations": total_next_obs_seq_1.reshape(_num_query, len_set, len_query, observation_dim),
+        "actions": total_act_seq_1.reshape(_num_query, len_set, len_query, action_dim),
+        "observations_2": total_obs_seq_2.reshape(_num_query, len_set, len_query, observation_dim),
+        "next_observations_2": total_next_obs_seq_2.reshape(_num_query, len_set, len_query, observation_dim),
+        "actions_2": total_act_seq_2.reshape(_num_query, len_set, len_query, action_dim),
+        "timestep_1": total_timestep_1.reshape(_num_query, len_set, len_query),
+        "timestep_2": total_timestep_2.reshape(_num_query, len_set, len_query),
+        "start_indices": start_indices_1.reshape(_num_query, len_set),
+        "start_indices_2": start_indices_2.reshape(_num_query, len_set),
+        "time_indices": time_indices_1.reshape(_num_query, len_set),
+        "time_indices_2": time_indices_2.reshape(_num_query, len_set),
+        "traj_indices": traj_indices_1.reshape(_num_query, len_set),
+        "traj_indices_2": traj_indices_2.reshape(_num_query, len_set),
+    }
 
     with open(query_path, "wb") as fp:
         pickle.dump(batch, fp)
 
     return batch, query_path
-
 
 
 def get_labels(seg_reward_1, seg_reward_2):
