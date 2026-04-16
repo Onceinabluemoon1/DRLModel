@@ -84,10 +84,22 @@ def main(_):
         preferred_side.append(labels.astype(np.int32).reshape(-1))
 
     if FLAGS.store_source_mode:
-        dataset["source_mode"] = np.asarray(modes, dtype=np.int32).reshape(-1, 1)
-        dataset["preferred_side"] = np.asarray(preferred_side, dtype=np.int32).reshape(
-            len(preferred_side), -1, 1
-        )
+        source_mode = np.asarray(modes, dtype=np.int32).reshape(-1, 1)
+        preferred_side = np.asarray(preferred_side, dtype=np.int32).reshape(len(preferred_side), -1, 1)
+
+        dataset["source_mode"] = source_mode
+        dataset["annotator_id"] = source_mode.copy()
+        dataset["source_variable"] = source_mode.copy()
+        dataset["preferred_side"] = preferred_side
+        dataset["left_is_preferred"] = preferred_side.copy()
+
+        dataset["source_variable_name"] = "source_mode"
+        dataset["source_variable_type"] = "discrete"
+        dataset["source_variable_dim"] = np.array([1], dtype=np.int32)
+        try:
+            dataset["source_classes"] = np.arange(gym_env.get_num_modes(), dtype=np.int32)
+        except Exception:
+            dataset["source_classes"] = np.unique(source_mode[:, 0]).astype(np.int32)
 
     relabelled_path = str(query_path).replace("queries", "relabelled_queries")
     with open(relabelled_path, "wb") as f:

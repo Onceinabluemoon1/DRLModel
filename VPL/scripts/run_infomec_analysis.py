@@ -22,7 +22,11 @@ def parse_args():
     p.add_argument("--env", required=True)
     p.add_argument("--outdir", required=True)
     p.add_argument("--split", choices=["all", "train", "eval"], default="eval")
-    p.add_argument("--source-keys", default="source_variable")
+    p.add_argument(
+        "--source-keys",
+        default="auto",
+        help="Comma-separated source fields. Use 'auto' to prefer source_variable, then source_mode, then annotator_id.",
+    )
     p.add_argument("--batch-size", type=int, default=256)
     p.add_argument("--set-length", type=int, default=-1)
     p.add_argument("--discrete-latents", action="store_true")
@@ -45,6 +49,39 @@ def maybe_truncate(arr: np.ndarray, set_length: int) -> np.ndarray:
     if set_length < 0 or arr.ndim < 2:
         return arr
     return arr[:, :set_length]
+
+
+def resolve_source_keys(batch: dict, source_keys_arg: str) -> List[str]:
+    available = set(batch.keys())
+    aliases = {
+        "source_variable": ["source_variable", "source_mode", "annotator_id"],
+        "source_mode": ["source_mode", "source_variable", "annotator_id"],
+        "annotator_id": ["annotator_id", "source_variable", "source_mode"],
+    }
+
+    if source_keys_arg.strip().lower() == "auto":
+        for candidates in (["source_variable"], ["source_mode"], ["annotator_id"]):
+            if candidates[0] in available:
+                return candidates
+        raise KeyError(
+            "Could not infer source keys automatically. Expected one of source_variable, source_mode, or annotator_id. "
+            f"Available keys include: {sorted(batch.keys())[:40]}"
+        )
+
+    resolved = []
+    for raw_key in [k.strip() for k in source_keys_arg.split(",") if k.strip()]:
+        if raw_key in available:
+            resolved.append(raw_key)
+            continue
+        for candidate in aliases.get(raw_key, []):
+            if candidate in available:
+                resolved.append(candidate)
+                break
+        else:
+            raise KeyError(
+                f"Source key '{raw_key}' not found in dataset. Available keys include: {sorted(batch.keys())[:40]}"
+            )
+    return resolved
 
 
 def infer_source_columns(raw: np.ndarray, key: str, num_bins: int) -> Tuple[np.ndarray, List[str]]:
@@ -173,12 +210,10 @@ def main():
 
     latents = batched_encode(model, obs1, obs2, labels, args.batch_size, device)
 
-    source_keys = [k.strip() for k in args.source_keys.split(",") if k.strip()]
+    source_keys = resolve_source_keys(batch, args.source_keys)
     source_cols = []
     source_names = []
     for key in source_keys:
-        if key not in batch:
-            raise KeyError(f"Source key '{key}' not found in dataset. Available keys include: {sorted(batch.keys())[:30]}")
         cols, names = infer_source_columns(np.asarray(batch[key])[idx], key, args.num_bins)
         source_cols.append(cols)
         source_names.extend(names)
@@ -229,7 +264,6 @@ def main():
         f.write(f"infoe={metrics['infoe']:.6f}\n")
         f.write(f"linear_probe_accuracy_per_source={metrics['linear_probe_accuracy_per_source']}\n")
         f.write(f"active_latents={int(np.sum(result.active_latents))}/{len(result.active_latents)}\n")
-
     print(json.dumps(metrics, indent=2))
 
 
