@@ -1,0 +1,17 @@
+{
+  "perplexity": 30.0,
+  "models": {
+    " beta0p000001": {
+      "path": "./latent_analysis/sort-easy-v0/s42_beta0p000001_unique/latents_with_labels.npz",
+      "latent_key": "latents",
+      "label_key": "labels",
+      "n_samples": 1000,
+      "latent_dim": 32,
+      "pca_explained_variance_ratio": [
+        0.47395408153533936,
+        0.1931670755147934
+      ],
+      "mean_abs_offdiag_covariance": 0.40370019532166274
+    }
+  }
+}

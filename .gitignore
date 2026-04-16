@@ -205,6 +205,8 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+**/latent_analysis/
+**/logs3/
 
 
 # Data
