@@ -173,6 +173,8 @@ def maybe_save_lda(latents: np.ndarray, y: np.ndarray, outpath: str, title: str)
 
 
 def maybe_save_pca(latents: np.ndarray, y: np.ndarray, outpath: str, title: str):
+    if latents.ndim != 2 or latents.shape[1] < 2:
+        return None
     pca = PCA(n_components=2, random_state=0)
     proj = pca.fit_transform(latents)
     plt.figure(figsize=(6, 5))

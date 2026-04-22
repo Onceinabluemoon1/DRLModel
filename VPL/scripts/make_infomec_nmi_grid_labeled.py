@@ -55,7 +55,17 @@ def main():
         if global_max <= 0:
             global_max = 1.0
         im = ax.imshow(arr, aspect='auto', vmin=0, vmax=global_max)
-        ax.set_title(f"{row['name']} ({row['active_count']}/{row['latent_dim']} active)")
+        metrics_path = run_dir / "infomec_metrics.json"
+        with open(metrics_path, "r") as f:
+            metrics = json.load(f)
+
+        infom = float(metrics.get("infom", float("nan")))
+        infoc = float(metrics.get("infoc", float("nan")))
+        active = metrics.get("active_latents", [])
+        num_active = int(sum(bool(x) for x in active))
+        latent_dim = int(len(active))
+
+        ax.set_title(f"{row['name']} ({num_active}/{latent_dim})\nM={infom:.2f}, C={infoc:.2f}")
         ax.set_xticks(range(arr.shape[1]))
         ax.set_xticklabels([f'z{i}' for i in range(arr.shape[1])], rotation=90, fontsize=8)
         ax.set_yticks(range(arr.shape[0]))
