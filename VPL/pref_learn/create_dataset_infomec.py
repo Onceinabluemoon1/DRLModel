@@ -1,14 +1,18 @@
 import os
+import sys
 import pickle
+
+os.environ["MUJOCO_GL"] = "egl"
+os.environ["D4RL_SUPPRESS_IMPORT_ERROR"] = "1"
 
 import absl.app
 import absl.flags
 import gym
+import jaxrl_m.envs
 import numpy as np
+from jaxrl_m.learners.d4rl_utils import get_dataset
 from tqdm import tqdm
 
-import jaxrl_m.envs
-from jaxrl_m.learners.d4rl_utils import get_dataset
 from pref_learn.utils.data_utils import (
     get_labels,
     get_queries_from_multi,
