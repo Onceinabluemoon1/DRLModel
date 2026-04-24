@@ -1,7 +1,8 @@
 import numpy as np
-from jaxrl_m.typing import Data
 from flax.core.frozen_dict import FrozenDict
 from jax import tree_util
+
+from jaxrl_m.typing import Data
 
 
 def get_size(data: Data) -> int:

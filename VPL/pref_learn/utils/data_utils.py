@@ -1,13 +1,10 @@
-
 import os
 import pickle
 from typing import Optional, Tuple
 
 import numpy as np
-from tqdm import tqdm
-
 from jaxrl_m.learners.d4rl_utils import new_get_trj_idx
-
+from tqdm import tqdm
 
 SegmentKey = Tuple[int, int, int]
 PairKey = Tuple[SegmentKey, SegmentKey]
@@ -34,13 +31,13 @@ def sample_from_env(env, num_query, len_set, len_query, data_dir):
     ).reshape(num_query, len_set, len_query, action_dim)
     labels = np.zeros((num_query, len_set))
 
-    query_path = os.path.join(
-        data_dir, f"queries_num{num_query}_q{len_query}_s{len_set}"
-    )
+    query_path = os.path.join(data_dir, f"queries_num{num_query}_q{len_query}_s{len_set}")
     batch = {
         "labels": labels.reshape(num_query, len_set, 1),
         "observations": seg_obs_1.reshape(num_query, len_set, len_query, observation_dim),
-        "observations_2": seg_obs_2.reshape(num_query, len_set, len_query, observation_dim),
+        "observations_2": seg_obs_2.reshape(
+            num_query, len_set, len_query, observation_dim
+        ),
         "actions": seg_act_1.reshape(num_query, len_set, len_query, action_dim),
         "actions_2": seg_act_2.reshape(num_query, len_set, len_query, action_dim),
     }
@@ -222,7 +219,9 @@ def get_queries_from_multi(
                     and candidate_second["seg_key"] in set_segment_keys
                 ):
                     continue
-                pair_key = _pair_key(first_segment["seg_key"], candidate_second["seg_key"])
+                pair_key = _pair_key(
+                    first_segment["seg_key"], candidate_second["seg_key"]
+                )
                 if ensure_unique_pairs and pair_key in used_pair_keys:
                     continue
                 second_segment = candidate_second
@@ -264,11 +263,19 @@ def get_queries_from_multi(
 
     batch = {
         "labels": get_labels(seg_reward_1, seg_reward_2).reshape(_num_query, len_set, 1),
-        "observations": total_obs_seq_1.reshape(_num_query, len_set, len_query, observation_dim),
-        "next_observations": total_next_obs_seq_1.reshape(_num_query, len_set, len_query, observation_dim),
+        "observations": total_obs_seq_1.reshape(
+            _num_query, len_set, len_query, observation_dim
+        ),
+        "next_observations": total_next_obs_seq_1.reshape(
+            _num_query, len_set, len_query, observation_dim
+        ),
         "actions": total_act_seq_1.reshape(_num_query, len_set, len_query, action_dim),
-        "observations_2": total_obs_seq_2.reshape(_num_query, len_set, len_query, observation_dim),
-        "next_observations_2": total_next_obs_seq_2.reshape(_num_query, len_set, len_query, observation_dim),
+        "observations_2": total_obs_seq_2.reshape(
+            _num_query, len_set, len_query, observation_dim
+        ),
+        "next_observations_2": total_next_obs_seq_2.reshape(
+            _num_query, len_set, len_query, observation_dim
+        ),
         "actions_2": total_act_seq_2.reshape(_num_query, len_set, len_query, action_dim),
         "timestep_1": total_timestep_1.reshape(_num_query, len_set, len_query),
         "timestep_2": total_timestep_2.reshape(_num_query, len_set, len_query),

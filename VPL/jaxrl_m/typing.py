@@ -1,7 +1,8 @@
 from typing import Any, Callable, Dict, Optional, Sequence, Tuple, Union
-import numpy as np
-import jax.numpy as jnp
+
 import flax
+import jax.numpy as jnp
+import numpy as np
 
 PRNGKey = Any
 Params = flax.core.FrozenDict[str, Any]

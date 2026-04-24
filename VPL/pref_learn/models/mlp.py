@@ -1,5 +1,5 @@
-import os
 import math
+import os
 import pickle
 
 import numpy as np
@@ -131,7 +131,9 @@ class CategoricalModel(nn.Module):
         ).mean(dim=[0, 1])
 
         entropy_loss = torch.sum(mean_dist * mean_dist.log())
-        reconstruction_loss, accuracy = self.reconstruction_loss(rewards_chosen, rewards_rejected)
+        reconstruction_loss, accuracy = self.reconstruction_loss(
+            rewards_chosen, rewards_rejected
+        )
         loss = reconstruction_loss + self.entropy_coeff * entropy_loss
 
         metrics = {
@@ -160,7 +162,7 @@ class MeanVarianceModel(nn.Module):
 
     def get_reward(self, r):
         return self.reward_model(r)[:, 0]
-    
+
     def get_variance(self, r):
         return torch.exp(0.5 * r[:, 1])
 
@@ -212,24 +214,25 @@ class MeanVarianceModel(nn.Module):
 
         return loss, metrics
 
+
 class MLPClassifier(nn.Module):
     def __init__(self, input_dim, hidden_dim):
         super(MLPClassifier, self).__init__()
         self.classifier_model = nn.Sequential(
-            nn.Linear(2*input_dim, hidden_dim),
+            nn.Linear(2 * input_dim, hidden_dim),
             nn.LeakyReLU(0.2),
             nn.Linear(hidden_dim, hidden_dim),
             nn.LeakyReLU(0.2),
             nn.Linear(hidden_dim, 1),
-            nn.Sigmoid()
+            nn.Sigmoid(),
         )
 
-    def get_reward(self, x, y): # B x S, N x S
+    def get_reward(self, x, y):  # B x S, N x S
         # import pdb; pdb.set_trace()
-        x = x[:, None].repeat(1, y.shape[0], 1) # B x N x S
-        y = y[None].repeat(x.shape[0], 1, 1) # B x N x S
-        x = torch.cat([x, y], dim=-1) # B x N x 2S
-        return self.classifier_model(x)[:, :, 0].mean(dim=-1) # (B, )
+        x = x[:, None].repeat(1, y.shape[0], 1)  # B x N x S
+        y = y[None].repeat(x.shape[0], 1, 1)  # B x N x S
+        x = torch.cat([x, y], dim=-1)  # B x N x 2S
+        return self.classifier_model(x)[:, :, 0].mean(dim=-1)  # (B, )
 
     def reconstruction_loss(self, x, x_hat):
         return nn.functional.binary_cross_entropy(x_hat, x, reduction="sum")

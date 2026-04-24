@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
@@ -69,7 +70,9 @@ def main():
     args = parse_args()
     runs_root = Path(args.runs_root)
 
-    beta_dirs = [p for p in runs_root.iterdir() if p.is_dir() and p.name.startswith("beta")]
+    beta_dirs = [
+        p for p in runs_root.iterdir() if p.is_dir() and p.name.startswith("beta")
+    ]
     beta_dirs.sort(key=lambda p: beta_from_name(p.name))
 
     if not beta_dirs:
@@ -79,7 +82,9 @@ def main():
     ncols = 4 if n >= 4 else n
     nrows = math.ceil(n / ncols)
 
-    fig, axes = plt.subplots(nrows, ncols, figsize=(4.3 * ncols, 3.5 * nrows), sharey=True)
+    fig, axes = plt.subplots(
+        nrows, ncols, figsize=(4.3 * ncols, 3.5 * nrows), sharey=True
+    )
     if nrows == 1 and ncols == 1:
         axes = [axes]
     else:

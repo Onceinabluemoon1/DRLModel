@@ -1,25 +1,27 @@
+import copy
 import os
-import gym
-import numpy as np
-import matplotlib.pyplot as plt
+from pathlib import Path
 
+import gym
+import matplotlib.pyplot as plt
+import numpy as np
+import pybullet as p
+import timeout_decorator
+from d4rl.offline_env import OfflineEnv
 from ravens import tasks
 from ravens.environments.environment import Environment
 
-from d4rl.offline_env import OfflineEnv
-import pybullet as p
-import copy
 
-import timeout_decorator
-
-
-from pathlib import Path
 class SortEnv(OfflineEnv, gym.Env):
-    def __init__(self, mode=-1, disp=False, debug=False, ee=False, oracle=False, **kwargs):
+    def __init__(
+        self, mode=-1, disp=False, debug=False, ee=False, oracle=False, **kwargs
+    ):
         super().__init__()
 
         vpl_root = Path(__file__).resolve().parents[2]
-        assets_root = vpl_root / "dependencies" / "ravens" / "ravens" / "environments" / "assets"
+        assets_root = (
+            vpl_root / "dependencies" / "ravens" / "ravens" / "environments" / "assets"
+        )
 
         env_cls = Environment
         self.env = env_cls(
@@ -54,11 +56,15 @@ class SortEnv(OfflineEnv, gym.Env):
         self.env.set_task(self.task)
 
         self.action_space = gym.spaces.Box(
-            low=-1, high=1, shape=(4,)  # 8,)
+            low=-1,
+            high=1,
+            shape=(4,),  # 8,)
         )  # TODO: setup action space, self.env.action_space
 
         self.observation_space = gym.spaces.Box(
-            low=-np.inf, high=np.inf, shape=(7,)  # 15,)
+            low=-np.inf,
+            high=np.inf,
+            shape=(7,),  # 15,)
         )  # TODO: setup observation space self.env.observation_space
 
         self._max_episode_steps = 25  # kwargs.get("max_episode_steps", 300)
@@ -118,17 +124,21 @@ class SortEnv(OfflineEnv, gym.Env):
         target_pose = np.array(goal[0])
 
         gripper_dist = np.linalg.norm(grip_pose - obj_pose, axis=-1)
-        
+
         goal_dist = np.linalg.norm(obj_pose[:, :, :2] - target_pose[:2], axis=-1)
         dist = goal_dist < 0.05
-        
+
         grasped = state[:, :, -1]
-        
+
         reward = (
             dist * (1 - grasped) * 100.0  # if object is within goal dist, and ungrasped
             + dist * grasped * 5.0  # if object is within goal dist and grasped
-            + (1 - dist) * grasped * (2 + np.exp(-goal_dist))  # if object is grasped and not within goal dist
-            + (1 - dist) * (1 - grasped) * np.exp(-gripper_dist)  # if object is outside goal dist and ungrasped
+            + (1 - dist)
+            * grasped
+            * (2 + np.exp(-goal_dist))  # if object is grasped and not within goal dist
+            + (1 - dist)
+            * (1 - grasped)
+            * np.exp(-gripper_dist)  # if object is outside goal dist and ungrasped
         )
         return reward / 100.0
 
@@ -150,22 +160,20 @@ class SortEnv(OfflineEnv, gym.Env):
         action_dict = self.array2dict(action)
         obs, reward, done, info = self.env.step(action_dict)
         obs = self.get_obs()
-        
+
         reward = self.compute_sparse_reward(obs)
         done = done or reward > 0.99
 
         info = {}
         goal_pos = self.goal_poses[self.mode][0][:2]
         dist = np.linalg.norm(goal_pos - obs[3:5])
-        info["debug_string"] = (
-           f"{dist:.3f}, {action[-1]:.3f}, is grasped: {obs[-1]}"
-        )
+        info["debug_string"] = f"{dist:.3f}, {action[-1]:.3f}, is grasped: {obs[-1]}"
         info["dense_reward"] = self.compute_reward(obs[None, None], self.mode)[0, 0]
         if done:
-           info["distance_to_goal"] = dist
+            info["distance_to_goal"] = dist
         self.elasped_steps += 1
-        done = done or (self.elasped_steps >= 50) # self.max_episode_steps
-        #info["is_success"] = (reward > 0.99)
+        done = done or (self.elasped_steps >= 50)  # self.max_episode_steps
+        # info["is_success"] = (reward > 0.99)
         return obs, reward, done, info
 
     @timeout_decorator.timeout(2)
@@ -178,8 +186,7 @@ class SortEnv(OfflineEnv, gym.Env):
         info["sparse_reward"] = sparse_reward
         info["distance_to_goal"] = np.linalg.norm(
             # obs[7:9] - self.goal_poses[self.mode][0][:2]
-            obs[3:5]
-            - self.goal_poses[self.mode][0][:2]
+            obs[3:5] - self.goal_poses[self.mode][0][:2]
         )
         self.elasped_steps += 1
         done = self.elasped_steps >= self._max_episode_steps

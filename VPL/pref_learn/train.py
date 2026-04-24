@@ -4,26 +4,26 @@ from collections import defaultdict
 import absl.app
 import absl.flags
 import gym
+import jaxrl_m.envs
 import numpy as np
 import torch
 
-import jaxrl_m.envs
-from pref_learn.utils.utils import (
-    define_flags_with_default,
-    set_random_seed,
-    get_user_flags,
-    WandBLogger,
-    prefix_metrics,
-)
-from pref_learn.models.utils import get_datasets, Annealer, EarlyStopper
-from pref_learn.models.vae import VAEModel, VAEClassifier
+import pref_learn.utils.plot_utils as putils
 from pref_learn.models.mlp import (
-    MLPModel,
     CategoricalModel,
     MeanVarianceModel,
     MLPClassifier,
+    MLPModel,
 )
-import pref_learn.utils.plot_utils as putils
+from pref_learn.models.utils import Annealer, EarlyStopper, get_datasets
+from pref_learn.models.vae import VAEClassifier, VAEModel
+from pref_learn.utils.utils import (
+    WandBLogger,
+    define_flags_with_default,
+    get_user_flags,
+    prefix_metrics,
+    set_random_seed,
+)
 
 FLAGS_DEF = define_flags_with_default(
     env="maze2d-target-v0",  # can change
@@ -215,9 +215,7 @@ def main(_):
                 elif FLAGS.model_type == "Categorical" or FLAGS.model_type == "MeanVar":
                     fig_dict = putils.plot_mlp_samples(gym_env, reward_model)
                 elif FLAGS.model_type == "MLPClassifier":
-                    fig_dict = putils.plot_classifier(
-                        gym_env, reward_model, eval_dataset
-                    )
+                    fig_dict = putils.plot_classifier(gym_env, reward_model, eval_dataset)
                 else:
                     fig_dict = putils.plot_vae(
                         gym_env,
@@ -229,7 +227,6 @@ def main(_):
                 metrics.update(prefix_metrics(fig_dict, "debug_plots"))
             elif "VAE" in FLAGS.model_type:
                 putils.update_posterior(gym_env, reward_model, eval_dataset)
-            
 
             criteria = np.mean(metrics["eval/loss"])
 

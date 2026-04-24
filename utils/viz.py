@@ -1,9 +1,7 @@
 import os
-import numpy as np
 from typing import Optional
 
-
-
+import numpy as np
 
 
 def _run_tsne_and_save(
@@ -14,8 +12,8 @@ def _run_tsne_and_save(
     title: str,
 ) -> None:
     try:
-        from sklearn.manifold import TSNE
         import matplotlib.pyplot as plt
+        from sklearn.manifold import TSNE
     except Exception as err:
         print("t-SNE visualization skipped (missing dependencies).")
         print("Install with: pip install scikit-learn matplotlib")
@@ -66,4 +64,3 @@ def _run_tsne_and_save(
     else:
         plt.savefig(out_png_path + ".png", bbox_inches="tight", dpi=150)
     plt.close()
-

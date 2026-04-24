@@ -1,4 +1,5 @@
 import os
+
 from gym.envs.registration import register
 
 register(
@@ -75,4 +76,3 @@ register(
     max_episode_steps=25,
     kwargs={"mode": 0},
 )
-

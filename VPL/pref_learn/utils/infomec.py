@@ -1,8 +1,9 @@
-import numpy as np
-from sklearn import preprocessing, feature_selection, metrics, linear_model
 from dataclasses import dataclass
 from typing import Dict
+
 import numpy as np
+from sklearn import feature_selection, linear_model, metrics, preprocessing
+
 
 @dataclass
 class InfoMECResult:
@@ -20,7 +21,9 @@ class InfoMECResult:
             "infoc": float(self.infoc),
             "infoe": float(self.infoe),
             "active_latents": self.active_latents.astype(bool).tolist(),
-            "linear_probe_accuracy_per_source": self.linear_probe_accuracy_per_source.astype(float).tolist(),
+            "linear_probe_accuracy_per_source": self.linear_probe_accuracy_per_source.astype(
+                float
+            ).tolist(),
             "source_entropies": self.source_entropies.astype(float).tolist(),
         }
 
@@ -33,11 +36,14 @@ def process_sources(sources):
         )
     return np.stack(processed_sources, axis=1)
 
+
 def _process_latents_for_nmi(latents: np.ndarray, discrete_latents: bool) -> np.ndarray:
     processed_latents = []
     if discrete_latents:
         for j in range(latents.shape[1]):
-            processed_latents.append(preprocessing.LabelEncoder().fit_transform(latents[:, j]))
+            processed_latents.append(
+                preprocessing.LabelEncoder().fit_transform(latents[:, j])
+            )
         processed_latents = np.stack(processed_latents, axis=1)
     else:
         for j in range(latents.shape[1]):
@@ -62,9 +68,12 @@ def _column_entropies(processed_sources: np.ndarray) -> np.ndarray:
         )
     return entropies
 
+
 def compute_nmi(sources: np.ndarray, latents: np.ndarray, discrete_latents: bool = False):
     processed_sources = process_sources(sources)
-    processed_latents = _process_latents_for_nmi(latents, discrete_latents=discrete_latents)
+    processed_latents = _process_latents_for_nmi(
+        latents, discrete_latents=discrete_latents
+    )
 
     ret = np.empty(
         shape=(processed_sources.shape[1], processed_latents.shape[1]),
@@ -76,7 +85,9 @@ def compute_nmi(sources: np.ndarray, latents: np.ndarray, discrete_latents: bool
         for j in range(processed_latents.shape[1]):
             if discrete_latents:
                 ret[i, j] = float(
-                    metrics.mutual_info_score(processed_sources[:, i], processed_latents[:, j])
+                    metrics.mutual_info_score(
+                        processed_sources[:, i], processed_latents[:, j]
+                    )
                 )
             else:
                 mi = feature_selection.mutual_info_classif(
@@ -118,12 +129,17 @@ def logistic_regression(X, y):
     y_pred = model.predict_proba(X)
     return metrics.log_loss(y, y_pred)
 
-def compute_infoe(sources: np.ndarray, latents: np.ndarray, discrete_latents: bool = False):
+
+def compute_infoe(
+    sources: np.ndarray, latents: np.ndarray, discrete_latents: bool = False
+):
     normalized_predictive_information_per_source = []
     linear_probe_accuracy_per_source = []
 
     processed_sources = process_sources(sources)
-    processed_latents = _process_latents_for_infoe(latents, discrete_latents=discrete_latents)
+    processed_latents = _process_latents_for_infoe(
+        latents, discrete_latents=discrete_latents
+    )
 
     for i in range(processed_sources.shape[1]):
         src = processed_sources[:, i].astype(np.int64)
@@ -133,7 +149,8 @@ def compute_infoe(sources: np.ndarray, latents: np.ndarray, discrete_latents: bo
         marginal_source_entropy = logistic_regression(null, src)
 
         normalized_predictive_information_per_source.append(
-            (marginal_source_entropy - predictive_conditional_entropy) / marginal_source_entropy
+            (marginal_source_entropy - predictive_conditional_entropy)
+            / marginal_source_entropy
         )
 
         probe = linear_model.LogisticRegression(
@@ -148,13 +165,19 @@ def compute_infoe(sources: np.ndarray, latents: np.ndarray, discrete_latents: bo
             n_jobs=-1,
         )
         probe.fit(processed_latents, src)
-        linear_probe_accuracy_per_source.append(float(probe.score(processed_latents, src)))
+        linear_probe_accuracy_per_source.append(
+            float(probe.score(processed_latents, src))
+        )
 
     return (
         float(np.mean(normalized_predictive_information_per_source)),
         np.asarray(linear_probe_accuracy_per_source),
     )
-def compute_infomec(sources: np.ndarray, latents: np.ndarray, discrete_latents: bool = False) -> InfoMECResult:
+
+
+def compute_infomec(
+    sources: np.ndarray, latents: np.ndarray, discrete_latents: bool = False
+) -> InfoMECResult:
     """
     Official InfoMEC math, except:
       - when num_sources == 1, remove the modularity normalization term
@@ -181,7 +204,9 @@ def compute_infomec(sources: np.ndarray, latents: np.ndarray, discrete_latents: 
 
     # InfoC
     ratios_c = np.max(pruned_nmi, axis=1) / np.sum(pruned_nmi, axis=1)
-    infoc = float((np.mean(ratios_c) - 1 / num_active_latents) / (1 - 1 / num_active_latents))
+    infoc = float(
+        (np.mean(ratios_c) - 1 / num_active_latents) / (1 - 1 / num_active_latents)
+    )
 
     infoe, probe_acc = compute_infoe(sources, latents, discrete_latents)
 

@@ -1,11 +1,10 @@
 import d4rl
 import gym
-import numpy as np
-from tqdm import tqdm
-import torch
-
-from jaxrl_m.dataset import Dataset
 import matplotlib.pyplot as plt
+import numpy as np
+import torch
+from jaxrl_m.dataset import Dataset
+from tqdm import tqdm
 
 
 def plot_observation_rewards(obs, r):
@@ -20,11 +19,13 @@ def make_env(env_name: str):
     env = gym.make(env_name)
     return env
 
+
 def expand_dataset(dataset, ratio=1):
     ratio = int(ratio)
     for k, v in dataset.items():
-        dataset[k] = np.concatenate([dataset[k]]*ratio)
+        dataset[k] = np.concatenate([dataset[k]] * ratio)
     return dataset
+
 
 def get_dataset(
     env: gym.Env,
@@ -41,7 +42,7 @@ def get_dataset(
     vae_sampling: bool = False,
     sample_freq: int = 10,
     next_step: bool = False,
-    exp_scaling_temp:float = 1.0
+    exp_scaling_temp: float = 1.0,
 ):
     dataset = d4rl.qlearning_dataset(env)
     # if comp_size < 10:
@@ -73,7 +74,7 @@ def get_dataset(
             vae_sampling,
             sample_freq,
             next_step,
-            exp_scaling_temp
+            exp_scaling_temp,
         )
     elif hasattr(env, "relabel_offline_reward") and env.relabel_offline_reward:
         dataset = relabel_rewards_with_env(env, dataset, append_goal)
@@ -91,7 +92,7 @@ def new_get_trj_idx(dataset):
     # If the dones are dropped just split uniformly to relabel the trajectories
     if len(np.argwhere(dones_float)) < 2:
         print("Dones are dropped, splitting uniformly")
-        idx = np.arange(0, len(dones_float), len(dones_float)//50000)
+        idx = np.arange(0, len(dones_float), len(dones_float) // 50000)
         dones_float[idx] = 1.0
         dones_float[-1] = 1.0
     else:
@@ -198,7 +199,9 @@ def relabel_rewards_with_model(
                     if sampled_z is None or traj_id % sample_every == 0:
                         sampled_z = sample_latent(reward_model, env)
                         if vae_norm == "learned_norm" and "Classifier" not in model_type:
-                            norm_z = get_norm(traj_id, sampled_z, env, reward_model, comparison_obs)
+                            norm_z = get_norm(
+                                traj_id, sampled_z, env, reward_model, comparison_obs
+                            )
                     z = torch.tensor(sampled_z)
                 else:
                     if fix_mode < 0:
@@ -220,16 +223,16 @@ def relabel_rewards_with_model(
                     )
 
                     if vae_norm == "learned_norm":
-                        rewards = torch.exp((rewards - norm_z)* 1e-3)
+                        rewards = torch.exp((rewards - norm_z) * 1e-3)
                 elif model_type == "VAEClassifier":
                     rewards = []
                     next_rewards = []
                     batch_size = comp_size // 10
                     for i in range(10):
-                        batch_comp = comparison_obs[
-                            i * batch_size : (i + 1) * batch_size
-                        ]
-                        batch_rewards = reward_model.decode(input_obs, batch_comp, batch_z)
+                        batch_comp = comparison_obs[i * batch_size : (i + 1) * batch_size]
+                        batch_rewards = reward_model.decode(
+                            input_obs, batch_comp, batch_z
+                        )
                         batch_next_rewards = reward_model.decode(
                             input_next_obs, batch_comp, batch_z
                         )
@@ -255,9 +258,7 @@ def relabel_rewards_with_model(
                     batch_z = torch.ones_like(batch_z[:, :2]).cpu().numpy() * goal
                     # Appending the task vector to the observation
                     obs_list.append(np.concatenate([obs, batch_z], axis=-1))
-                    next_obs_list.append(
-                        np.concatenate([next_obs, batch_z], axis=-1)
-                    )
+                    next_obs_list.append(np.concatenate([next_obs, batch_z], axis=-1))
                 else:
                     # Appending the task vector to the observation
                     obs_list.append(np.concatenate([obs, batch_z.cpu().numpy()], axis=-1))
@@ -301,7 +302,7 @@ def relabel_rewards_with_model(
 
     if next_step:
         dataset["rewards"] = dataset["next_rewards"]
-    
+
     return dataset, comparison_obs
 
 
@@ -328,9 +329,7 @@ def relabel_rewards_with_env(env, dataset, append_goal):
                 np.concatenate([obs, np.ones_like(obs[:, :2]) * goal], axis=-1)
             )
             next_obs_list.append(
-                np.concatenate(
-                    [next_obs, np.ones_like(next_obs[:, :2]) * goal], axis=-1
-                )
+                np.concatenate([next_obs, np.ones_like(next_obs[:, :2]) * goal], axis=-1)
             )
     print("Mean mode:", np.mean(modes))
     new_rewards = np.concatenate(new_rewards)

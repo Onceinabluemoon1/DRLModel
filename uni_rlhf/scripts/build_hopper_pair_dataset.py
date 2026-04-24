@@ -143,7 +143,10 @@ def build_pair_dataset(
     print("\n=== FILTERING ===")
     print("invalid comparisons removed:", int(invalid_mask.sum()))
     print("boundary-crossing comparisons removed:", int(boundary_mask.sum()))
-    print("tie/ambiguous comparisons removed:", int((labels == -1).sum()) if drop_ties else 0)
+    print(
+        "tie/ambiguous comparisons removed:",
+        int((labels == -1).sum()) if drop_ties else 0,
+    )
     print("comparisons kept:", int(keep_mask.sum()))
 
     infer_label_mapping(

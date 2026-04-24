@@ -17,17 +17,16 @@
 
 import os
 
-from absl import app
-from absl import flags
-
 import numpy as np
+from absl import app, flags
 
 np.set_printoptions(precision=3, suppress=True)
-import jaxrl_m.envs
-import gym
-from ravens.dataset import Dataset
-from collections import defaultdict
 import pickle
+from collections import defaultdict
+
+import gym
+import jaxrl_m.envs
+from ravens.dataset import Dataset
 
 flags.DEFINE_string("data_dir", ".", "")
 flags.DEFINE_bool("disp", False, "")
@@ -83,13 +82,13 @@ def rollout_trajectory(env, agent, max_steps):
 
 def convert_traj(env, traj):
     ## quat = obs[9:13]
-    #delta_pos = traj["next_obs"][:, 0:3] - traj["obs"][:, 0:3]
+    # delta_pos = traj["next_obs"][:, 0:3] - traj["obs"][:, 0:3]
     ## delta_pos = np.clip(delta_pos, -1, 1)
-    #suction = np.array([step["suction_cmd"] for step in traj["action_dict"]])[:, None]
+    # suction = np.array([step["suction_cmd"] for step in traj["action_dict"]])[:, None]
     ## import pdb; pdb.set_trace()
-    #action = np.concatenate([delta_pos, suction], axis=1)
-    #assert len(action) == len(traj["obs"])
-    #traj["action"] = action
+    # action = np.concatenate([delta_pos, suction], axis=1)
+    # assert len(action) == len(traj["obs"])
+    # traj["action"] = action
     pose = np.stack([np.array(step["move_cmd"][0]) for step in traj["action_dict"]])
     suction = np.array([step["suction_cmd"] for step in traj["action_dict"]])[:, None]
     action = np.concatenate([pose, suction], axis=1)
@@ -110,23 +109,26 @@ def test_traj(env, traj, init_pose):
         #     break
     env.unwrapped.task.debug = False
 
+
 def plot_traj(traj):
     import matplotlib.pyplot as plt
-    #plt.plot(traj["obs"][:, 0], traj["obs"][:, 1], label="obs")
-    #plt.plot(traj["next_obs"][:, 0], traj["next_obs"][:, 1], label="next_obs")
+
+    # plt.plot(traj["obs"][:, 0], traj["obs"][:, 1], label="obs")
+    # plt.plot(traj["next_obs"][:, 0], traj["next_obs"][:, 1], label="next_obs")
     fig, axs = plt.subplots(2, 2, figsize=(10, 10))
     axs = axs.flatten()
-    #import pdb; pdb.set_trace()
-    axs[0].plot(traj['obs'][:, 3], traj['obs'][:, 4], label="box_pose")
+    # import pdb; pdb.set_trace()
+    axs[0].plot(traj["obs"][:, 3], traj["obs"][:, 4], label="box_pose")
     axs[0].set_title("box_pose")
-    axs[1].plot(traj['rewards'], label="rewards")
+    axs[1].plot(traj["rewards"], label="rewards")
     axs[1].set_title("rewards")
-    axs[2].plot(traj['done'], label="done")
+    axs[2].plot(traj["done"], label="done")
     axs[2].set_title("done")
-    axs[3].plot(traj['action'][:, -1], label="suction_cmd")
+    axs[3].plot(traj["action"][:, -1], label="suction_cmd")
     axs[3].set_title("suction_cmd")
     plt.legend()
     plt.show()
+
 
 def dump_traj(save_dir, traj, episode):
     with open(os.path.join(save_dir, f"traj_{episode}.pkl"), "wb") as f:
@@ -134,7 +136,6 @@ def dump_traj(save_dir, traj, episode):
 
 
 def main(unused_argv):
-
     env = gym.make(FLAGS.env_name, disp=FLAGS.disp, debug=True)
     task = env.unwrapped.task
     agent = task.oracle(env.unwrapped.env, steps_per_seg=FLAGS.steps_per_seg)
@@ -154,7 +155,7 @@ def main(unused_argv):
 
             # np.random.seed(seed)
             # test_traj(env, traj, init_pose)
-            #plot_traj(traj)
+            # plot_traj(traj)
         except Exception as e:
             seed += 2
             print(e)

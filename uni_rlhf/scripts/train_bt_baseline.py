@@ -39,12 +39,10 @@ class TCNBlock(nn.Module):
         padding = ((kernel_size - 1) * dilation) // 2
 
         self.conv1 = nn.Conv1d(
-            channels, channels, kernel_size,
-            padding=padding, dilation=dilation
+            channels, channels, kernel_size, padding=padding, dilation=dilation
         )
         self.conv2 = nn.Conv1d(
-            channels, channels, kernel_size,
-            padding=padding, dilation=dilation
+            channels, channels, kernel_size, padding=padding, dilation=dilation
         )
         self.norm1 = nn.LayerNorm(channels)
         self.norm2 = nn.LayerNorm(channels)
@@ -54,12 +52,12 @@ class TCNBlock(nn.Module):
         # x: (B, C, T)
         residual = x
 
-        out = self.conv1(x)              # (B, C, T)
-        out = out.transpose(1, 2)        # (B, T, C)
+        out = self.conv1(x)  # (B, C, T)
+        out = out.transpose(1, 2)  # (B, T, C)
         out = self.norm1(out)
         out = F.gelu(out)
         out = self.dropout(out)
-        out = out.transpose(1, 2)        # (B, C, T)
+        out = out.transpose(1, 2)  # (B, C, T)
 
         out = self.conv2(out)
         out = out.transpose(1, 2)
@@ -83,7 +81,7 @@ class TemporalEncoder(nn.Module):
         super().__init__()
         self.input_proj = nn.Conv1d(input_dim, hidden_dim, kernel_size=1)
 
-        dilations = [2 ** i for i in range(num_blocks)]
+        dilations = [2**i for i in range(num_blocks)]
         self.blocks = nn.ModuleList(
             [
                 TCNBlock(
@@ -106,9 +104,9 @@ class TemporalEncoder(nn.Module):
         for block in self.blocks:
             x = block(x)
 
-        x = x.transpose(1, 2)   # (B, T, H)
+        x = x.transpose(1, 2)  # (B, T, H)
         x = self.out_norm(x)
-        x = x.mean(dim=1)       # mean pool over time -> (B, H)
+        x = x.mean(dim=1)  # mean pool over time -> (B, H)
         return x
 
 
@@ -197,7 +195,9 @@ class TrainConfig:
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
 
 
-def binary_accuracy_from_logits(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+def binary_accuracy_from_logits(
+    logits: torch.Tensor, targets: torch.Tensor
+) -> torch.Tensor:
     preds = (logits >= 0).long()
     return (preds == targets).float().mean()
 
@@ -241,7 +241,9 @@ def run_epoch(
     }
 
 
-def build_loaders(config: TrainConfig) -> Tuple[DataLoader, DataLoader, HopperPairDataset]:
+def build_loaders(
+    config: TrainConfig,
+) -> Tuple[DataLoader, DataLoader, HopperPairDataset]:
     dataset = HopperPairDataset(
         npz_path=config.dataset_path,
         normalize_obs=config.normalize_obs,
@@ -280,7 +282,9 @@ def save_json(path: Path, obj: Dict) -> None:
 
 
 def parse_args() -> TrainConfig:
-    parser = argparse.ArgumentParser(description="Train BT baseline on Hopper pairwise preference data.")
+    parser = argparse.ArgumentParser(
+        description="Train BT baseline on Hopper pairwise preference data."
+    )
     parser.add_argument(
         "--dataset-path",
         type=str,
@@ -288,7 +292,7 @@ def parse_args() -> TrainConfig:
     parser.add_argument(
         "--output-dir",
         type=str,
-     )
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--num-epochs", type=int, default=20)
@@ -303,7 +307,9 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--normalize-obs", action="store_true")
     parser.add_argument("--normalize-act", action="store_true")
     parser.add_argument("--num-workers", type=int, default=0)
-    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument(
+        "--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu"
+    )
 
     args = parser.parse_args()
 

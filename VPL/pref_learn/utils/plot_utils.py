@@ -2,14 +2,13 @@ import matplotlib
 import matplotlib.cm as cm
 import matplotlib.pyplot as plt
 import numpy as np
+import torch
+import wandb
+from pref_learn.models.utils import get_all_posterior, get_biased
+from scipy import stats
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
-from scipy import stats
-import torch
-import wandb
-
-from pref_learn.models.utils import get_all_posterior, get_biased
 
 
 def plot_reward(ax, obs, r, no_norm=False):
@@ -88,6 +87,7 @@ def plot_classifier(env, reward_model, dataset):
         plot_dict["gt"] = env.plot_gt(wandb_log=True)
     return plot_dict
 
+
 def plot_mlp_samples(env, reward_model, samples=4):
     obs = env.get_obs_grid()
     obs_copy = np.copy(obs)
@@ -96,9 +96,7 @@ def plot_mlp_samples(env, reward_model, samples=4):
     plot_dict = plot_mlp(env, reward_model)
     fig, axs = plt.subplots(samples // 2, 2, figsize=(20, 16))
     for i, ax in enumerate(axs.flatten()):
-        plot_reward(
-            ax, obs_copy, reward_model.sample_reward(obs).detach().cpu().numpy()
-        )
+        plot_reward(ax, obs_copy, reward_model.sample_reward(obs).detach().cpu().numpy())
         ax.set_title(f"reward model sample: {i}")
 
     plot_dict["reward_samples"] = wandb.Image(fig)
@@ -142,16 +140,16 @@ def plot_latents(env, reward_model, dataset):
     latents = get_all_posterior(env, reward_model, dataset, 128)
     for mode_n in range(modes_n):
         z = latents[mode_n]
-        #X_embedded = PCA(n_components=2).fit_transform(z)
-        X_embedded = TSNE(n_components=2, learning_rate='auto', init='random', perplexity=10).fit_transform(z)
+        # X_embedded = PCA(n_components=2).fit_transform(z)
+        X_embedded = TSNE(
+            n_components=2, learning_rate="auto", init="random", perplexity=10
+        ).fit_transform(z)
         ax1.scatter(X_embedded[:, 0], X_embedded[:, 1], c=f"C{mode_n}")
 
         if reward_model.flow_prior:
             transformed_z = (
                 reward_model.flow(
-                    torch.from_numpy(z)
-                    .float()
-                    .to(next(reward_model.parameters()).device)
+                    torch.from_numpy(z).float().to(next(reward_model.parameters()).device)
                 )[0]
                 .detach()
                 .cpu()
@@ -165,12 +163,15 @@ def plot_latents(env, reward_model, dataset):
     plt.close(fig)
     return dict(latent_plot=wandb.Image(fig))
 
+
 def plot_z(obs, env, reward_model, latents, comp_obs=None):
     assert latents.shape[0] == env.get_num_modes()
     assert latents.shape[2] == reward_model.latent_dim
     num_samples = latents.shape[1]
     modes_n = env.get_num_modes()
-    fig, axs = plt.subplots(modes_n, num_samples, figsize=(10*num_samples, 8*env.get_num_modes()))
+    fig, axs = plt.subplots(
+        modes_n, num_samples, figsize=(10 * num_samples, 8 * env.get_num_modes())
+    )
     obs_copy = np.copy(obs)
     obs = torch.from_numpy(obs).float().to(next(reward_model.parameters()).device)
 
@@ -196,6 +197,7 @@ def plot_z(obs, env, reward_model, latents, comp_obs=None):
     plt.close(fig)
     return wandb.Image(fig)
 
+
 def plot_vae(env, reward_model, dataset, classifier=False, num_samples=4):
     obs = env.get_obs_grid()
     comp_obs = None
@@ -203,15 +205,13 @@ def plot_vae(env, reward_model, dataset, classifier=False, num_samples=4):
         comp_obs = dataset.get_mode_data(batch_size=50)[0]["observations"]
         comp_obs = comp_obs.reshape(-1, obs.shape[-1])
         comp_obs = (
-            torch.from_numpy(comp_obs)
-            .float()
-            .to(next(reward_model.parameters()).device)
+            torch.from_numpy(comp_obs).float().to(next(reward_model.parameters()).device)
         )
     plot_dict = plot_prior(reward_model)
     plot_dict.update(plot_latents(env, reward_model, dataset))
     n = env.get_num_modes()
     prior_latents = (
-        reward_model.sample_prior(size=num_samples*n)
+        reward_model.sample_prior(size=num_samples * n)
         .view(n, num_samples, reward_model.latent_dim)
         .detach()
         .cpu()
@@ -223,9 +223,7 @@ def plot_vae(env, reward_model, dataset, classifier=False, num_samples=4):
 
     reward_model.update_posteriors(posterior_latents, biased_latents)
 
-    plot_dict["prior"] = plot_z(
-        obs, env, reward_model, prior_latents, comp_obs=comp_obs
-    )
+    plot_dict["prior"] = plot_z(obs, env, reward_model, prior_latents, comp_obs=comp_obs)
     plot_dict["posterior"] = plot_z(
         obs, env, reward_model, posterior_latents, comp_obs=comp_obs
     )
@@ -235,6 +233,7 @@ def plot_vae(env, reward_model, dataset, classifier=False, num_samples=4):
     if hasattr(env, "plot_gt"):
         plot_dict["gt"] = env.plot_gt(wandb_log=True)
     return plot_dict
+
 
 def update_posterior(env, reward_model, dataset):
     biased_latents = get_biased(env, reward_model, dataset)

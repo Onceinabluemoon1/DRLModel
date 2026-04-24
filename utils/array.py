@@ -1,4 +1,5 @@
 import os
+
 import numpy as np
 
 
@@ -23,4 +24,3 @@ def _load_array(path: str) -> np.ndarray:
         return np.loadtxt(path, delimiter=",")
     else:
         raise ValueError("Unsupported file extension. Use .npy or .csv.")
-

@@ -1,10 +1,11 @@
-import pathlib
-import numpy as np
-import pickle
-import jaxrl_m.envs
-import gym
 import gzip
+import pathlib
+import pickle
+
+import gym
 import h5py
+import jaxrl_m.envs
+import numpy as np
 
 
 def get_data(path):
@@ -47,12 +48,6 @@ def get_data(path):
         last_poses,
         infos,
     )
-
-
-import numpy as np
-import pickle
-import gzip
-import h5py
 
 
 def reset_data():

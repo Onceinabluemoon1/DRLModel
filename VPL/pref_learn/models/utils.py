@@ -3,9 +3,8 @@ import pickle
 
 import numpy as np
 import torch
-from torch.utils.data import Dataset, DataLoader
-
 from pref_learn.utils.data_utils import get_labels
+from torch.utils.data import DataLoader, Dataset
 
 
 def get_datasets(query_path, observation_dim, action_dim, batch_size, set_length):
@@ -17,7 +16,7 @@ def get_datasets(query_path, observation_dim, action_dim, batch_size, set_length
     assert batch["actions"].shape[-1] == action_dim
     if set_length < 0:
         set_length = batch["observations"].shape[1]
-    
+
     eval_data_size = int(0.1 * len(batch["observations"]))
     train_data_size = len(batch["observations"]) - eval_data_size
 
@@ -159,8 +158,12 @@ def get_latent(batch, env, reward_model, mode, num_samples):
     obs1 = batch["observations"]
     obs2 = batch["observations_2"]
     obs_dim = obs1.shape[-1]
-    seg_reward_1 = env.compute_reward(obs1.reshape(-1, reward_model.size_segment, obs_dim), mode)
-    seg_reward_2 = env.compute_reward(obs2.reshape(-1, reward_model.size_segment, obs_dim), mode)
+    seg_reward_1 = env.compute_reward(
+        obs1.reshape(-1, reward_model.size_segment, obs_dim), mode
+    )
+    seg_reward_2 = env.compute_reward(
+        obs2.reshape(-1, reward_model.size_segment, obs_dim), mode
+    )
 
     seg_reward_1 = seg_reward_1.reshape(
         num_samples, reward_model.annotation_size, reward_model.size_segment, -1

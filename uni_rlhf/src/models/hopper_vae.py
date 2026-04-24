@@ -20,12 +20,10 @@ class TCNBlock(nn.Module):
         padding = ((kernel_size - 1) * dilation) // 2
 
         self.conv1 = nn.Conv1d(
-            channels, channels, kernel_size,
-            padding=padding, dilation=dilation
+            channels, channels, kernel_size, padding=padding, dilation=dilation
         )
         self.conv2 = nn.Conv1d(
-            channels, channels, kernel_size,
-            padding=padding, dilation=dilation
+            channels, channels, kernel_size, padding=padding, dilation=dilation
         )
         self.norm1 = nn.LayerNorm(channels)
         self.norm2 = nn.LayerNorm(channels)
@@ -36,11 +34,11 @@ class TCNBlock(nn.Module):
         residual = x
 
         out = self.conv1(x)
-        out = out.transpose(1, 2)   # (B, T, C)
+        out = out.transpose(1, 2)  # (B, T, C)
         out = self.norm1(out)
         out = F.gelu(out)
         out = self.dropout(out)
-        out = out.transpose(1, 2)   # (B, C, T)
+        out = out.transpose(1, 2)  # (B, C, T)
 
         out = self.conv2(out)
         out = out.transpose(1, 2)
@@ -64,7 +62,7 @@ class TemporalEncoder(nn.Module):
         super().__init__()
         self.input_proj = nn.Conv1d(input_dim, hidden_dim, kernel_size=1)
 
-        dilations = [2 ** i for i in range(num_blocks)]
+        dilations = [2**i for i in range(num_blocks)]
         self.blocks = nn.ModuleList(
             [
                 TCNBlock(
@@ -80,20 +78,22 @@ class TemporalEncoder(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: (B, T, D)
-        x = x.transpose(1, 2)      # (B, D, T)
-        x = self.input_proj(x)     # (B, H, T)
+        x = x.transpose(1, 2)  # (B, D, T)
+        x = self.input_proj(x)  # (B, H, T)
 
         for block in self.blocks:
             x = block(x)
 
-        x = x.transpose(1, 2)      # (B, T, H)
+        x = x.transpose(1, 2)  # (B, T, H)
         x = self.out_norm(x)
-        x = x.mean(dim=1)          # (B, H)
+        x = x.mean(dim=1)  # (B, H)
         return x
 
 
 class LabelEncoder(nn.Module):
-    def __init__(self, num_classes: int, embed_dim: int, hidden_dim: int, dropout: float) -> None:
+    def __init__(
+        self, num_classes: int, embed_dim: int, hidden_dim: int, dropout: float
+    ) -> None:
         super().__init__()
         self.embedding = nn.Embedding(num_classes, embed_dim)
         self.mlp = nn.Sequential(
@@ -115,6 +115,7 @@ class TemporalDecoder(nn.Module):
     Decodes a latent z into a fixed-length sequence using
     latent projection -> temporal tensor -> TCN-style refinement.
     """
+
     def __init__(
         self,
         latent_dim: int,
@@ -136,7 +137,7 @@ class TemporalDecoder(nn.Module):
 
         self.pos_embedding = nn.Parameter(torch.zeros(1, seq_len, hidden_dim))
 
-        dilations = [2 ** i for i in range(num_blocks)]
+        dilations = [2**i for i in range(num_blocks)]
         self.blocks = nn.ModuleList(
             [
                 TCNBlock(
@@ -164,7 +165,7 @@ class TemporalDecoder(nn.Module):
         x = x.transpose(1, 2)  # (B, T, H)
 
         x = self.out_norm(x)
-        x = self.out_proj(x)   # (B, T, output_dim)
+        x = self.out_proj(x)  # (B, T, output_dim)
         return x
 
 
@@ -191,6 +192,7 @@ class HopperPairVAE(nn.Module):
       - reconstruct x1_obs, x1_act, x2_obs, x2_act
       - reconstruct preference y
     """
+
     def __init__(self, config: HopperVAEConfig) -> None:
         super().__init__()
         self.config = config
@@ -219,8 +221,8 @@ class HopperPairVAE(nn.Module):
         # pair features:
         # h1_obs, h1_act, h2_obs, h2_act, diffs, label_h
         pair_dim = (
-            config.hidden_dim * 4   # h1_obs, h1_act, h2_obs, h2_act
-            + config.hidden_dim * 2 # obs diff, act diff
+            config.hidden_dim * 4  # h1_obs, h1_act, h2_obs, h2_act
+            + config.hidden_dim * 2  # obs diff, act diff
             + config.label_hidden_dim
         )
 

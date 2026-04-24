@@ -10,13 +10,19 @@ import sys
 from pathlib import Path
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--inputs", nargs="+", required=True, help="Pairs like beta1=path/to/best_model.pt")
+    p.add_argument(
+        "--inputs",
+        nargs="+",
+        required=True,
+        help="Pairs like beta1=path/to/best_model.pt",
+    )
     p.add_argument("--dataset", required=True)
     p.add_argument("--env", required=True)
     p.add_argument("--outdir", required=True)
@@ -49,16 +55,26 @@ def main():
         cmd = [
             sys.executable,
             str(script_path),
-            "--ckpt", ckpt,
-            "--dataset", args.dataset,
-            "--env", args.env,
-            "--outdir", str(run_dir),
-            "--split", args.split,
-            "--source-keys", args.source_keys,
-            "--batch-size", str(args.batch_size),
-            "--set-length", str(args.set_length),
-            "--num-bins", str(args.num_bins),
-            "--device", args.device,
+            "--ckpt",
+            ckpt,
+            "--dataset",
+            args.dataset,
+            "--env",
+            args.env,
+            "--outdir",
+            str(run_dir),
+            "--split",
+            args.split,
+            "--source-keys",
+            args.source_keys,
+            "--batch-size",
+            str(args.batch_size),
+            "--set-length",
+            str(args.set_length),
+            "--num-bins",
+            str(args.num_bins),
+            "--device",
+            args.device,
         ]
         if args.discrete_latents:
             cmd.append("--discrete-latents")
@@ -69,17 +85,21 @@ def main():
         with open(metrics_path, "r") as f:
             data = json.load(f)
 
-        rows.append({
-            "name": name,
-            "ckpt": ckpt,
-            "metrics_path": str(metrics_path),
-            "infom": data.get("infom"),
-            "infoc": data.get("infoc"),
-            "infoe": data.get("infoe"),
-            "active_latents": sum(bool(x) for x in data.get("active_latents", [])),
-            "latent_dim": data.get("latent_dim"),
-            "first_probe_acc": (data.get("linear_probe_accuracy_per_source") or [None])[0],
-        })
+        rows.append(
+            {
+                "name": name,
+                "ckpt": ckpt,
+                "metrics_path": str(metrics_path),
+                "infom": data.get("infom"),
+                "infoc": data.get("infoc"),
+                "infoe": data.get("infoe"),
+                "active_latents": sum(bool(x) for x in data.get("active_latents", [])),
+                "latent_dim": data.get("latent_dim"),
+                "first_probe_acc": (
+                    data.get("linear_probe_accuracy_per_source") or [None]
+                )[0],
+            }
+        )
 
     csv_path = Path(args.outdir) / "infomec_summary.csv"
     with open(csv_path, "w", newline="") as f:

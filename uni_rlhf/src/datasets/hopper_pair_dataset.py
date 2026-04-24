@@ -131,17 +131,27 @@ class HopperPairDataset(Dataset):
         }
         bad = {k: v for k, v in expected.items() if v != n}
         if bad:
-            raise ValueError(f"Dataset arrays have inconsistent lengths relative to y={n}: {bad}")
+            raise ValueError(
+                f"Dataset arrays have inconsistent lengths relative to y={n}: {bad}"
+            )
 
         if self.x1_obs.shape != self.x2_obs.shape:
-            raise ValueError(f"x1_obs and x2_obs shapes differ: {self.x1_obs.shape} vs {self.x2_obs.shape}")
+            raise ValueError(
+                f"x1_obs and x2_obs shapes differ: {self.x1_obs.shape} vs {self.x2_obs.shape}"
+            )
         if self.x1_act.shape != self.x2_act.shape:
-            raise ValueError(f"x1_act and x2_act shapes differ: {self.x1_act.shape} vs {self.x2_act.shape}")
+            raise ValueError(
+                f"x1_act and x2_act shapes differ: {self.x1_act.shape} vs {self.x2_act.shape}"
+            )
 
         if self.x1_obs.ndim != 3:
-            raise ValueError(f"x1_obs must have shape (N, T, obs_dim), got {self.x1_obs.shape}")
+            raise ValueError(
+                f"x1_obs must have shape (N, T, obs_dim), got {self.x1_obs.shape}"
+            )
         if self.x1_act.ndim != 3:
-            raise ValueError(f"x1_act must have shape (N, T, act_dim), got {self.x1_act.shape}")
+            raise ValueError(
+                f"x1_act must have shape (N, T, act_dim), got {self.x1_act.shape}"
+            )
 
         if self.x1_obs.shape[1] != self.x1_act.shape[1]:
             raise ValueError(
@@ -199,9 +209,7 @@ class HopperPairDataset(Dataset):
             "seg_len": self.seg_len,
             "obs_dim": self.obs_dim,
             "act_dim": self.act_dim,
-            "label_counts": {
-                int(v): int((self.y == v).sum()) for v in np.unique(self.y)
-            },
+            "label_counts": {int(v): int((self.y == v).sum()) for v in np.unique(self.y)},
             "x1_return_mean": float(self.x1_return.mean()),
             "x2_return_mean": float(self.x2_return.mean()),
         }
@@ -217,7 +225,9 @@ class HopperPairDataset(Dataset):
         return stats
 
 
-def hopper_pair_collate_fn(batch: list[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
+def hopper_pair_collate_fn(
+    batch: list[Dict[str, torch.Tensor]],
+) -> Dict[str, torch.Tensor]:
     """
     Collate function for fixed-length Hopper segments.
 

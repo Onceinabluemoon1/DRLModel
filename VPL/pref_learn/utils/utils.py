@@ -1,27 +1,23 @@
-import random
+import os
 import pprint
+import random
+import tempfile
 import time
 import uuid
-import tempfile
-import os
 from copy import copy
 from socket import gethostname
-import cloudpickle as pickle
-
-import numpy as np
 
 import absl.flags
+import cloudpickle as pickle
+import numpy as np
+import wandb
 from absl import logging
 from ml_collections import ConfigDict
-from ml_collections.config_flags import config_flags
 from ml_collections.config_dict import config_dict
-
-import wandb
-
+from ml_collections.config_flags import config_flags
 
 
 class Timer(object):
-
     def __init__(self):
         self._time = None
 
@@ -37,14 +33,13 @@ class Timer(object):
 
 
 class WandBLogger(object):
-
     @staticmethod
     def get_default_config(updates=None):
         config = ConfigDict()
         config.online = True
-        config.prefix = ''
-        config.project = os.environ.get('WANDB_PROJECT', 'JaxPref')
-        config.output_dir = './reward_model'
+        config.prefix = ""
+        config.project = os.environ.get("WANDB_PROJECT", "JaxPref")
+        config.output_dir = "./reward_model"
         config.random_delay = 0.0
         config.group = config_dict.placeholder(str)
         config.experiment_id = config_dict.placeholder(str)
@@ -61,10 +56,10 @@ class WandBLogger(object):
         if self.config.experiment_id is None:
             self.config.experiment_id = uuid.uuid4().hex
 
-        if self.config.prefix != '':
-            self.config.project = '{}--{}'.format(self.config.prefix, self.config.project)
+        if self.config.prefix != "":
+            self.config.project = "{}--{}".format(self.config.prefix, self.config.project)
 
-        if self.config.output_dir == '':
+        if self.config.output_dir == "":
             self.config.output_dir = tempfile.mkdtemp()
         else:
             # self.config.output_dir = os.path.join(self.config.output_dir, self.config.experiment_id)
@@ -72,8 +67,8 @@ class WandBLogger(object):
 
         self._variant = copy(variant)
 
-        if 'hostname' not in self._variant:
-            self._variant['hostname'] = gethostname()
+        if "hostname" not in self._variant:
+            self._variant["hostname"] = gethostname()
 
         if self.config.random_delay > 0:
             time.sleep(np.random.uniform(0, self.config.random_delay))
@@ -91,7 +86,7 @@ class WandBLogger(object):
                 start_method="thread",
                 _disable_stats=True,
             ),
-            mode='online' if self.config.online else 'offline',
+            mode="online" if self.config.online else "offline",
         )
 
     def log(self, *args, **kwargs):
@@ -102,7 +97,7 @@ class WandBLogger(object):
         self.run.log({key: im}, step=step)
 
     def save_pickle(self, obj, filename):
-        with open(os.path.join(self.config.output_dir, filename), 'wb') as fout:
+        with open(os.path.join(self.config.output_dir, filename), "wb") as fout:
             pickle.dump(obj, fout)
 
     @property
@@ -124,15 +119,15 @@ def define_flags_with_default(**kwargs):
             config_flags.DEFINE_config_dict(key, val)
         elif isinstance(val, bool):
             # Note that True and False are instances of int.
-            absl.flags.DEFINE_bool(key, val, 'automatically defined flag')
+            absl.flags.DEFINE_bool(key, val, "automatically defined flag")
         elif isinstance(val, int):
-            absl.flags.DEFINE_integer(key, val, 'automatically defined flag')
+            absl.flags.DEFINE_integer(key, val, "automatically defined flag")
         elif isinstance(val, float):
-            absl.flags.DEFINE_float(key, val, 'automatically defined flag')
+            absl.flags.DEFINE_float(key, val, "automatically defined flag")
         elif isinstance(val, str):
-            absl.flags.DEFINE_string(key, val, 'automatically defined flag')
+            absl.flags.DEFINE_string(key, val, "automatically defined flag")
         else:
-            raise ValueError('Incorrect value type')
+            raise ValueError("Incorrect value type")
     return kwargs
 
 
@@ -143,9 +138,12 @@ def set_random_seed(seed):
 
 def print_flags(flags, flags_def):
     logging.info(
-        'Running training with hyperparameters: \n{}'.format(
+        "Running training with hyperparameters: \n{}".format(
             pprint.pformat(
-                ['{}: {}'.format(key, val) for key, val in get_user_flags(flags, flags_def).items()]
+                [
+                    "{}: {}".format(key, val)
+                    for key, val in get_user_flags(flags, flags_def).items()
+                ]
             )
         )
     )
@@ -167,7 +165,7 @@ def flatten_config_dict(config, prefix=None):
     output = {}
     for key, val in config.items():
         if prefix is not None:
-            next_prefix = '{}.{}'.format(prefix, key)
+            next_prefix = "{}.{}".format(prefix, key)
         else:
             next_prefix = key
         if isinstance(val, ConfigDict):
@@ -178,11 +176,9 @@ def flatten_config_dict(config, prefix=None):
 
 
 def save_pickle(obj, filename, output_dir):
-    with open(os.path.join(output_dir, filename), 'wb') as fout:
+    with open(os.path.join(output_dir, filename), "wb") as fout:
         pickle.dump(obj, fout)
-            
-def prefix_metrics(metrics, prefix):
-    return {
-        '{}/{}'.format(prefix, key): value for key, value in metrics.items()
-    }
 
+
+def prefix_metrics(metrics, prefix):
+    return {"{}/{}".format(prefix, key): value for key, value in metrics.items()}

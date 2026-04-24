@@ -71,7 +71,7 @@ def parse_args() -> TrainConfig:
     parser.add_argument(
         "--output-dir",
         type=str,
-)
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--num-epochs", type=int, default=40)
@@ -89,7 +89,9 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--normalize-obs", action="store_true")
     parser.add_argument("--normalize-act", action="store_true")
     parser.add_argument("--num-workers", type=int, default=0)
-    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument(
+        "--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu"
+    )
 
     parser.add_argument("--obs-loss-weight", type=float, default=1.0)
     parser.add_argument("--act-loss-weight", type=float, default=1.0)
@@ -134,7 +136,9 @@ def save_json(path: Path, obj: Dict) -> None:
         json.dump(obj, f, indent=2)
 
 
-def build_loaders(config: TrainConfig) -> Tuple[DataLoader, DataLoader, HopperPairDataset]:
+def build_loaders(
+    config: TrainConfig,
+) -> Tuple[DataLoader, DataLoader, HopperPairDataset]:
     dataset = HopperPairDataset(
         npz_path=config.dataset_path,
         normalize_obs=config.normalize_obs,
@@ -172,15 +176,15 @@ def get_beta(epoch: int, beta_max: float, warmup_epochs: int) -> float:
     return beta_max * progress
 
 
-def compute_metrics(outputs: Dict[str, torch.Tensor], batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-    obs_loss = (
-        F.mse_loss(outputs["x1_obs_recon"], batch["x1_obs"]) +
-        F.mse_loss(outputs["x2_obs_recon"], batch["x2_obs"])
+def compute_metrics(
+    outputs: Dict[str, torch.Tensor], batch: Dict[str, torch.Tensor]
+) -> Dict[str, torch.Tensor]:
+    obs_loss = F.mse_loss(outputs["x1_obs_recon"], batch["x1_obs"]) + F.mse_loss(
+        outputs["x2_obs_recon"], batch["x2_obs"]
     )
 
-    act_loss = (
-        F.mse_loss(outputs["x1_act_recon"], batch["x1_act"]) +
-        F.mse_loss(outputs["x2_act_recon"], batch["x2_act"])
+    act_loss = F.mse_loss(outputs["x1_act_recon"], batch["x1_act"]) + F.mse_loss(
+        outputs["x2_act_recon"], batch["x2_act"]
     )
 
     pref_loss = F.binary_cross_entropy_with_logits(
@@ -231,10 +235,10 @@ def run_epoch(
         metrics = compute_metrics(outputs, batch)
 
         loss = (
-            config.obs_loss_weight * metrics["obs_loss"] +
-            config.act_loss_weight * metrics["act_loss"] +
-            config.pref_loss_weight * metrics["pref_loss"] +
-            beta * metrics["kl"]
+            config.obs_loss_weight * metrics["obs_loss"]
+            + config.act_loss_weight * metrics["act_loss"]
+            + config.pref_loss_weight * metrics["pref_loss"]
+            + beta * metrics["kl"]
         )
 
         if is_train:

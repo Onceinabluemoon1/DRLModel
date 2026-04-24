@@ -84,7 +84,7 @@ class RadialFlow(nn.Module):
             return 1.0 / (a + r)
 
         def h_prime(r):
-            return -h(r) ** 2
+            return -(h(r) ** 2)
 
         a = torch.exp(self.a)
         b = -a + m(self.b)

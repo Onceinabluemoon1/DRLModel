@@ -1,6 +1,6 @@
 import os
-import sys
 import pickle
+import sys
 
 os.environ["MUJOCO_GL"] = "egl"
 os.environ["D4RL_SUPPRESS_IMPORT_ERROR"] = "1"

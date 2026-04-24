@@ -5,14 +5,14 @@ import pickle
 from typing import List, Tuple
 
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
-from sklearn.decomposition import PCA
-
 from pref_learn.utils.infomec import compute_infomec
+from sklearn.decomposition import PCA
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 
 
 def parse_args():
@@ -84,7 +84,9 @@ def resolve_source_keys(batch: dict, source_keys_arg: str) -> List[str]:
     return resolved
 
 
-def infer_source_columns(raw: np.ndarray, key: str, num_bins: int) -> Tuple[np.ndarray, List[str]]:
+def infer_source_columns(
+    raw: np.ndarray, key: str, num_bins: int
+) -> Tuple[np.ndarray, List[str]]:
     arr = np.asarray(raw)
 
     if arr.ndim == 1:
@@ -138,7 +140,13 @@ def batched_encode(model, obs1, obs2, labels, batch_size, device):
     return np.concatenate(means, axis=0)
 
 
-def save_heatmap(mat: np.ndarray, row_names: List[str], col_names: List[str], title: str, outpath: str):
+def save_heatmap(
+    mat: np.ndarray,
+    row_names: List[str],
+    col_names: List[str],
+    title: str,
+    outpath: str,
+):
     plt.figure(figsize=(max(6, len(col_names) * 0.35), max(3, len(row_names) * 0.55)))
     im = plt.imshow(mat, aspect="auto")
     plt.colorbar(im)
@@ -216,12 +224,16 @@ def main():
     source_cols = []
     source_names = []
     for key in source_keys:
-        cols, names = infer_source_columns(np.asarray(batch[key])[idx], key, args.num_bins)
+        cols, names = infer_source_columns(
+            np.asarray(batch[key])[idx], key, args.num_bins
+        )
         source_cols.append(cols)
         source_names.extend(names)
     sources = np.concatenate(source_cols, axis=1)
 
-    result = compute_infomec(sources=sources, latents=latents, discrete_latents=args.discrete_latents)
+    result = compute_infomec(
+        sources=sources, latents=latents, discrete_latents=args.discrete_latents
+    )
 
     np.save(os.path.join(args.outdir, "latents.npy"), latents)
     np.save(os.path.join(args.outdir, "sources.npy"), sources)
@@ -237,8 +249,18 @@ def main():
     )
 
     first_source = sources[:, 0]
-    pca_var = maybe_save_pca(latents, first_source, os.path.join(args.outdir, "pca_by_first_source.png"), f"PCA colored by {source_names[0]}")
-    maybe_save_lda(latents, first_source, os.path.join(args.outdir, "lda_by_first_source.png"), f"LDA by {source_names[0]}")
+    pca_var = maybe_save_pca(
+        latents,
+        first_source,
+        os.path.join(args.outdir, "pca_by_first_source.png"),
+        f"PCA colored by {source_names[0]}",
+    )
+    maybe_save_lda(
+        latents,
+        first_source,
+        os.path.join(args.outdir, "lda_by_first_source.png"),
+        f"LDA by {source_names[0]}",
+    )
 
     metrics = result.to_dict()
     metrics.update(
@@ -264,8 +286,12 @@ def main():
         f.write(f"infom={metrics['infom']:.6f}\n")
         f.write(f"infoc={metrics['infoc']:.6f}\n")
         f.write(f"infoe={metrics['infoe']:.6f}\n")
-        f.write(f"linear_probe_accuracy_per_source={metrics['linear_probe_accuracy_per_source']}\n")
-        f.write(f"active_latents={int(np.sum(result.active_latents))}/{len(result.active_latents)}\n")
+        f.write(
+            f"linear_probe_accuracy_per_source={metrics['linear_probe_accuracy_per_source']}\n"
+        )
+        f.write(
+            f"active_latents={int(np.sum(result.active_latents))}/{len(result.active_latents)}\n"
+        )
     print(json.dumps(metrics, indent=2))
 
 
