@@ -1,5 +1,8 @@
+import json
 import os
 from collections import defaultdict
+from datetime import datetime
+from pathlib import Path
 
 import absl.app
 import absl.flags
@@ -69,6 +72,8 @@ FLAGS_DEF = define_flags_with_default(
     reward_scaling=1.0,
     # biased
     biased_mode="grid",
+    # If empty, `main` uses datetime.now(); set via env for sweeps, e.g. RUN_TIMESTAMP=... sbatch ...
+    run_timestamp="",
 )
 
 
@@ -81,19 +86,34 @@ def log_metrics(metrics, epoch, logger):
 
 def main(_):
     FLAGS = absl.flags.FLAGS
+    # timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    if FLAGS.run_timestamp.strip():
+        timestamp = FLAGS.run_timestamp.strip()
+    else:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     assert os.path.exists(FLAGS.dataset_path), "You must provide a dataset path."
     variant = get_user_flags(FLAGS, FLAGS_DEF)
 
-    save_dir = FLAGS.logging.output_dir + "/" + FLAGS.env
-    save_dir += "/" + str(FLAGS.model_type) + "/"
-
-    FLAGS.logging.group = f"{FLAGS.env}_{FLAGS.model_type}"
     assert FLAGS.comment, "You must leave your comment for logging experiment."
+    FLAGS.logging.group = f"{FLAGS.env}_{FLAGS.model_type}"
     FLAGS.logging.group += f"_{FLAGS.comment}"
-    FLAGS.logging.experiment_id = FLAGS.logging.group + f"_s{FLAGS.seed}"
-    save_dir += f"{FLAGS.comment}" + "/"
-    save_dir += "s" + str(FLAGS.seed)
-    FLAGS.logging.output_dir = save_dir
+    FLAGS.logging.experiment_id = FLAGS.logging.group
+    save_dir = (
+        Path(FLAGS.logging.output_dir)
+        / FLAGS.env
+        / str(FLAGS.model_type)
+        / f"{timestamp}/{FLAGS.comment}"
+    )
+    FLAGS.logging.output_dir = str(save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+    with open(save_dir / "variant.json", "w", encoding="utf-8") as vf:
+        json.dump(
+            {"resolved_run_timestamp": timestamp, "variant": variant},
+            vf,
+            indent=2,
+            sort_keys=True,
+            default=str,
+        )
     wb_logger = WandBLogger(FLAGS.logging, variant=variant)
 
     gym_env = gym.make(FLAGS.env)
@@ -232,19 +252,19 @@ def main(_):
 
             if best_criteria is None:
                 best_criteria = criteria
-                torch.save(reward_model, save_dir + f"/best_model.pt")
+                torch.save(reward_model, save_dir / "best_model.pt")
 
             if criteria < best_criteria:
-                torch.save(reward_model, save_dir + f"/best_model.pt")
+                torch.save(reward_model, save_dir / "best_model.pt")
                 best_criteria = criteria
 
             if FLAGS.early_stop and early_stop.early_stop(criteria):
                 log_metrics(metrics, epoch, wb_logger)
-                torch.save(reward_model, save_dir + f"/model_{epoch}.pt")
+                torch.save(reward_model, save_dir / f"model_{epoch}.pt")
                 break
 
         if epoch % FLAGS.save_freq == 0:
-            torch.save(reward_model, save_dir + f"/model_{epoch}.pt")
+            torch.save(reward_model, save_dir / f"model_{epoch}.pt")
 
         if (
             FLAGS.model_type == "VAE" or "VAE" in FLAGS.model_type

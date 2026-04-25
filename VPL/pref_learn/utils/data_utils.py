@@ -294,6 +294,13 @@ def get_queries_from_multi(
 
 
 def get_labels(seg_reward_1, seg_reward_2):
+    """
+    Args:
+        seg_reward_1: (set_size, T)
+        seg_reward_2: (set_size, T)
+    Returns:
+        binary_label: (set_size, 1)
+    """
     sum_r_t_1 = np.sum(seg_reward_1, axis=-1)
     sum_r_t_2 = np.sum(seg_reward_2, axis=-1)
     binary_label = (sum_r_t_1 > sum_r_t_2).reshape(-1, 1).astype(np.float32)

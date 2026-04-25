@@ -54,9 +54,9 @@ def main(_):
     base_path = os.path.join(FLAGS.data_dir, FLAGS.env)
     os.makedirs(base_path, exist_ok=True)
 
+    print("========== Loading trajectory dataset and getting query pairs ==========")
     gym_env = gym.make(FLAGS.env)
     gym_env.reset()
-
     if FLAGS.relabel:
         assert os.path.exists(FLAGS.dataset_path)
         query_path = FLAGS.dataset_path
@@ -81,6 +81,9 @@ def main(_):
             )
         print("Saved queries at:", query_path)
 
+    print("========== Relabelling queries ==========")
+    # (n_query, set_size, T, O)
+    print(f"Query set obs shape: {dataset['observations'].shape}")
     num_sets = len(dataset["observations"])
     set_len = dataset["observations"].shape[1]
 
@@ -100,14 +103,15 @@ def main(_):
         mode = int(gym_env.sample_mode())
         modes.append(mode)
 
+        # (set_size, T) -> (set_size, 1)
         seg_reward_1 = gym_env.compute_reward(dataset["observations"][i], mode)
         seg_reward_2 = gym_env.compute_reward(dataset["observations_2"][i], mode)
-        labels = get_labels(seg_reward_1, seg_reward_2)
+        labels = get_labels(seg_reward_1, seg_reward_2)  # (set_size, 1)
         dataset["labels"][i] = labels
 
         seg_reward_sum_1 = np.sum(seg_reward_1, axis=-1, keepdims=True).astype(np.float32)
         seg_reward_sum_2 = np.sum(seg_reward_2, axis=-1, keepdims=True).astype(np.float32)
-        seg_reward_margin = seg_reward_sum_1 - seg_reward_sum_2
+        seg_reward_margin = seg_reward_sum_1 - seg_reward_sum_2  # (set_size, 1)
 
         source_mode[i, 0] = mode
         source_mode_per_pair[i, :, 0] = mode
@@ -146,13 +150,14 @@ def main(_):
     relabelled_path = str(query_path).replace("queries", "relabelled_queries")
     with open(relabelled_path, "wb") as f:
         pickle.dump(dataset, f)
+    print(f"rewards shape: {rewards.shape}")
     print("Saved relabelled queries at:", relabelled_path)
     print("Average mode during relabelling:", sum(modes) / len(modes))
 
     obs = np.concatenate(obs, axis=0).reshape(-1, obs[0].shape[-1])
     rewards = np.array(rewards).reshape(-1, 1)
     fig = plot_observation_rewards(obs, rewards)
-    fig.savefig("relabelled_queries.png")
+    fig.savefig(f"{relabelled_path}.png")
 
 
 if __name__ == "__main__":

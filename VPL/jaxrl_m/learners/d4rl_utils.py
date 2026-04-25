@@ -80,7 +80,7 @@ def get_dataset(
         dataset = relabel_rewards_with_env(env, dataset, append_goal)
 
     dataset = {k: v.astype(np.float32) for k, v in dataset.items()}
-    print(dataset["observations"].shape)
+    print(f"Dataset ({env.spec.id}) obs shape: {dataset['observations'].shape}")
     return Dataset(dataset), comparison_obs
 
 
