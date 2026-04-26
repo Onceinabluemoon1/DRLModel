@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=train_vae
 #SBATCH --gres=shard:24
-#SBATCH --array=0-7
+#SBATCH --array=0-10
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=16G
 #SBATCH --output=/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/logs_slurm/train_vae/train_vae_%A_%a.out
@@ -18,6 +18,8 @@ conda activate drl
 
 
 BETAS=(
+    0.0001
+    0.001
     0.01
     0.1
     0.3
@@ -26,9 +28,10 @@ BETAS=(
     10.0
     30.0
     100.0
+    200.0
 )
 beta=${BETAS[${SLURM_ARRAY_TASK_ID}]}
-latent_dim=4
+latent_dim=8
 
 env=sort-easy-v0
 dataset_path=./pref_datasets/${env}/relabelled_queries_num5000_q1_s16

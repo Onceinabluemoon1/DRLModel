@@ -93,7 +93,7 @@ class VAEModel(nn.Module):
         return z
 
     def encode(self, s1, s2, y):
-        s1_ = s1.view(s1.shape[0], s1.shape[1], -1)
+        s1_ = s1.view(s1.shape[0], s1.shape[1], -1)  # B, Qset, (T, O)
         s2_ = s2.view(s2.shape[0], s2.shape[1], -1)
         y = y.reshape(s1.shape[0], s1.shape[1], -1)
 

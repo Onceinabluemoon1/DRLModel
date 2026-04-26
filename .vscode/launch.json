@@ -14,6 +14,60 @@
             "args": [
                 "--seed", "42"
             ]
+        },
+        {
+            "name": "plot_infomec",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/VPL/scripts/plot_infomec.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}/VPL",
+            "args": [
+                "--input-dir",
+                "/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/VPL/logs3/sort-easy-v0/VAEClassifier/20260424_214120_ld=8/7_beta=100.0_ld=8",
+                "--split",
+                "eval"
+            ]
+        },
+        {
+            "name": "plot_infomec_sweep",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/VPL/scripts/plot_infomec_sweep.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}/VPL",
+            "args": [
+                "--input-dir",
+                "/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/VPL/logs3/sort-easy-v0/VAEClassifier/20260424_214120_ld=8/" ,
+                "--split",
+                "eval"
+            ]
+        },
+        {
+            "name": "train VAE",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/VPL/pref_learn/train.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}/VPL",
+            "env": {
+                "WANDB_MODE": "disabled"
+            },
+            "args": [
+                "--env=sort-easy-v0",
+                "--dataset_path=./pref_datasets/sort-easy-v0/relabelled_queries_num5000_q1_s16",
+                "--model_type=VAEClassifier",
+                "--comment=debug_0_beta=0.01_ld=4",
+                "--latent_dim=4",
+                "--kl_weight=0.01",
+                "--seed=42",
+                "--batch_size=256",
+                "--n_epochs=500",
+                "--eval_freq=50",
+                "--save_freq=50",
+                "--device=cuda",
+                "--logging.output_dir=/tmp/vpl_vae_debug"
+            ]
         }
     ]
 }

@@ -106,6 +106,8 @@ def main(_):
     )
     FLAGS.logging.output_dir = str(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
+    # Per-epoch checkpoints (save_freq); best_model.pt stays in save_dir
+    (save_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
     with open(save_dir / "variant.json", "w", encoding="utf-8") as vf:
         json.dump(
             {"resolved_run_timestamp": timestamp, "variant": variant},
@@ -260,11 +262,11 @@ def main(_):
 
             if FLAGS.early_stop and early_stop.early_stop(criteria):
                 log_metrics(metrics, epoch, wb_logger)
-                torch.save(reward_model, save_dir / f"model_{epoch}.pt")
+                torch.save(reward_model, save_dir / "checkpoints" / f"model_{epoch}.pt")
                 break
 
         if epoch % FLAGS.save_freq == 0:
-            torch.save(reward_model, save_dir / f"model_{epoch}.pt")
+            torch.save(reward_model, save_dir / "checkpoints" / f"model_{epoch}.pt")
 
         if (
             FLAGS.model_type == "VAE" or "VAE" in FLAGS.model_type
