@@ -1,15 +1,14 @@
-import gzip
 import pathlib
 import pickle
+from dataclasses import dataclass
 
-import gym
 import h5py
-import jaxrl_m.envs
 import numpy as np
+import tyro
 
 
-def get_data(path):
-    traj_paths = sorted(list(pathlib.Path(path).rglob("traj*.pkl")))
+def get_data(path: str, *, max_horizon: int) -> tuple:
+    traj_paths = sorted(pathlib.Path(path).rglob("traj*.pkl"))
 
     rewards = []
     infos = []
@@ -19,17 +18,18 @@ def get_data(path):
     init_poses = []
     last_poses = []
     actions = []
+    sl = slice(None, max_horizon)
     for traj_path in traj_paths:
         with open(traj_path, "rb") as f:
             traj = pickle.load(f)
-        rewards.append(traj["reward"][:25])
-        infos.append(traj["info"][:25])
-        observations.append(traj["obs"][:25])
-        dones.append(traj["done"][:25])
-        traj_len.append(len(traj["reward"][:25]))
-        init_poses.append(traj["obs"][0][:25])
-        last_poses.append(traj["obs"][-1][:25])
-        actions.append(traj["action"][:25])
+        rewards.append(traj["reward"][sl])
+        infos.append(traj["info"][sl])
+        observations.append(traj["obs"][sl])
+        dones.append(traj["done"][sl])
+        traj_len.append(len(traj["reward"][sl]))
+        init_poses.append(traj["obs"][0])
+        last_poses.append(traj["obs"][-1])
+        actions.append(traj["action"][sl])
 
     actions = np.concatenate(actions, axis=0)
     rewards = np.concatenate(rewards, axis=0)
@@ -61,7 +61,7 @@ def reset_data():
     }
 
 
-def add_data(s, a, r, done, init_poses, infos):
+def add_data(s, a, r, done, init_poses, _infos):
     # print(s.shape, a.shape, r.shape, done.shape)
     data = reset_data()
     data["observations"] = s
@@ -89,19 +89,41 @@ def npify(data):
         data[k] = np.array(data[k], dtype=dtype)
 
 
-if __name__ == "__main__":
-    path = "/home/max/Distributional-Preference-Learning/vpl/dependencies/sort_dataset"
-    fname = "/home/max/Distributional-Preference-Learning/vpl/jaxrl_m/envs/dataset/sort_debug2-v0.hdf5"
-    actions, rewards, observations, dones, traj_len, init_poses, last_poses, infos = (
-        get_data(path)
+@dataclass(frozen=True)
+class DemosToH5Config:
+    """Pack traj_*.pkl under rollouts_dir into a D4RL-style gzip HDF5 dataset."""
+
+    rollouts_dir: str  # e.g. …/raw_rollouts_<ts>/raw_rollouts
+    output_h5: str
+    max_horizon: int = (
+        25  # timesteps kept per trajectory (matches legacy demos2dataset [:25])
     )
-    print("actions", "rewards", "observations", "dones")
-    print(actions.shape, rewards.shape, observations.shape, dones.shape)
+
+
+def main(cfg: DemosToH5Config) -> None:
+    (
+        actions,
+        rewards,
+        observations,
+        dones,
+        _traj_len,
+        init_poses,
+        _last_poses,
+        infos,
+    ) = get_data(cfg.rollouts_dir, max_horizon=cfg.max_horizon)
+    print(f"{actions.shape=}, {rewards.shape=}, {observations.shape=}, {dones.shape=}")
     data = add_data(observations, actions, rewards, dones, init_poses, infos)
-    with h5py.File(fname, "w") as dataset:
+    out_path = pathlib.Path(cfg.output_h5)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with h5py.File(cfg.output_h5, "w") as dataset:
         npify(data)
         for k in data:
             dataset.create_dataset(k, data=data[k], compression="gzip")
-    info_path = "infos.pkl"
-    with open(info_path, "wb") as f:
+    infos_path = out_path.with_name("infos.pkl")
+    with open(infos_path, "wb") as f:
         pickle.dump(infos, f)
+    print(f"Wrote {cfg.output_h5} and {infos_path}")
+
+
+if __name__ == "__main__":
+    main(tyro.cli(DemosToH5Config))
