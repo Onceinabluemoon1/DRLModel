@@ -65,9 +65,32 @@ register(
 )
 
 register(
+    id="sort-easy-1goals-v0",
+    entry_point="jaxrl_m.envs.sort_easy:SortEnv",
+    max_episode_steps=25,
+    kwargs={"n_possible_goals": 1},
+)
+
+# todo: remove this redundant 2 goal version?
+register(
     id="sort-easy-v0",
     entry_point="jaxrl_m.envs.sort_easy:SortEnv",
     max_episode_steps=25,
+    kwargs={"n_possible_goals": 2},
+)
+
+register(
+    id="sort-easy-2goals-v0",
+    entry_point="jaxrl_m.envs.sort_easy:SortEnv",
+    max_episode_steps=25,
+    kwargs={"n_possible_goals": 2},
+)
+
+register(
+    id="sort-easy-4goals-v0",
+    entry_point="jaxrl_m.envs.sort_easy:SortEnv",
+    max_episode_steps=25,
+    kwargs={"n_possible_goals": 4},
 )
 
 register(
