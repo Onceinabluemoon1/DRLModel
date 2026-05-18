@@ -331,7 +331,16 @@ def relabel_rewards_with_env(env, dataset, append_goal):
             next_obs_list.append(
                 np.concatenate([next_obs, np.ones_like(next_obs[:, :2]) * goal], axis=-1)
             )
-    print("Mean mode:", np.mean(modes))
+    modes_arr = np.asarray(modes, dtype=np.int64)
+    uniq_modes, mode_counts = np.unique(modes_arr, return_counts=True)
+    n_tot = int(modes_arr.size)
+    print("Modes during relabel_rewards_with_env:")
+    for m, c in zip(uniq_modes, mode_counts):
+        pct = 100.0 * float(c) / float(n_tot)
+        print(f"  mode {int(m):>4}: count {int(c):>8} ({pct:6.2f}%)")
+    print(f"  total:       {n_tot:>8}")
+    print(f"  mean mode:   {float(np.mean(modes_arr)):8.4f}")
+
     new_rewards = np.concatenate(new_rewards)
     new_next_rewards = np.concatenate(new_next_rewards)
     dataset["rewards"] = new_rewards

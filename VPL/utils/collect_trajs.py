@@ -114,6 +114,7 @@ def rollout_trajectory(
         obs = next_obs
 
         if done:
+            # ! only works when oracle uses max_steps as done signal
             action = agent.act(obs, {})
             next_obs, reward, done, info = env.step_oracle(action)
             grab_frame()

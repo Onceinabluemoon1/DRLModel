@@ -1,3 +1,5 @@
+import os
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import gym
@@ -43,6 +45,7 @@ class SortEnv(OfflineEnv, gym.Env):
         oracle=False,
         *,
         n_possible_goals: int = 4,
+        dataset_path: os.PathLike[str] | str | None = None,
         **kwargs,
     ):
         del ee, oracle, kwargs  # unused
@@ -61,8 +64,12 @@ class SortEnv(OfflineEnv, gym.Env):
         self.mode = mode
         self.is_multimodal = mode < 0
 
-        sort_dataset = Path(__file__).resolve().parent / "dataset/sort.hdf5"
-        self.dataset_path = str(sort_dataset)
+        dataset_fp = (
+            Path(dataset_path).expanduser().resolve()
+            if dataset_path is not None
+            else Path(__file__).resolve().parent / "dataset/sort.hdf5"
+        )
+        self.dataset_path = str(dataset_fp)
 
         if mode == 0:
             self.task = tasks.names["sort-easy-fixed"](continuous=True)
@@ -104,7 +111,7 @@ class SortEnv(OfflineEnv, gym.Env):
         self.debug = debug
 
         # * Offline stats: prefer dataset keys if ``sort.hdf5`` exists (else oracle bounds below).
-        if sort_dataset.exists():
+        if dataset_fp.exists():
             dataset = self.get_dataset()
             self.action_stats = {
                 "min": dataset["action_min"],
@@ -140,9 +147,16 @@ class SortEnv(OfflineEnv, gym.Env):
             )
         return self.goal_poses[mode]
 
-    def get_dataset(self, path=None):
-        path = path or self.dataset_path
-        return super().get_dataset(h5path=path)
+    def get_dataset(self, h5path=None, path=None):
+        """
+        Load a D4RL-style HDF5 dict (see ``d4rl.offline_env.OfflineEnv.get_dataset``).
+
+        ``d4rl.qlearning_dataset(env, h5path=...)`` forwards ``h5path`` here; ``path`` is
+        an alias. Default is ``self.dataset_path`` (bundled ``sort.hdf5`` unless overridden
+        via env kw ``dataset_path=`` in :meth:`__init__`).
+        """
+        p = h5path or path or self.dataset_path
+        return super().get_dataset(h5path=p)
 
     def get_obs(self):
         ee_pose = self.env.get_ee_pose()  # ((x, y, z), (qx, qy, qz, qw))
@@ -278,11 +292,12 @@ class SortEnv(OfflineEnv, gym.Env):
         info["sparse_reward"] = sparse_reward
         info["distance_to_goal"] = float(goal_dist)
         self.elasped_steps += 1
-        done = (
-            bool(env_done)
-            or sparse_reward > 0.99
-            or (self.elasped_steps >= self._max_episode_steps)
-        )
+        # done = (
+        #     bool(env_done)
+        #     or sparse_reward > 0.99
+        #     or (self.elasped_steps >= self._max_episode_steps)
+        # )
+        done = self.elasped_steps >= self._max_episode_steps
         reward = sparse_reward
         return obs, reward, done, info
 
@@ -313,3 +328,314 @@ class SortEnv(OfflineEnv, gym.Env):
 
     def render(self, mode="rgb_array"):
         return self.env.render(mode)
+
+
+class SortPreferenceTwoGoals:
+    """Trajectory hypotheses over exactly two ``goal_poses``; inject reward from :class:`SortEnv`."""
+
+    SOURCES_NAMES = ["pref_horizontal"]
+    SOURCES_DIMS = [2]
+    SOURCES_TYPES = ["discrete"]
+
+    ANNOTATOR_SPECS = [
+        {"name": "left", "pref_horizontal": 0},
+        {"name": "right", "pref_horizontal": 1},
+    ]
+
+    def __init__(
+        self,
+        *,
+        goal_poses: Sequence,
+        env_reward_fn: Callable[[np.ndarray, int], np.ndarray],
+    ):
+        gp = list(goal_poses)
+        if len(gp) != 2:
+            raise ValueError(
+                f"SortPreferenceTwoGoals requires exactly two goal poses; got len={len(gp)}"
+            )
+        self.goal_poses = gp
+        self.env_reward_fn = env_reward_fn
+
+    @property
+    def n_sources(self) -> int:
+        return len(self.SOURCES_NAMES)
+
+    @property
+    def n_pref_modes(self) -> int:
+        return 2
+
+    @property
+    def source_specs(self) -> dict:
+        return dict(
+            n_sources=self.n_sources,
+            source_names=self.SOURCES_NAMES,
+            source_types=self.SOURCES_TYPES,
+            source_dims=self.SOURCES_DIMS,
+        )
+
+    def sample_pref_mode(self) -> int:
+        return int(np.random.randint(0, self.n_pref_modes))
+
+    def pref_spec_for_mode(
+        self, annotator_id: int, *, as_array: bool = False
+    ) -> dict | np.ndarray:
+        """
+        ``as_array=False``: metadata dict from ``ANNOTATOR_SPECS``.
+
+        ``as_array=True``: discrete source vector ``(1,)`` — ``0`` = left, ``1`` = right
+        (from ``pref_horizontal``, aligned with ``annotator_id``).
+        """
+        annotator_id = int(annotator_id)
+        specs = self.ANNOTATOR_SPECS
+        assert 0 <= annotator_id < len(specs), (
+            f"Invalid annotator_id {annotator_id}; expected 0..{len(specs) - 1}"
+        )
+        spec = specs[annotator_id]
+        if as_array:
+            code = [spec["pref_horizontal"]]
+            return np.array(code, dtype=np.int32)  # (1,)
+        return spec
+
+    def compute_reward(self, state: np.ndarray, mode: int) -> np.ndarray:
+        mode = int(mode)
+        if mode not in list(range(self.n_pref_modes)):
+            raise ValueError(
+                f"SortPreferenceTwoGoals.compute_reward expects mode in {{0, 1}}; got {mode}"
+            )
+        return self.env_reward_fn(state, mode)
+
+
+class SortPreferenceFourGoals:
+    """
+    Four trajectory hypotheses plus annotator preference anchors for relabeling.
+
+    Inject ``goal_poses`` (length 4) and ``compute_reward`` from a live :class:`SortEnv`.
+
+    Table view (``collect_trajs`` plot — rgb front camera: bottom ≈ larger world x, right = +y):
+        * ``pref_vertical`` (world x, table bottom↔top): 0 = ignore; 1 = top (high x); 2 = bottom (low x).
+        * ``pref_horizontal`` (world y, table left↔right): 0 = ignore; 1 = left (low y); 2 = right (high y).
+    Uses 4-corner workspace span for anchors (covers 2-stripe layouts too).
+    """
+
+    SOURCES_NAMES = ["pref_vertical", "pref_horizontal"]
+    SOURCES_DIMS = [3, 3]
+    SOURCES_TYPES = ["discrete", "discrete"]
+
+    ANNOTATOR_SPECS = [
+        {"name": "left", "pref_vertical": 0, "pref_horizontal": 1},
+        {"name": "right", "pref_vertical": 0, "pref_horizontal": 2},
+        {"name": "top", "pref_vertical": 1, "pref_horizontal": 0},
+        {"name": "bottom", "pref_vertical": 2, "pref_horizontal": 0},
+        {"name": "top_left", "pref_vertical": 1, "pref_horizontal": 1},
+        {"name": "top_right", "pref_vertical": 1, "pref_horizontal": 2},
+        {"name": "bottom_left", "pref_vertical": 2, "pref_horizontal": 1},
+        {"name": "bottom_right", "pref_vertical": 2, "pref_horizontal": 2},
+    ]
+
+    ANNOT_X_LIM = (0.32, 0.68)
+    ANNOT_Y_LIM = (-0.18, 0.18)
+
+    def __init__(
+        self,
+        *,
+        goal_poses: Sequence,
+        env_reward_fn: Callable[[np.ndarray, int], np.ndarray],
+    ):
+        gp = list(goal_poses)
+        if len(gp) != 4:
+            raise ValueError(
+                f"SortPreferenceFourGoals requires exactly four goal poses; got len={len(gp)}"
+            )
+        self.goal_poses = gp
+        self.env_reward_fn = env_reward_fn
+
+    @staticmethod
+    def _annot_pref_edge(
+        *, pref: int, low: float, high: float, vertical_axis: bool
+    ) -> float | None:
+        """
+        pref ``1``/``2`` → ``low``/``high`` on horizontal world ``y``;
+        XOR swap for world ``x`` (``vertical_axis=True``: ``1`` = top/high ``x``, ``2`` = bottom/low ``x``).
+        """
+        if pref == 0:
+            return None
+        if pref not in (1, 2):
+            raise ValueError(f"preference code must be 0, 1, or 2; got {pref!r}")
+        use_high = (pref == 2) ^ vertical_axis
+        return float(high if use_high else low)
+
+    @property
+    def n_sources(self) -> int:
+        return len(self.SOURCES_NAMES)
+
+    @property
+    def n_pref_modes(self) -> int:
+        return len(self.ANNOTATOR_SPECS)
+
+    @property
+    def source_specs(self) -> dict:
+        return dict(
+            n_sources=self.n_sources,
+            source_names=self.SOURCES_NAMES,
+            source_types=self.SOURCES_TYPES,
+            source_dims=self.SOURCES_DIMS,
+        )
+
+    def sample_pref_mode(self) -> int:
+        return int(np.random.randint(0, self.n_pref_modes))
+
+    def pref_spec_for_mode(
+        self, annotator_id: int, *, as_array: bool = False
+    ) -> dict | np.ndarray:
+        """
+        ``as_array=False``: full annotator metadata dict.
+
+        ``as_array=True``: ``(pref_vertical, pref_horizontal)`` with values in ``{0,1,2}``
+        per the class docstring.
+        """
+        annotator_id = int(annotator_id)
+        specs = self.ANNOTATOR_SPECS
+        assert 0 <= annotator_id < len(specs), (
+            f"Invalid annotator_id {annotator_id}; expected 0..{len(specs) - 1}"
+        )
+        spec = specs[annotator_id]
+        if as_array:
+            code = [spec["pref_vertical"], spec["pref_horizontal"]]
+            return np.array(code, dtype=np.int32)  # (2,)
+        return spec
+
+    def compute_reward(self, state: np.ndarray, mode: int) -> np.ndarray:
+        mode = int(mode)
+        if mode not in list(range(self.n_pref_modes)):
+            raise ValueError(
+                f"SortPreferenceFourGoals.compute_reward expects mode in {{0..{self.n_pref_modes - 1}}}; got {mode}"
+            )
+        return self.compute_annotator_reward(state, mode)
+        # return self.env_reward_fn(state, mode)
+
+    def compute_annotator_reward(
+        self, state: np.ndarray, annotator_id: int
+    ) -> np.ndarray:
+        """
+        Preference-only dense surrogate for relabeling (not the task MDP reward).
+
+        Mirrors :meth:`SortEnv.compute_reward` piecewise shaping; ``pref_dist`` replaces goal distance—
+        Euclidean distance in world XY from the object to the annotator anchor (vertical and/or horizontal targets).
+
+        args:
+            state: (A, T, O), where O = [ee_x, ee_y, ee_z, obj_x, obj_y, obj_z, grasp]
+            annotator_id: index into ``ANNOTATOR_SPECS``
+        returns:
+            reward: (A, T)
+        """
+        spec = self.pref_spec_for_mode(annotator_id=annotator_id, as_array=False)
+        eef_xyz = state[:, :, 0:3]  # (A, T, 3)
+        obj_xyz = state[:, :, 3:6]  # (A, T, 3)
+        grasped = state[:, :, -1]  # (A, T)
+        obj_x = obj_xyz[:, :, 0]
+        obj_y = obj_xyz[:, :, 1]
+
+        x_lo, x_hi = self.ANNOT_X_LIM
+        y_lo, y_hi = self.ANNOT_Y_LIM
+
+        t_vert = self._annot_pref_edge(
+            pref=int(spec["pref_vertical"]), low=x_lo, high=x_hi, vertical_axis=True
+        )
+        t_horiz = self._annot_pref_edge(
+            pref=int(spec["pref_horizontal"]), low=y_lo, high=y_hi, vertical_axis=False
+        )
+
+        sq_terms: list[np.ndarray] = []
+        if t_vert is not None:
+            sq_terms.append((obj_x - float(t_vert)) ** 2)
+        if t_horiz is not None:
+            sq_terms.append((obj_y - float(t_horiz)) ** 2)
+        if not sq_terms:
+            raise RuntimeError(
+                f"Annotator {annotator_id} ({spec['name']}) has "
+                f"pref_vertical=pref_horizontal=0 (no active axis)."
+            )
+
+        pref_dist = np.sqrt(sum(sq_terms))  # (A, T), meters on active axes only
+
+        eef_dist = np.linalg.norm(eef_xyz - obj_xyz, axis=-1)  # (A, T)
+        within = pref_dist < 0.05  # (A, T), same band as ``compute_reward`` goal_xy
+
+        # Piecewise dense shaping (scaled by ./100 below)—same weights as ``compute_reward``:
+        #   within_pref & ~grasped: strong bonus at preferred XY anchor
+        #   within_pref & grasped: smaller bonus still there
+        #   ~within_pref & grasped: intermediate + decay with pref_dist
+        #   ~within_pref & ~grasped: encourage EEF→object proximity
+        reward = (
+            within * (1 - grasped) * 100.0
+            + within * grasped * 5.0
+            + (1 - within) * grasped * (2 + np.exp(-pref_dist))
+            + (1 - within) * (1 - grasped) * np.exp(-eef_dist)
+        )
+        return reward / 100.0
+
+    def compute_sparse_annotator_reward(
+        self, obs: np.ndarray, annotator_id: int
+    ) -> float:
+        """
+        Preference sparse surrogate for relabeling (not the task MDP reward).
+
+        Uses observation grasp channel ``obs[-1]`` (released iff zero), unlike :meth:`SortEnv.compute_sparse_reward`
+        which queries the simulator—so offline HDF5 segments stay consistent without a live ``env``.
+
+        args:
+            obs: (7,), where obs = [ee_x, ee_y, ee_z, obj_x, obj_y, obj_z, grasp]
+            annotator_id: index into ``ANNOTATOR_SPECS``
+        returns:
+            reward: float, 1.0 iff preferred XY band, low object height, and released.
+        """
+        spec = self.pref_spec_for_mode(annotator_id=annotator_id, as_array=False)
+        obj_xyz = obs[3:6]  # (3,)
+        obj_x = float(obj_xyz[0])
+        obj_y = float(obj_xyz[1])
+        obj_z = float(obj_xyz[2])
+
+        x_lo, x_hi = self.ANNOT_X_LIM
+        y_lo, y_hi = self.ANNOT_Y_LIM
+
+        t_vert = self._annot_pref_edge(
+            pref=int(spec["pref_vertical"]), low=x_lo, high=x_hi, vertical_axis=True
+        )
+        t_horiz = self._annot_pref_edge(
+            pref=int(spec["pref_horizontal"]), low=y_lo, high=y_hi, vertical_axis=False
+        )
+
+        sq_terms: list[float] = []
+        if t_vert is not None:
+            sq_terms.append((obj_x - float(t_vert)) ** 2)
+        if t_horiz is not None:
+            sq_terms.append((obj_y - float(t_horiz)) ** 2)
+        if not sq_terms:
+            raise RuntimeError(
+                f"Annotator {annotator_id} ({spec['name']}) has "
+                f"pref_vertical=pref_horizontal=0 (no active axis)."
+            )
+
+        pref_dist = float(np.sqrt(sum(sq_terms)))
+        grasped = float(obs[-1]) != 0.0
+        return float(pref_dist < 0.05 and obj_z < 0.03 and not grasped)
+
+
+def annotator_from_env(
+    env: SortEnv,
+) -> SortPreferenceTwoGoals | SortPreferenceFourGoals:
+    """Build the trajectory-hypothesis preference helper matching ``len(env.goal_poses)``."""
+    n = len(env.goal_poses)
+    if n == 2:
+        return SortPreferenceTwoGoals(
+            goal_poses=env.goal_poses,
+            env_reward_fn=env.compute_reward,
+        )
+    if n == 4:
+        return SortPreferenceFourGoals(
+            goal_poses=env.goal_poses,
+            env_reward_fn=env.compute_reward,
+        )
+    raise ValueError(
+        f"sort_preference_from_sort_env expects SortEnv with 2 or 4 goal poses; got {n}"
+    )

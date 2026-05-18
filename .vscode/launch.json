@@ -16,6 +16,44 @@
             ]
         },
         {
+            "name": "create_dataset_infomec (sort-easy-2goals-v0)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/VPL/pref_learn/create_dataset_infomec.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}/VPL",
+            "args": [
+                "--env=sort-easy-2goals-v0",
+                // "--offline_dataset_h5=/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/data/ravens/sort-easy-2goals-v0/_vpl_official/rollout_dataset.hdf5",
+                "--offline_dataset_h5=/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/data/ravens/sort-easy-2goals-v0/20260517_211957_ntrajs=20/rollout_dataset.hdf5",
+                "--data_seed=42",
+                "--num_query=100",
+                "--segment_len=1",
+                "--set_size=16",
+                "--debug=True"
+            ]
+        },
+        {
+            "name": "create_dataset_infomec (sort-easy-4goals-v0)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/VPL/pref_learn/create_dataset_infomec.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}/VPL",
+            "args": [
+                "--env=sort-easy-4goals-v0",
+                // "--offline_dataset_h5=/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/data/ravens/sort-easy-2goals-v0/_vpl_official/rollout_dataset.hdf5",
+                // "--offline_dataset_h5=/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/data/ravens/sort-easy-2goals-v0/20260517_211957_ntrajs=20/rollout_dataset.hdf5",
+                "--offline_dataset_h5=/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/data/ravens/sort-easy-4goals-v0/20260517_212722_ntrajs=5000/rollout_dataset.hdf5",
+                "--data_seed=42",
+                "--num_query=100",
+                "--segment_len=1",
+                "--set_size=16",
+                "--debug=True"
+            ]
+        },
+
+        {
             "name": "plot_infomec",
             "type": "debugpy",
             "request": "launch",
@@ -38,9 +76,8 @@
             "cwd": "${workspaceFolder}/VPL",
             "args": [
                 "--input-dir",
-                "/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/VPL/logs3/sort-easy-v0/VAEClassifier/20260424_214120_ld=8/" ,
-                "--split",
-                "eval"
+                "/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/VPL/logs3/sort-easy-v0/VAE/20260426_064854_ld=8_learned-Prior=False/" ,
+                "--split", "eval"
             ]
         },
         {
@@ -56,7 +93,7 @@
             "args": [
                 "--env=sort-easy-v0",
                 "--dataset_path=./pref_datasets/sort-easy-v0/relabelled_queries_num5000_q1_s16",
-                "--model_type=VAEClassifier",
+                "--model_type=VAE",
                 "--comment=debug_0_beta=0.01_ld=4",
                 "--latent_dim=4",
                 "--kl_weight=0.01",

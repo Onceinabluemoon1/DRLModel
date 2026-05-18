@@ -11,14 +11,148 @@ from sklearn.decomposition import PCA
 from sklearn.manifold import TSNE
 
 
-def plot_reward(ax, obs, r, no_norm=False):
+def plot_reward(
+    ax,
+    obs,
+    r,
+    no_norm=False,
+    *,
+    reward_size_threshold: float | None = None,
+    s_below: float = 6.0,
+    s_above: float = 32.0,
+    vmin: float | None = None,
+    vmax: float | None = None,
+    cmap: str | matplotlib.colors.Colormap | None = None,
+    colorbar: bool = True,
+):
     # if not no_norm:
     #     r = (r - r.min()) / (r.max() - r.min())
     #     r = np.exp(r / 0.1)
     #     r = (r - r.min()) / (r.max() - r.min())
-    sc = ax.scatter(obs[:, 0], obs[:, 1], c=r)
-    cb = plt.colorbar(sc, ax=ax)
-    cb.set_label("r(s)")
+    r_plot = np.asarray(r).reshape(-1)
+    kwargs = {}
+    if reward_size_threshold is not None:
+        kwargs["s"] = np.where(r_plot < reward_size_threshold, s_below, s_above)
+    lim_kw = {}
+    if vmin is not None:
+        lim_kw["vmin"] = vmin
+    if vmax is not None:
+        lim_kw["vmax"] = vmax
+    if cmap is not None:
+        lim_kw["cmap"] = cmap
+    sc = ax.scatter(obs[:, 0], obs[:, 1], c=r_plot, **lim_kw, **kwargs)
+    if colorbar:
+        cb = plt.colorbar(sc, ax=ax)
+        cb.set_label("r(s)")
+    return sc
+
+
+def plot_observation_rewards_by_annotator_mode(
+    per_mode_obs: list,
+    per_mode_r: list,
+    *,
+    mode_titles: list[str],
+    suptitle: str | None = None,
+    cmap: str = "viridis",
+    reward_size_threshold: float = 0.5,
+):
+    """
+    One scatter panel per annotator mode; each uses only (obs, r) from that mode.
+
+    Args:
+        per_mode_obs: length M; each entry (N_m, O) or empty (0, O).
+        per_mode_r: length M; each (N_m,) or (N_m, 1) aligned with ``per_mode_obs``.
+        mode_titles: length M subplot titles (e.g. ANNOTATOR_SPECS ``name``).
+    """
+    n_modes = len(per_mode_obs)
+    assert len(per_mode_r) == n_modes == len(mode_titles), (
+        f"len mismatches: obs {n_modes}, r {len(per_mode_r)}, titles {len(mode_titles)}"
+    )
+    all_r = np.concatenate(
+        [np.asarray(per_mode_r[m]).reshape(-1) for m in range(n_modes) if np.size(per_mode_r[m]) > 0],
+        axis=0,
+    )
+    if all_r.size > 0:
+        vmin = float(np.min(all_r))
+        vmax = float(np.max(all_r))
+    else:
+        vmin, vmax = 0.0, 1.0
+
+    ncols = min(4, n_modes)
+    nrows = int(np.ceil(n_modes / ncols))
+    # * Last column is only for the shared colorbar so it does not overlap subplot data.
+    fig_w = 4.2 * ncols + 0.95
+    fig_h = 4.1 * nrows
+    fig = plt.figure(figsize=(fig_w, fig_h))
+    gs = fig.add_gridspec(
+        nrows,
+        ncols + 1,
+        width_ratios=[1.0] * ncols + [0.065],
+        wspace=0.32,
+        hspace=0.38,
+    )
+    gs.update(
+        left=0.07,
+        right=0.98,
+        bottom=0.08,
+        top=0.78 if suptitle else 0.90,
+    )
+    flat_axes: list = []
+    for row in range(nrows):
+        for col in range(ncols):
+            flat_axes.append(fig.add_subplot(gs[row, col]))
+    cax = fig.add_subplot(gs[:, ncols])
+
+    mappable = matplotlib.cm.ScalarMappable(
+        norm=matplotlib.colors.Normalize(vmin=vmin, vmax=vmax), cmap=cmap
+    )
+    mappable.set_array([])
+
+    for m in range(n_modes):
+        ax = flat_axes[m]
+        ob = np.asarray(per_mode_obs[m])
+        rw = np.asarray(per_mode_r[m])
+        ax.set_title(mode_titles[m], fontsize=10)
+        if ob.size == 0 or rw.size == 0:
+            ax.text(
+                0.5,
+                0.5,
+                "no samples",
+                ha="center",
+                va="center",
+                transform=ax.transAxes,
+                fontsize=11,
+            )
+            ax.set_xticks([])
+            ax.set_yticks([])
+            continue
+        plot_reward(
+            ax,
+            ob,
+            rw,
+            no_norm=False,
+            reward_size_threshold=reward_size_threshold,
+            vmin=vmin,
+            vmax=vmax,
+            cmap=cmap,
+            colorbar=False,
+        )
+
+    for k in range(n_modes, len(flat_axes)):
+        flat_axes[k].set_visible(False)
+
+    # * Shared color scale across modes (matplotlib needs a nonempty array on the mappable).
+    any_data = all_r.size > 0
+    if any_data:
+        mappable.set_array(np.linspace(vmin, vmax, 256))
+        fig.colorbar(mappable, cax=cax, label="r(s)")
+    else:
+        cax.set_visible(False)
+
+    if suptitle:
+        fig.suptitle(suptitle, fontsize=11, y=0.94)
+    plt.close(fig)
+    return fig
 
 
 def plot_observations(observations, base_path):
@@ -36,9 +170,18 @@ def plot_goals(env, ax, target_p, scale):
         ax.scatter(x=target_p[0], y=target_p[1], color="red", s=100)
 
 
-def plot_observation_rewards(obs, r, no_norm=False):
+def plot_observation_rewards(
+    obs,
+    r,
+    no_norm=False,
+    *,
+    suptitle: str | None = None,
+):
     fig, ax = plt.subplots()
-    plot_reward(ax, obs, r)
+    plot_reward(ax, obs, r, no_norm=no_norm, reward_size_threshold=0.5)
+    if suptitle:
+        fig.subplots_adjust(top=0.78)
+        fig.suptitle(suptitle, fontsize=11, y=0.94)
     plt.close(fig)
     return fig
 
@@ -52,7 +195,7 @@ def plot_mlp(env, reward_model):
     fig, ax = plt.subplots()
     plot_reward(ax, obs_copy, r)
     env.plot_goals(ax)
-    plt.title(f"reward model")
+    plt.title("reward model")
 
     plot_dict = dict(reward_plot=wandb.Image(fig))
     plt.close(fig)
@@ -79,7 +222,7 @@ def plot_classifier(env, reward_model, dataset):
     fig, ax = plt.subplots()
     plot_reward(ax, obs_copy, r, no_norm=True)
     env.plot_goals(ax)
-    plt.title(f"reward model")
+    plt.title("reward model")
 
     plot_dict = dict(reward_plot=wandb.Image(fig))
     plt.close(fig)
@@ -107,7 +250,7 @@ def plot_mlp_samples(env, reward_model, samples=4):
     # r = reward_model.sample_reward(obs).detach().cpu().numpy()
     plot_reward(ax, obs_copy, r)
     env.plot_goals(ax)
-    plt.title(f"reward model variance")
+    plt.title("reward model variance")
     plot_dict["reward_variance"] = wandb.Image(fig)
     plt.close(fig)
     return plot_dict
