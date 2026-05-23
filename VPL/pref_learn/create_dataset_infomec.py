@@ -174,8 +174,8 @@ def main(_):
         src_var = annot.pref_spec_for_mode(mode, as_array=True)  # (n_sources,)
 
         dataset["labels"][i] = labels
-        source_vars[i] = src_var
-        source_modes[i] = mode
+        source_vars[i] = src_var  # (n_sources,)
+        source_modes[i] = mode  # (1,)
 
         obs.append(obs1)
         rewards.append(seg_return1)
@@ -190,6 +190,7 @@ def main(_):
         dataset["source_names"] = annot.source_specs["source_names"]  # [str]
         dataset["source_dims"] = annot.source_specs["source_dims"]  # [int]
         dataset["source_types"] = annot.source_specs["source_types"]  # [str]
+        dataset["source_mode_names"] = [str(s["name"]) for s in annot.ANNOTATOR_SPECS]
 
     # pref dataset assumed to have no labels.
     relabelled_path = str(query_path).replace("queries", "queries_relabelled")
@@ -203,7 +204,7 @@ def main(_):
     n_tot = len(source_modes)
     for m, c in zip(uniq_modes, mode_counts):
         pct = 100.0 * float(c) / float(n_tot)
-        print(f"  mode {int(m):>4}: count {int(c):>6} ({pct:5.1f}%)")
+        print(f"  pref mode {int(m):>4}: count {int(c):>6} ({pct:5.1f}%)")
     print(f"  total:       {n_tot:>6}")
 
     # * Observation–reward scatter: EE (x,y) axes match SortEnv observations only.

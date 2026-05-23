@@ -1,10 +1,18 @@
+import inspect
 import json
+import math
+import os
 import pickle
 import re
 from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union
+
+# Quiet transitive TF / numba noise before UMAP or other deps import them.
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
+os.environ.setdefault("NUMBA_THREADING_LAYER", "workqueue")
 
 import matplotlib
 import tyro
@@ -14,90 +22,50 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from matplotlib.axes import Axes
+from matplotlib.lines import Line2D
+from pref_learn.configs.data_configs import infomec_dataset_path_for_variant
+from pref_learn.models.utils import PreferenceDataset
 from pref_learn.utils.infomec import InfoMECResult, compute_infomec
-from sklearn.decomposition import PCA
-from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
-
-# Fixed colors for InfoM / InfoE / InfoC so legends match when a series is flat or empty.
-INFOMEC_COLOR_INFOM: str = "tab:blue"
-INFOMEC_COLOR_INFOE: str = "tab:orange"
-INFOMEC_COLOR_INFOC: str = "tab:green"
+from sklearn.manifold import TSNE
+from torch.utils.data import DataLoader
 
 
-def epoch_checkpoint_prefers_log_x(epochs: List[int]) -> bool:
-    """Log-scale epoch x-axis when spans orders of magnitude and bunches toward small epochs.
+class InfoMECCurveColor(str, Enum):
+    """Matplotlib line colors for InfoM / InfoE / InfoC (stable across flat series)."""
 
-    Uses only strictly positive epochs for the dynamic-range check (so ``model_0.pt`` is ok).
-    Same heuristic shape as :func:`run_infomec_sweep.beta_sweep_prefers_log_x`.
-    """
-    e = np.sort(np.unique(np.asarray(epochs, dtype=np.float64)))
-    if e.size < 3 or np.any(e < 0) or not np.all(np.isfinite(e)):
-        return False
-    e_pos = e[e > 0]
-    if e_pos.size < 2:
-        return False
-    dynamic_range = float(e_pos[-1] / e_pos[0])
-    if dynamic_range < 10.0:
-        return False
-    median = float(np.median(e))
-    b0, b1 = float(e[0]), float(e[-1])
-    linear_mid = 0.5 * (b0 + b1)
-    skewed_toward_small = median < 0.22 * linear_mid + 0.78 * b0
-    if skewed_toward_small:
-        return True
-    return dynamic_range >= 50.0
+    infom = "tab:blue"
+    infoe = "tab:orange"
+    infoc = "tab:green"
 
 
-def apply_checkpoint_epoch_x_scale(
-    ax_left: Axes,
-    epochs: List[int],
-    beta_x_axis: Literal["auto", "linear", "log"],
-) -> None:
-    """Set x-scale for InfoMEC vs checkpoint epoch (linear, log, or symlog if epoch 0 is present)."""
-    e = np.asarray(epochs, dtype=np.float64)
-    if beta_x_axis == "auto":
-        use_log = epoch_checkpoint_prefers_log_x(epochs)
-    elif beta_x_axis == "log":
-        use_log = True
-    else:
-        use_log = False
-    if not use_log:
-        return
-    if np.any(e < 0):
-        raise ValueError(
-            "log epoch axis requires non-negative checkpoint indices; "
-            f"got epochs={epochs!r}."
-        )
-    base_lbl = "epoch (from checkpoint name)"
-    if np.any(e <= 0):
-        e_pos = e[e > 0]
-        linthresh = max(1.0, float(np.min(e_pos)) * 0.1) if e_pos.size else 1.0
-        ax_left.set_xscale("symlog", linthresh=linthresh)
-        ax_left.set_xlabel(base_lbl + " — symlog scale (linear near 0)")
-    else:
-        ax_left.set_xscale("log")
-        ax_left.set_xlabel(base_lbl + " — log scale")
-    ax_left.grid(alpha=0.3, which="both")
+class LatentTableMapEnvId(str, Enum):
+    """``variant['env']`` values that enable the sort-easy object (x,y) table latent map in :func:`main`."""
+
+    sort_easy_v0 = "sort-easy-v0"
+
+
+class LatentClusterMethod(str, Enum):
+    """2D latent embedding for mode-colored scatter plots."""
+
+    tsne = "tsne"
+    umap = "umap"
 
 
 @dataclass
 class AnalysisCLI:
     """InfoMEC / NMI for one training directory (variant.json + checkpoint)."""
 
-    run_dir: Path
-    """Directory with variant.json and the checkpoint (see ckpt-name)."""
+    input_dir: Path
+    """Training run directory with variant.json and the checkpoint (see ckpt-name)."""
 
     ckpt_name: str = "best_model.pt"
-    """Checkpoint file name inside run_dir."""
+    """Checkpoint file name inside ``input_dir``."""
 
     dataset: Optional[Path] = None
-    """Override dataset pickle; default from variant.json dataset_path."""
+    """Override InfoMEC eval dataset pickle; default from variant infomec_dataset_path."""
 
-    split: Literal["all", "train", "eval"] = "eval"
+    split: Literal["all", "train", "eval"] = "all"
     """Which part of the preference dataset to use."""
-
-    source_keys: str = "auto"
-    """Comma-separated source fields, or 'auto' (source_variable, source_mode, annotator_id)."""
 
     batch_size: Optional[int] = None
     """Encoder batch size; default from variant.json."""
@@ -105,29 +73,143 @@ class AnalysisCLI:
     set_length: Optional[int] = None
     """Truncate set dimension; default from variant.json set_size."""
 
-    discrete_latents: bool = False
-    """If True, treat latents as discrete for InfoMEC."""
-
     num_bins: int = 10
     """Histogram bins when discretizing continuous sources."""
 
     device: str = "auto"
     """torch device name, or 'auto'."""
 
-    epoch_checkpoint_plot: bool = True
-    """If True, plot InfoMEC vs epoch for model_<n>.pt checkpoints in run_dir."""
+    latent_xy_table_grid: bool = True
+    """If True, write latent-mean heatmaps over **object** table position (``O[3:5]``) when env is sort-easy-v0."""
 
-    beta_x_axis: Literal["auto", "linear", "log"] = "auto"
-    """X-axis for the checkpoint-epoch InfoMEC curve PNG: ``auto`` (heuristic), or ``linear`` / ``log``. Same flag name as sweep (this script has no β sweep)."""
+    xy_grid_resolution: int = 48
+    """Square grid size (Gx=Gy) for the sort-easy-v0 table map; no effect if env is not sort-easy-v0."""
+
+    xy_grid_pad_rel: float = 0.02
+    """Pad data-driven x/y bounds by this relative margin; no effect if env is not sort-easy-v0."""
+
+    nmi_heatmap_active_dots: bool = True
+    """If True, draw a small red dot per (source, latent) cell for active latents on the NMI heatmap. Tyro: ``--no-nmi-heatmap-active-dots`` turns this off."""
+
+    latent_cluster: bool = True
+    """If True, 2D latent embedding colored by ``source_mode`` (see ``latent-cluster-method``). Tyro: ``--no-latent-cluster`` turns this off."""
+
+    latent_cluster_method: LatentClusterMethod = LatentClusterMethod.tsne
+    """Dimensionality reduction for latent scatter plots: ``tsne`` or ``umap``."""
+
+    tsne_perplexity: Optional[float] = None
+    """t-SNE perplexity; default min(30, max(2, N//3)) for N samples."""
+
+    tsne_max_iter: Optional[int] = None
+    """t-SNE ``max_iter``; sklearn default 1000 when unset. Use e.g. ``50`` for fast debug sweeps."""
+
+    umap_n_neighbors: Optional[int] = None
+    """UMAP ``n_neighbors``; default min(15, N-1) with N>=3."""
+
+    umap_min_dist: Optional[float] = None
+    """UMAP ``min_dist``; default 0.1."""
 
 
 _MODEL_CKPT_RE = re.compile(r"^model_(\d+)\.pt$")
 
+# Non-sweep ``plot_infomec.py`` runs use ``evals/<timestamp>_individual/``; sweep uses plain ``evals/<timestamp>/``.
+_INDIVIDUAL_EVAL_SUBDIR_TAG = "individual"
+BEST_CHECKPOINT_SELECTION = "best_eval_pref"
+
+
+def eval_run_outdir(input_dir: Path, eval_timestamp: str, *, sweep: bool = False) -> Path:
+    """``input_dir/evals/<timestamp>`` for sweep; ``.../<timestamp>_individual`` for single-run eval."""
+    name = eval_timestamp if sweep else f"{eval_timestamp}_{_INDIVIDUAL_EVAL_SUBDIR_TAG}"
+    return input_dir / "evals" / name
+
+
+def beta_from_variant(variant: dict) -> float:
+    return float(variant.get("kl_weight", 0.0))
+
+
+def infomec_run_label(input_dir: Path, variant: dict) -> str:
+    comment = str(variant.get("comment", "")).strip()
+    if comment:
+        return comment
+    return input_dir.name
+
+
+def format_checkpoint_choice_line(
+    *,
+    ckpt_name: str,
+    best_epoch: Optional[int],
+    best_selection: str = BEST_CHECKPOINT_SELECTION,
+) -> str:
+    if best_epoch is not None:
+        return f"{ckpt_name} = epoch {best_epoch} ({best_selection})"
+    return f"{ckpt_name} ({best_selection})"
+
+
+def format_latent_mask_counts_line(
+    *,
+    n_varies: int,
+    n_inform: int,
+    n_active: int,
+    latent_dim: int,
+) -> str:
+    return (
+        f"{{varies, inform, active}} / total: "
+        f"{{{n_varies},{n_inform},{n_active}}} / {latent_dim}"
+    )
+
+
+def latent_mask_counts_from_result(result: InfoMECResult) -> Tuple[int, int, int, int]:
+    latent_dim = int(len(result.active_latents))
+    return (
+        int(np.sum(result.varies_latents)),
+        int(np.sum(result.inform_latents)),
+        int(np.sum(result.active_latents)),
+        latent_dim,
+    )
+
+
+def format_infomec_run_title(
+    *,
+    infom: float,
+    infoe: float,
+    infoc: float,
+    n_varies: int,
+    n_inform: int,
+    n_active: int,
+    latent_dim: int,
+    run_label: str,
+    ckpt_name: str = "best_model.pt",
+    best_epoch: Optional[int] = None,
+    best_selection: str = BEST_CHECKPOINT_SELECTION,
+) -> str:
+    """Run label, InfoM/E/C, latent mask counts, and checkpoint selection (sweep + individual subplots)."""
+    ckpt_line = format_checkpoint_choice_line(
+        ckpt_name=ckpt_name,
+        best_epoch=best_epoch,
+        best_selection=best_selection,
+    )
+    counts_line = format_latent_mask_counts_line(
+        n_varies=n_varies,
+        n_inform=n_inform,
+        n_active=n_active,
+        latent_dim=latent_dim,
+    )
+    return (
+        f"{run_label}\n"
+        f"InfoMEC = {infom:.3f} / {infoe:.3f} / {infoc:.3f}\n"
+        f"{counts_line}\n"
+        f"{ckpt_line}"
+    )
+
 
 def gather_epoch_checkpoints(run_dir: Path) -> List[Tuple[int, Path]]:
-    """Paths like model_0.pt, model_450.pt under run_dir; sorted by epoch."""
+    """``run_dir/checkpoints/model_<epoch>.pt``; sorted by epoch. Empty if ``checkpoints/`` is missing."""
+    run_dir = run_dir.expanduser().resolve()
+    ckpt_sub = run_dir / "checkpoints"
+    if not ckpt_sub.is_dir():
+        return []
     pairs: List[Tuple[int, Path]] = []
-    for p in run_dir.iterdir():
+    for p in ckpt_sub.iterdir():
         if not p.is_file():
             continue
         m = _MODEL_CKPT_RE.match(p.name)
@@ -135,6 +217,65 @@ def gather_epoch_checkpoints(run_dir: Path) -> List[Tuple[int, Path]]:
             pairs.append((int(m.group(1)), p))
     pairs.sort(key=lambda x: x[0])
     return pairs
+
+
+def _model_state_dict(model_or_state: Any) -> Dict[str, torch.Tensor]:
+    if hasattr(model_or_state, "state_dict"):
+        return model_or_state.state_dict()
+    if isinstance(model_or_state, dict):
+        return model_or_state
+    raise TypeError(f"Expected torch Module or state_dict; got {type(model_or_state)!r}")
+
+
+def _state_dicts_allclose(a: Dict[str, torch.Tensor], b: Dict[str, torch.Tensor]) -> bool:
+    if a.keys() != b.keys():
+        return False
+    for key in a:
+        if not torch.allclose(a[key], b[key], rtol=0.0, atol=0.0):
+            return False
+    return True
+
+
+def resolve_best_checkpoint_epoch(
+    run_dir: Path, ckpt_name: str = "best_model.pt"
+) -> Optional[int]:
+    """Match ``run_dir/<ckpt_name>`` weights to ``checkpoints/model_<epoch>.pt``; None if unmatched."""
+    run_dir = run_dir.expanduser().resolve()
+    best_path = run_dir / ckpt_name
+    if not best_path.is_file():
+        return None
+    best_sd = _model_state_dict(
+        torch.load(best_path, map_location="cpu", weights_only=False)
+    )
+    for epoch, ckpt_path in gather_epoch_checkpoints(run_dir):
+        ckpt_sd = _model_state_dict(
+            torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        )
+        if _state_dicts_allclose(best_sd, ckpt_sd):
+            return int(epoch)
+    return None
+
+
+def place_infomec_twin_legend_outside(
+    ax_left: Axes,
+    ax_right: Axes,
+    *,
+    legend_fontsize: int = 8,
+) -> None:
+    """Combined legend for InfoM/E/C + active counts, centered below the left axis (outside the data)."""
+    h1, lab1 = ax_left.get_legend_handles_labels()
+    h2, lab2 = ax_right.get_legend_handles_labels()
+    if not h1 and not h2:
+        return
+    ax_left.legend(
+        h1 + h2,
+        lab1 + lab2,
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.2),
+        ncol=4,
+        fontsize=legend_fontsize,
+        frameon=True,
+    )
 
 
 def draw_infomec_epoch_trajectory_axes(
@@ -151,7 +292,7 @@ def draw_infomec_epoch_trajectory_axes(
     show_legend: bool = True,
     legend_fontsize: int = 8,
 ) -> None:
-    """Draw InfoM/E/C + active latents (twin) on existing axes; reused by sweep subplots."""
+    """Draw InfoM/E/C + active latents (twin) on existing axes. Set ``show_legend=False`` when a figure-level legend is used (e.g. sweep grid)."""
     infom_a = np.asarray(infom, dtype=np.float64)
     infoe_a = np.asarray(infoe, dtype=np.float64)
     infoc_a = np.asarray(infoc, dtype=np.float64)
@@ -165,7 +306,7 @@ def draw_infomec_epoch_trajectory_axes(
         label="InfoM",
         marker="o",
         markersize=3,
-        color=INFOMEC_COLOR_INFOM,
+        color=InfoMECCurveColor.infom,
     )
     ax_left.plot(
         epochs,
@@ -173,7 +314,7 @@ def draw_infomec_epoch_trajectory_axes(
         label="InfoE",
         marker="o",
         markersize=3,
-        color=INFOMEC_COLOR_INFOE,
+        color=InfoMECCurveColor.infoe,
     )
     ax_left.plot(
         epochs,
@@ -181,7 +322,7 @@ def draw_infomec_epoch_trajectory_axes(
         label="InfoC",
         marker="o",
         markersize=3,
-        color=INFOMEC_COLOR_INFOC,
+        color=InfoMECCurveColor.infoc,
     )
     ax_left.set_xlabel("epoch (from checkpoint name)")
     ax_left.set_ylabel("InfoM / InfoE / InfoC ([0, 1])")
@@ -211,9 +352,9 @@ def draw_infomec_epoch_trajectory_axes(
     ax_right.set_yticklabels(tick_lbl)
 
     if show_legend:
-        h1, lab1 = ax_left.get_legend_handles_labels()
-        h2, lab2 = ax_right.get_legend_handles_labels()
-        ax_left.legend(h1 + h2, lab1 + lab2, loc="best", fontsize=legend_fontsize)
+        place_infomec_twin_legend_outside(
+            ax_left, ax_right, legend_fontsize=legend_fontsize
+        )
 
 
 def plot_infomec_epoch_trajectory(
@@ -225,9 +366,9 @@ def plot_infomec_epoch_trajectory(
     latent_dim: int,
     outpath: Path,
     *,
-    beta_x_axis: Literal["auto", "linear", "log"] = "auto",
+    title: Optional[str] = None,
 ) -> None:
-    """Line plot: x=epoch; left y = InfoM/E/C in [0,1]; right y = same scale with active = n_active/L (ticks show counts)."""
+    """Line plot: x=epoch (linear only); left y = InfoM/E/C in [0,1]; right = active = n_active/L (ticks show counts)."""
     fig, ax_left = plt.subplots(figsize=(8, 4.5))
     ax_right = ax_left.twinx()
     draw_infomec_epoch_trajectory_axes(
@@ -239,10 +380,10 @@ def plot_infomec_epoch_trajectory(
         infoc,
         n_active,
         latent_dim,
+        title=title,
     )
-    apply_checkpoint_epoch_x_scale(ax_left, epochs, beta_x_axis)
-    plt.tight_layout()
-    plt.savefig(outpath, dpi=200)
+    fig.tight_layout(rect=[0, 0.1, 1, 0.99])
+    plt.savefig(outpath, dpi=200, bbox_inches="tight", pad_inches=0.12)
     plt.close(fig)
 
 
@@ -297,26 +438,39 @@ def collect_epoch_checkpoint_infomec_series(
 def save_infomec_epoch_series_artifacts(
     payload: Optional[Dict[str, Any]],
     outdir: Path,
-    beta_x_axis: Literal["auto", "linear", "log"] = "auto",
+    *,
+    title: Optional[str] = None,
+    best_epoch: Optional[int] = None,
+    best_selection: str = BEST_CHECKPOINT_SELECTION,
 ) -> None:
-    """Write infomec_over_epoch_checkpoints.png + infomec_epoch_checkpoint_curve.json if payload is set."""
+    """Write one epoch (linear x) curve and infomec_epoch_checkpoint_curve.json, if payload is set."""
     if payload is None:
         return
     outdir.mkdir(parents=True, exist_ok=True)
     latent_dim = int(payload["latent_dim"])
+    epochs = payload["epochs"]
+    infom = np.asarray(payload["infom"], dtype=np.float64)
+    infoe = np.asarray(payload["infoe"], dtype=np.float64)
+    infoc = np.asarray(payload["infoc"], dtype=np.float64)
+    n_active = np.asarray(payload["n_active_latents"], dtype=np.float64)
     plot_infomec_epoch_trajectory(
-        payload["epochs"],
-        np.asarray(payload["infom"], dtype=np.float64),
-        np.asarray(payload["infoe"], dtype=np.float64),
-        np.asarray(payload["infoc"], dtype=np.float64),
-        np.asarray(payload["n_active_latents"], dtype=np.float64),
+        epochs,
+        infom,
+        infoe,
+        infoc,
+        n_active,
         latent_dim,
         outdir / "infomec_over_epoch_checkpoints.png",
-        beta_x_axis=beta_x_axis,
+        title=title,
     )
 
+    payload_out = {
+        **payload,
+        "best_checkpoint_epoch": best_epoch,
+        "best_checkpoint_selection": best_selection,
+    }
     with open(outdir / "infomec_epoch_checkpoint_curve.json", "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2)
+        json.dump(payload_out, f, indent=2)
 
 
 def run_epoch_checkpoint_infomec_curve(
@@ -329,8 +483,6 @@ def run_epoch_checkpoint_infomec_curve(
     batch_size: int,
     device: torch.device,
     discrete_latents: bool,
-    *,
-    beta_x_axis: Literal["auto", "linear", "log"] = "auto",
 ) -> None:
     payload = collect_epoch_checkpoint_infomec_series(
         run_dir,
@@ -342,12 +494,12 @@ def run_epoch_checkpoint_infomec_curve(
         device,
         discrete_latents,
     )
-    save_infomec_epoch_series_artifacts(payload, outdir, beta_x_axis=beta_x_axis)
+    save_infomec_epoch_series_artifacts(payload, outdir)
 
 
 def save_eval_artifacts_after_encode(
     outdir: Path,
-    run_dir: Path,
+    input_dir: Path,
     latents: np.ndarray,
     sources: np.ndarray,
     result: InfoMECResult,
@@ -359,14 +511,25 @@ def save_eval_artifacts_after_encode(
     split: str,
     source_keys: List[str],
     eval_timestamp: str,
+    *,
+    run_title: Optional[str] = None,
+    nmi_heatmap_active_dots: bool = True,
+    latent_cluster: bool = True,
+    latent_cluster_method: LatentClusterMethod = LatentClusterMethod.tsne,
+    tsne_perplexity: Optional[float] = None,
+    tsne_max_iter: Optional[int] = None,
+    umap_n_neighbors: Optional[int] = None,
+    umap_min_dist: Optional[float] = None,
 ) -> Dict[str, Any]:
-    """Persist latents, NMI heatmap, PCA/LDA, infomec_metrics.json, summary.txt under outdir.
+    """Persist latents, NMI heatmap, latent 2D embedding, infomec_metrics.json, summary.txt under outdir.
 
     latents: (N, L) — N preference sets after split, L latent dim.
     sources: (N, S) — S binned/discrete source columns.
     obs1: (N, T, ...) or truncated set dim T per variant set_size.
     """
     outdir.mkdir(parents=True, exist_ok=True)
+    n_varies = int(np.sum(result.varies_latents))
+    n_inform = int(np.sum(result.inform_latents))
     n_active_latents = int(np.sum(result.active_latents))
     latent_dim = int(latents.shape[1])
 
@@ -375,32 +538,57 @@ def save_eval_artifacts_after_encode(
     np.save(outdir / "nmi.npy", result.nmi)
 
     latent_names = [f"z{j}" for j in range(latents.shape[1])]
+    al_for_plot = result.active_latents if nmi_heatmap_active_dots else None
+    plot_title = run_title or "InfoMEC normalized MI (sources x latents)"
     save_heatmap(
         result.nmi,
         source_names,
         latent_names,
-        title="InfoMEC normalized MI (sources x latents)",
+        title=plot_title,
         outpath=str(outdir / "infomec_nmi_heatmap.png"),
+        active_latents=al_for_plot,
+        title_fontsize=7,
     )
+    # save_heatmap(
+    #     result.nmi,
+    #     source_names,
+    #     latent_names,
+    #     title="InfoMEC normalized MI (sources x latents)",
+    #     outpath=str(outdir / "infomec_nmi_heatmap.png"),
+    #     active_latents=result.active_latents,
+    # )
 
-    first_source = sources[:, 0]
-    pca_var = maybe_save_pca(
-        latents,
-        first_source,
-        str(outdir / "pca_by_first_source.png"),
-        f"PCA colored by {source_names[0]}",
+    mode_color = source_mode_labels_for_split(dataset_path=dataset_path, split=split)
+    mode_names = source_mode_names_from_dataset(dataset_path=dataset_path)
+    assert len(mode_color) == len(latents), (
+        f"source_mode N={len(mode_color)} != latents N={len(latents)}"
     )
-    maybe_save_lda(
+    projection_png = outdir / f"{latent_cluster_method.value}_by_source_mode.png"
+    projection_info = maybe_save_latent_projection(
         latents,
-        first_source,
-        str(outdir / "lda_by_first_source.png"),
-        f"LDA by {source_names[0]}",
+        mode_color,
+        str(projection_png),
+        plot_title,
+        method=latent_cluster_method,
+        tsne_perplexity=tsne_perplexity,
+        tsne_max_iter=tsne_max_iter,
+        umap_n_neighbors=umap_n_neighbors,
+        umap_min_dist=umap_min_dist,
+        enabled=latent_cluster,
+        mode_names=mode_names,
+        title_fontsize=7,
+    )
+    projection_metrics = latent_projection_metrics_from_info(
+        projection_info=projection_info,
+        method=latent_cluster_method,
+        png_path=projection_png,
+        mode_names=mode_names,
     )
 
     metrics = result.to_dict()
     metrics.update(
         {
-            "run_dir": str(run_dir),
+            "input_dir": str(input_dir),
             "eval_dir": str(outdir),
             "eval_timestamp": eval_timestamp,
             "dataset_path": str(dataset_path),
@@ -413,7 +601,7 @@ def save_eval_artifacts_after_encode(
             "num_sources": int(sources.shape[1]),
             "latent_dim": int(latents.shape[1]),
             "split": split,
-            "pca_explained_variance_ratio": pca_var,
+            **projection_metrics,
         }
     )
     if (outdir / "infomec_epoch_checkpoint_curve.json").is_file():
@@ -431,7 +619,20 @@ def save_eval_artifacts_after_encode(
         f.write(f"infoc={metrics['infoc']:.6f}\n")
         f.write(f"infoe={metrics['infoe']:.6f}\n")
         f.write(f"source_explicitness={metrics['source_explicitness']}\n")
-        f.write(f"active_latents={n_active_latents}/{latent_dim}\n")
+        f.write(
+            format_latent_mask_counts_line(
+                n_varies=n_varies,
+                n_inform=n_inform,
+                n_active=n_active_latents,
+                latent_dim=latent_dim,
+            )
+            + "\n"
+        )
+        if projection_info is not None:
+            f.write(
+                f"latent_projection_gt_modes_seen={projection_info['n_gt_modes_seen']} "
+                f"{projection_info['gt_modes_seen']}\n"
+            )
 
     return metrics
 
@@ -473,6 +674,14 @@ def resolve_dataset_path(
     )
 
 
+def resolve_infomec_dataset_path(
+    run_dir: Path, variant: dict, override: Optional[Path]
+) -> Path:
+    """InfoMEC held-out pref set; train/val use ``variant['dataset_path']``."""
+    dataset_rel = infomec_dataset_path_for_variant(variant=variant)
+    return resolve_dataset_path(run_dir, dataset_rel, override)
+
+
 def split_indices(n: int, split: str) -> np.ndarray:
     eval_size = int(0.1 * n)
     train_size = n - eval_size
@@ -483,43 +692,66 @@ def split_indices(n: int, split: str) -> np.ndarray:
     return np.arange(train_size, n)
 
 
+def display_source_variable_name(name: str) -> str:
+    """``pref_vertical`` -> ``vertical``; leave other names unchanged."""
+    if name.startswith("pref_"):
+        return name[len("pref_") :]
+    return name
+
+
+def source_variable_display_names_from_batch(batch: dict) -> Optional[List[str]]:
+    raw = batch.get("source_names")
+    if raw is None:
+        return None
+    return [display_source_variable_name(str(n)) for n in raw]
+
+
+def source_mode_names_from_dataset(dataset_path: Path) -> Optional[List[str]]:
+    """Mode index -> name list from relabelled dataset (``source_mode_names``), if present."""
+    with open(dataset_path, "rb") as fp:
+        batch = pickle.load(fp)
+    raw = batch.get("source_mode_names")
+    if raw is None:
+        return None
+    return [str(x) for x in raw]
+
+
+def source_mode_display_name(mode: int, mode_names: Optional[List[str]]) -> str:
+    if mode_names is not None and 0 <= mode < len(mode_names):
+        return mode_names[mode]
+    return f"mode {mode}"
+
+
+def source_mode_labels_for_split(dataset_path: Path, split: str) -> np.ndarray:
+    """Per-query preference annotator mode from relabelled dataset: ``source_mode`` (Q, 1) -> (N,)."""
+    with open(dataset_path, "rb") as fp:
+        batch = pickle.load(fp)
+    if "source_mode" not in batch:
+        raise KeyError(
+            f"dataset missing 'source_mode' (create with store_source_mode=True): {dataset_path}"
+        )
+    idx = split_indices(len(batch["observations"]), split)
+    sm = np.asarray(batch["source_mode"])[idx]  # (N, 1) or (N,)
+    if sm.ndim == 2:
+        sm = sm[:, 0]
+    return np.asarray(sm).reshape(-1)
+
+
 def maybe_truncate(arr: np.ndarray, set_length: int) -> np.ndarray:
     if set_length < 0 or arr.ndim < 2:
         return arr
     return arr[:, :set_length]
 
 
-def resolve_source_keys(batch: dict, source_keys_arg: str) -> List[str]:
+def infer_source_keys_from_batch(batch: dict) -> List[str]:
     available = set(batch.keys())
-    aliases = {
-        "source_variable": ["source_variable", "source_mode", "annotator_id"],
-        "source_mode": ["source_mode", "source_variable", "annotator_id"],
-        "annotator_id": ["annotator_id", "source_variable", "source_mode"],
-    }
-
-    if source_keys_arg.strip().lower() == "auto":
-        for candidates in (["source_variable"], ["source_mode"], ["annotator_id"]):
-            if candidates[0] in available:
-                return candidates
-        raise KeyError(
-            "Could not infer source keys automatically. Expected one of source_variable, source_mode, or annotator_id. "
-            f"Available keys include: {sorted(batch.keys())[:40]}"
-        )
-
-    resolved = []
-    for raw_key in [k.strip() for k in source_keys_arg.split(",") if k.strip()]:
-        if raw_key in available:
-            resolved.append(raw_key)
-            continue
-        for candidate in aliases.get(raw_key, []):
-            if candidate in available:
-                resolved.append(candidate)
-                break
-        else:
-            raise KeyError(
-                f"Source key '{raw_key}' not found in dataset. Available keys include: {sorted(batch.keys())[:40]}"
-            )
-    return resolved
+    for candidates in (["source_variable"], ["source_mode"], ["annotator_id"]):
+        if candidates[0] in available:
+            return candidates
+    raise KeyError(
+        "Could not infer source keys from dataset. Expected one of source_variable, source_mode, or annotator_id. "
+        f"Available keys include: {sorted(batch.keys())[:40]}"
+    )
 
 
 def infer_source_columns(
@@ -573,9 +805,357 @@ def batched_encode(model, obs1, obs2, labels, batch_size, device):
         o2 = torch.from_numpy(obs2[start:end]).float().to(device)
         y = torch.from_numpy(labels[start:end]).float().to(device)
         with torch.no_grad():
-            mean, _ = model.encode(o1, o2, y)
+            mean, _ = model.encode(o1, o2, y)  # B, Z
         means.append(mean.cpu().numpy())
     return np.concatenate(means, axis=0)
+
+
+def preference_dataloader_for_split(
+    dataset_path: Path,
+    split: str,
+    set_length: int,
+    observation_dim: int,
+    action_dim: int,
+    batch_size: int,
+) -> DataLoader:
+    """Preference DataLoader over one train/eval/all split (shuffle=False, matches eval order)."""
+    with open(dataset_path, "rb") as fp:
+        batch = pickle.load(fp)
+
+    batch["observations"] = batch["observations"][..., :observation_dim]
+    batch["observations_2"] = batch["observations_2"][..., :observation_dim]
+    assert batch["actions"].shape[-1] == action_dim
+    if set_length < 0:
+        set_length = batch["observations"].shape[1]
+
+    idx = split_indices(len(batch["observations"]), split)
+    sub = {
+        "observations": batch["observations"][idx, :set_length],
+        "observations_2": batch["observations_2"][idx, :set_length],
+        "labels": batch["labels"][idx, :set_length],
+    }
+    dataset = PreferenceDataset(sub)
+    return DataLoader(
+        dataset=dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=0,
+        pin_memory=False,
+    )
+
+
+def encode_latents_dataloader(
+    model: torch.nn.Module,
+    loader: DataLoader,
+    device: torch.device,
+) -> np.ndarray:
+    """Encoder posterior means for each preference row, in DataLoader order (train.py-style batches)."""
+    model.eval()
+    means: List[np.ndarray] = []
+    with torch.no_grad():
+        for batch in loader:
+            o1 = batch["observations"].to(device).float()  # (B, A, T, O)
+            o2 = batch["observations_2"].to(device).float()
+            y = batch["labels"].to(device).float()
+            mean, _ = model.encode(o1, o2, y)  # (B, Z)
+            means.append(mean.cpu().numpy())
+    return np.concatenate(means, axis=0)  # (N, Z)
+
+
+def xy_table_extents_from_dataset_observations(
+    obs: np.ndarray,
+    frame_index: int = -1,
+    pad_rel: float = 0.0,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Min/max of table plane using **object** horizontal position, ``O[3:5]`` (SortEnv: obj x, obj y).
+
+    obs: (N, A, T, O) — N preference rows, A annotations, T time, O state; require ``O >= 5``.
+    frame_index: T index; -1 = last frame.
+    pad_rel: expand each axis span by this fraction (e.g. 0.02) so the grid does not clip.
+
+    Returns (lo, hi) with shape (2,) each: ``[obj_x_lo, obj_y_lo]`` and ``[obj_x_hi, obj_y_hi]`` (world).
+    """
+    obs = np.asarray(obs)
+    if obs.ndim != 4 or obs.shape[-1] < 5:
+        raise ValueError(
+            f"expected obs (N, A, T, O) with O>=5 for O[3:5] object (x,y); got shape {obs.shape!r}"
+        )
+    t = (
+        int(frame_index)
+        if int(frame_index) >= 0
+        else int(obs.shape[2] + int(frame_index))
+    )
+    corners = obs[:, :, t, 3:5]  # (N, A, 2) — object (x, y) world (SortEnv)
+    # corners = obs[:, :, t, 0:2]  # (N, A, 2) — (ee x, y) if using gripper
+    flat = corners.reshape(-1, 2)
+    lo = np.min(flat, axis=0)
+    hi = np.max(flat, axis=0)
+    span = hi - lo
+    span = np.where(span < 1e-12, 1.0, span)
+    if pad_rel > 0.0:
+        lo = lo - float(pad_rel) * span
+        hi = hi + float(pad_rel) * span
+    return lo, hi
+
+
+def kl_diag_gaussian_to_standard_normal(
+    mean: np.ndarray, log_var: np.ndarray
+) -> np.ndarray:
+    """
+    KL( N(mean, exp(log_var)) || N(0, I) ) for matching shapes, elementwise (Kingma & Welling).
+
+    mean, log_var: same shape, last dim = latent — e.g. (Gy, Gx, L).
+    Returns same shape, each entry is the KL for that scalar marginal vs standard normal.
+    """
+    mean = np.asarray(mean, dtype=np.float64)
+    log_var = np.asarray(log_var, dtype=np.float64)
+    return 0.5 * (np.exp(log_var) + mean**2.0 - 1.0 - log_var)
+
+
+def encode_posterior_mu_logvar_unperturbed(
+    model: torch.nn.Module,
+    obs1: np.ndarray,
+    obs2: np.ndarray,
+    labels: np.ndarray,
+    device: torch.device,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    q(z|s1,s2,y) for a single batch row: encoder mean and log_var (diagonal), no table sweep.
+
+    obs1, obs2: (1, A, T, O) — (B, A, T, O) with B=1.
+    labels: (1, A) or (1, A, 1) matching the dataset layout.
+
+    Returns
+    -------
+    mu : (L,) float64 — posterior mean per dim.
+    log_var : (L,) float64 — log sigma^2; Var_q(z_k) = exp(log_var[k]).
+    """
+    o1 = np.asarray(obs1, dtype=np.float32)
+    o2 = np.asarray(obs2, dtype=np.float32)
+    y0 = np.asarray(labels, dtype=np.float32)
+    a_max = int(o1.shape[1])
+    if o1.shape[0] != 1 or o2.shape[0] != 1:
+        raise ValueError("expected batch 1 for template encode")
+    if int(y0.shape[1]) != a_max:
+        raise ValueError(f"labels second dim must match A={a_max}; got {y0.shape!r}")
+    y_3d = y0.reshape(1, a_max, -1)
+    t1 = torch.from_numpy(o1).float().to(device)
+    t2 = torch.from_numpy(o2).float().to(device)
+    yv = torch.from_numpy(y_3d).float().to(device)
+    with torch.no_grad():
+        m, lv = model.encode(t1, t2, yv)
+    return m.cpu().numpy().reshape(-1), lv.cpu().numpy().reshape(-1)
+
+
+def encode_latent_means_on_xy_table_grid(
+    model: torch.nn.Module,
+    base_obs1: np.ndarray,
+    base_obs2: np.ndarray,
+    base_labels: np.ndarray,
+    x_vals: np.ndarray,
+    y_vals: np.ndarray,
+    device: torch.device,
+    *,
+    annotation_index: int = 0,
+    time_index: int = -1,
+    move: Literal["obs1", "obs2", "both"] = "obs1",
+    max_batch: int = 1024,
+) -> np.ndarray:
+    """
+    VAE encoder posterior *mean* on a 2D grid of **object** table positions (SortEnv ``O[3:5]``).
+
+    Subplot layout: **horizontal axis = object world y (``O[4]``)** = left vs. right goal;
+    **vertical axis = object world x (``O[3]``)**.
+
+    Starts from a single preference example (batch 1), overwrites only ``O[3]``, ``O[4]`` in
+    the chosen obs slot(s) at (annotation_index, time_index) with a Cartesian grid, and
+    encodes: (Gy, Gx) points, latent_dim L => means ``(Gy, Gx, L)``.
+
+    Shapes: base_obs{1,2} (1, A, T, O) with O>=5. ``x_vals`` (Gx,) = 1D grid of **object y** (plot
+    columns / horiz.); ``y_vals`` (Gy,) = 1D grid of **object x** (plot rows / vert.).
+    time_index: -1 = last T (default).
+
+    Returns
+    -------
+    means : (Gy, Gx, L) — row = object x, col = object y; imshow: x-axis = object y, y-axis = object x.
+    """
+    o1 = np.asarray(base_obs1, dtype=np.float32)
+    o2 = np.asarray(base_obs2, dtype=np.float32)
+    y0 = np.asarray(base_labels, dtype=np.float32)
+    gx = len(np.asarray(x_vals).reshape(-1))
+    gy = len(np.asarray(y_vals).reshape(-1))
+    b_total = int(gx * gy)
+    if o1.shape[0] != 1 or o2.shape[0] != 1:
+        raise ValueError("base_obs1/base_obs2 must have batch 1 for the template")
+    a_max = o1.shape[1]
+    t_len = o1.shape[2]
+    o_dim = int(o1.shape[-1])
+    if o_dim < 5:
+        raise ValueError(
+            f"encode_latent_means_on_xy_table_grid needs O>=5 for object O[3:5]; got O={o_dim}"
+        )
+    if not (0 <= int(annotation_index) < a_max):
+        raise ValueError(
+            f"annotation_index={annotation_index} out of range for A={a_max}"
+        )
+    t = int(time_index) if int(time_index) >= 0 else int(t_len + int(time_index))
+    if not (0 <= t < t_len):
+        raise ValueError(f"time_index resolved to t={t} out of range for T={t_len}")
+
+    o1b = np.broadcast_to(o1, (b_total, *o1.shape[1:])).copy()
+    o2b = np.broadcast_to(o2, (b_total, *o2.shape[1:])).copy()
+    if int(y0.shape[1]) != a_max:
+        raise ValueError(f"base_labels second dim must match A={a_max}; got {y0.shape!r}")
+    y_3d = y0.reshape(1, a_max, -1)  # (1, A, 1) — label per annotation
+    yb = np.broadcast_to(y_3d, (b_total, a_max, y_3d.shape[2])).copy()
+
+    # x_i, y_i: (Gy, Gx) — x_i = object y (horizontal in plot), y_i = object x (vertical)
+    y_i, x_i = np.meshgrid(
+        np.asarray(y_vals).reshape(-1), np.asarray(x_vals).reshape(-1), indexing="ij"
+    )
+    flat_obj_y = x_i.ravel()  # (B,) = object y (G_obj_x * G_obj_y) — B grid points
+    flat_obj_x = y_i.ravel()  # (B,) = object x
+    if move in ("obs1", "both"):
+        o1b[:, annotation_index, t, 3] = flat_obj_x
+        o1b[:, annotation_index, t, 4] = flat_obj_y
+        # o1b[:, annotation_index, t, 0] = flat_grip_x
+        # o1b[:, annotation_index, t, 1] = flat_grip_y
+    if move in ("obs2", "both"):
+        o2b[:, annotation_index, t, 3] = flat_obj_x
+        o2b[:, annotation_index, t, 4] = flat_obj_y
+        # o2b[:, annotation_index, t, 0] = flat_grip_x
+        # o2b[:, annotation_index, t, 1] = flat_grip_y
+
+    means_b: List[np.ndarray] = []
+    o1b_t = o1b
+    o2b_t = o2b
+    yb_t = yb
+    for start in range(0, b_total, int(max_batch)):
+        end = min(start + int(max_batch), b_total)
+        t1 = torch.from_numpy(o1b_t[start:end]).float().to(device)
+        t2 = torch.from_numpy(o2b_t[start:end]).float().to(device)
+        yv = torch.from_numpy(yb_t[start:end]).float().to(device)
+        with torch.no_grad():
+            m, _ = model.encode(t1, t2, yv)
+        means_b.append(m.cpu().numpy())
+    m_all = np.concatenate(means_b, axis=0)  # (B, L) — (Gx*Gy, L)
+    l_m = int(m_all.shape[1])
+    return m_all.reshape(gy, gx, l_m)
+
+
+def save_latent_xy_grid_heatmaps(
+    means: np.ndarray,
+    x_vals: np.ndarray,
+    y_vals: np.ndarray,
+    outpath: Union[str, Path],
+    *,
+    template_mean: Optional[np.ndarray] = None,
+    template_log_var: Optional[np.ndarray] = None,
+    title: str = "Encoder mean vs object (x, y) on table at (annotation, time) grid",
+) -> None:
+    """
+    means: (Gy, Gx, L) from :func:`encode_latent_means_on_xy_table_grid` — row = object x, col = object y.
+
+    template_mean, template_log_var: optional (L,) from
+    :func:`encode_posterior_mu_logvar_unperturbed` on the *same* base row (unperturbed);
+    if both set, subplot titles add sigma^2_k = exp(log_var_k) and KL( q_k || N(0,1) )
+    for that data point (no average over the grid).
+    x_vals: (Gx,) = object **y** (world) — imshow **horizontal**; y_vals: (Gy,) = object **x** (world) — **vertical**.
+    """
+    means = np.asarray(means)
+    if means.ndim != 3:
+        raise ValueError(f"expected means (Gy, Gx, L), got {means.shape!r}")
+    gy, gx, l_dim = int(means.shape[0]), int(means.shape[1]), int(means.shape[2])
+    if (
+        len(np.asarray(x_vals).reshape(-1)) != gx
+        or len(np.asarray(y_vals).reshape(-1)) != gy
+    ):
+        raise ValueError("x_vals / y_vals length must match Gx, Gy in means")
+    use_subtitles = template_mean is not None and template_log_var is not None
+    if use_subtitles:
+        tm = np.asarray(template_mean, dtype=np.float64).reshape(-1)
+        tlv = np.asarray(template_log_var, dtype=np.float64).reshape(-1)
+        if tm.shape[0] != l_dim or tlv.shape[0] != l_dim:
+            raise ValueError(
+                f"template_mean and template_log_var must have length L={l_dim}; "
+                f"got {tm.shape!r} and {tlv.shape!r}"
+            )
+        kl_1d = kl_diag_gaussian_to_standard_normal(tm, tlv)  # (L,)
+    ncols = int(min(4, max(1, l_dim)))
+    nrows = (l_dim + ncols - 1) // ncols
+    fig, axes = plt.subplots(
+        nrows, ncols, figsize=(3.2 * ncols, 2.8 * nrows + 0.3), squeeze=False
+    )
+    xv = np.asarray(x_vals, dtype=np.float64).reshape(-1)
+    yv = np.asarray(y_vals, dtype=np.float64).reshape(-1)
+    extent = (float(xv[0]), float(xv[-1]), float(yv[0]), float(yv[-1]))
+    for k in range(l_dim):
+        r, c = divmod(k, ncols)
+        ax = axes[r][c]
+        im = ax.imshow(
+            means[:, :, k],
+            origin="lower",
+            extent=extent,
+            aspect="auto",
+        )
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        ax.set_xlabel("object y (O[4]) — left vs right goal")
+        ax.set_ylabel("object x (O[3])")
+        if use_subtitles:
+            sigma2_k = float(np.exp(tlv[k]))
+            kl_k = float(kl_1d[k])
+            ax.set_title(
+                f"$z_{{{k}}}$ (encoder mean)\n"
+                rf"$\sigma^2_k$={sigma2_k:.4g}  $\mathrm{{KL}}_k$={kl_k:.4g} (at template)",
+                fontsize=8,
+            )
+        else:
+            ax.set_title(f"$z_{{{k}}}$ (encoder mean)")
+    for k in range(l_dim, nrows * ncols):
+        r, c = divmod(k, ncols)
+        axes[r][c].axis("off")
+    fig.suptitle(title, fontsize=11)
+    plt.tight_layout()
+    outpath = Path(outpath)
+    outpath.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(outpath, dpi=200)
+    plt.close(fig)
+
+
+def _overlay_nmi_active_latent_dots(
+    ax: Axes,
+    mat: np.ndarray,
+    active_latents: np.ndarray,
+    *,
+    color: str = "red",
+    size_pts2: float = 5.0,
+) -> None:
+    """One marker per (source, latent) cell: row i = source, col j = latent. mat (S, L). active (L,)."""
+    S, L = int(mat.shape[0]), int(mat.shape[1])
+    act = np.asarray(active_latents, dtype=bool).reshape(-1)
+    if act.size != L or not act.any():
+        return
+    # ii, jj: (S, L) — row and column index in imshow; cell centers (jj, ii) in data coords, origin=upper
+    ii, jj = np.meshgrid(
+        np.arange(S, dtype=np.float64), np.arange(L, dtype=np.float64), indexing="ij"
+    )
+    m = act[jj.astype(np.intp)]
+    ax.scatter(
+        jj[m],
+        ii[m],
+        c=color,
+        s=size_pts2,
+        marker="o",
+        zorder=5,
+        linewidths=0,
+    )
+
+
+def _nmi_heatmap_vlim(mat: np.ndarray) -> Tuple[float, float]:
+    """NMI heatmaps: floor at 0, ceiling at observed max in this matrix."""
+    vmax = float(np.max(mat)) if mat.size else 0.0
+    return 0.0, max(vmax, 1e-12)
 
 
 def save_heatmap(
@@ -584,13 +1164,21 @@ def save_heatmap(
     col_names: List[str],
     title: str,
     outpath: str,
+    active_latents: Optional[np.ndarray] = None,
+    *,
+    title_fontsize: int = 8,
 ):
     plt.figure(figsize=(max(6, len(col_names) * 0.35), max(3, len(row_names) * 0.55)))
-    im = plt.imshow(mat, aspect="auto")
+    ax = plt.gca()
+    vmin, vmax = _nmi_heatmap_vlim(mat)
+    im = ax.imshow(mat, aspect="auto", vmin=vmin, vmax=vmax)
+    # im = plt.imshow(mat, aspect="auto")
+    if active_latents is not None:
+        _overlay_nmi_active_latent_dots(ax, mat, active_latents)
     plt.colorbar(im)
     plt.xticks(np.arange(len(col_names)), col_names, rotation=90)
     plt.yticks(np.arange(len(row_names)), row_names)
-    plt.title(title)
+    plt.title(title, fontsize=title_fontsize)
     plt.tight_layout()
     plt.savefig(outpath, dpi=200)
     plt.close()
@@ -603,9 +1191,13 @@ def plot_nmi_heatmap_on_ax(
     col_names: List[str],
     title: str,
     title_fontsize: int = 8,
+    active_latents: Optional[np.ndarray] = None,
 ) -> Any:
     """Draw NMI heatmap on an existing axes (for sweep grid); mirrors save_heatmap styling."""
-    im = ax.imshow(mat, aspect="auto")
+    vmin, vmax = _nmi_heatmap_vlim(mat)
+    im = ax.imshow(mat, aspect="auto", vmin=vmin, vmax=vmax)
+    if active_latents is not None:
+        _overlay_nmi_active_latent_dots(ax, mat, active_latents)
     plt.colorbar(im, ax=ax, fraction=0.04, pad=0.04)
     ax.set_xticks(np.arange(len(col_names)))
     ax.set_xticklabels(col_names, rotation=90, fontsize=6)
@@ -613,6 +1205,13 @@ def plot_nmi_heatmap_on_ax(
     ax.set_yticklabels(row_names, fontsize=6)
     ax.set_title(title, fontsize=title_fontsize)
     return im
+
+
+def resolve_discrete_latents(model: Any, variant: Dict[str, Any]) -> bool:
+    """Prefer checkpoint attribute; fall back to variant.json for old checkpoints."""
+    if hasattr(model, "discrete_latents"):
+        return bool(model.discrete_latents)
+    return bool(variant.get("discrete_latents", False))
 
 
 def resolve_eval_device(device_str: str) -> torch.device:
@@ -625,7 +1224,6 @@ def prepare_infomec_eval_arrays(
     run_dir: Path,
     *,
     split: str,
-    source_keys: str,
     num_bins: int,
     batch_size: Optional[int],
     set_length: Optional[int],
@@ -653,9 +1251,7 @@ def prepare_infomec_eval_arrays(
     variant = meta["variant"]
     bs = int(variant["batch_size"]) if batch_size is None else int(batch_size)
     sl = int(variant["set_size"]) if set_length is None else int(set_length)
-    dataset_path = resolve_dataset_path(
-        run_dir, str(variant["dataset_path"]), dataset_override
-    )
+    dataset_path = resolve_infomec_dataset_path(run_dir, variant, dataset_override)
     with open(dataset_path, "rb") as f:
         batch = pickle.load(f)
     n = len(batch["observations"])
@@ -664,11 +1260,18 @@ def prepare_infomec_eval_arrays(
     obs2 = maybe_truncate(np.asarray(batch["observations_2"])[idx], sl)
     labels = maybe_truncate(np.asarray(batch["labels"])[idx], sl)
     device = resolve_eval_device(device_str)
-    sk = resolve_source_keys(batch, source_keys)
+    sk = infer_source_keys_from_batch(batch)
+    dataset_var_names = source_variable_display_names_from_batch(batch)
     source_cols = []
     source_names: List[str] = []
+    var_name_idx = 0
     for key in sk:
         cols, names = infer_source_columns(np.asarray(batch[key])[idx], key, num_bins)
+        if key == "source_variable" and dataset_var_names is not None:
+            ncols = int(cols.shape[1])
+            if var_name_idx + ncols <= len(dataset_var_names):
+                names = dataset_var_names[var_name_idx : var_name_idx + ncols]
+                var_name_idx += ncols
         source_cols.append(cols)
         source_names.extend(names)
     sources = np.concatenate(source_cols, axis=1)
@@ -686,61 +1289,493 @@ def prepare_infomec_eval_arrays(
     )
 
 
-def maybe_save_lda(latents: np.ndarray, y: np.ndarray, outpath: str, title: str):
-    classes = np.unique(y)
-    if len(classes) < 2:
-        return
-    n_comp = 1 if len(classes) == 2 else 2
-    lda = LinearDiscriminantAnalysis(n_components=n_comp)
-    proj = lda.fit_transform(latents, y)
-    plt.figure(figsize=(6, 5))
-    if n_comp == 1:
-        plt.scatter(proj[:, 0], np.zeros_like(proj[:, 0]), c=y, s=12, alpha=0.8)
-        plt.yticks([])
-        plt.xlabel("LD1")
+def resolve_tsne_perplexity(n: int, perplexity: Optional[float] = None) -> float:
+    if perplexity is None:
+        perp = float(min(30.0, max(2.0, n // 3)))
     else:
-        plt.scatter(proj[:, 0], proj[:, 1], c=y, s=12, alpha=0.8)
-        plt.xlabel("LD1")
-        plt.ylabel("LD2")
-    plt.title(title)
-    plt.tight_layout()
-    plt.savefig(outpath, dpi=200)
-    plt.close()
+        perp = float(perplexity)
+    return min(perp, float(max(2, n - 1)))
 
 
-def maybe_save_pca(latents: np.ndarray, y: np.ndarray, outpath: str, title: str):
-    if latents.ndim != 2 or latents.shape[1] < 2:
+def resolve_umap_n_neighbors(n: int, n_neighbors: Optional[int] = None) -> int:
+    if n_neighbors is None:
+        return max(2, min(15, n - 1))
+    return max(2, min(int(n_neighbors), n - 1))
+
+
+def projection_display_name(method: LatentClusterMethod) -> str:
+    if method == LatentClusterMethod.umap:
+        return "UMAP"
+    return "t-SNE"
+
+
+def projection_axis_labels(method: LatentClusterMethod) -> Tuple[str, str]:
+    name = projection_display_name(method=method)
+    return f"{name} 1", f"{name} 2"
+
+
+def _tsne_iteration_kwarg_name() -> str:
+    """``max_iter`` (sklearn >= 1.2) or legacy ``n_iter``."""
+    params = inspect.signature(TSNE.__init__).parameters
+    if "max_iter" in params:
+        return "max_iter"
+    if "n_iter" in params:
+        return "n_iter"
+    raise RuntimeError("TSNE has neither max_iter nor n_iter")
+
+
+_TSNE_ITER_KWARG = _tsne_iteration_kwarg_name()
+
+
+def fit_tsne_projection(
+    latents: np.ndarray,
+    *,
+    perplexity: Optional[float] = None,
+    max_iter: Optional[int] = None,
+    random_state: int = 0,
+) -> Optional[Tuple[np.ndarray, Dict[str, Any]]]:
+    """Return (proj, params) with shape (N, 2), or None if t-SNE is not feasible."""
+    if latents.ndim != 2 or latents.shape[0] < 3:
         return None
-    pca = PCA(n_components=2, random_state=0)
-    proj = pca.fit_transform(latents)
-    plt.figure(figsize=(6, 5))
-    plt.scatter(proj[:, 0], proj[:, 1], c=y, s=12, alpha=0.8)
-    plt.xlabel("PC1")
-    plt.ylabel("PC2")
-    plt.title(title)
-    plt.tight_layout()
-    plt.savefig(outpath, dpi=200)
-    plt.close()
-    return pca.explained_variance_ratio_.tolist()
+    n = int(latents.shape[0])
+    perp = resolve_tsne_perplexity(n=n, perplexity=perplexity)
+    max_iter_used = 1000 if max_iter is None else int(max_iter)
+    tsne = TSNE(
+        n_components=2,
+        perplexity=perp,
+        random_state=random_state,
+        init="pca",
+        learning_rate="auto",
+        **{_TSNE_ITER_KWARG: max_iter_used},
+    )
+    proj = tsne.fit_transform(latents)  # (N, 2)
+    return proj, {"method": "tsne", "perplexity": perp, "max_iter": max_iter_used}
+
+
+def fit_umap_projection(
+    latents: np.ndarray,
+    *,
+    n_neighbors: Optional[int] = None,
+    min_dist: Optional[float] = None,
+    random_state: int = 0,
+) -> Optional[Tuple[np.ndarray, Dict[str, Any]]]:
+    """Return (proj, params) with shape (N, 2), or None if UMAP is not feasible."""
+    if latents.ndim != 2 or latents.shape[0] < 3:
+        return None
+    try:
+        import umap
+    except ImportError as e:
+        raise ImportError(
+            "Install umap-learn for --latent-cluster-method umap "
+            "(e.g. pip install umap-learn)"
+        ) from e
+    n = int(latents.shape[0])
+    n_neighbors_used = resolve_umap_n_neighbors(n=n, n_neighbors=n_neighbors)
+    min_dist_used = 0.1 if min_dist is None else float(min_dist)
+    reducer = umap.UMAP(
+        n_components=2,
+        n_neighbors=n_neighbors_used,
+        min_dist=min_dist_used,
+        random_state=random_state,
+        n_jobs=1,
+    )
+    proj = reducer.fit_transform(latents)  # (N, 2)
+    return proj, {
+        "method": "umap",
+        "n_neighbors": n_neighbors_used,
+        "min_dist": min_dist_used,
+    }
+
+
+def fit_latent_projection(
+    latents: np.ndarray,
+    method: LatentClusterMethod,
+    *,
+    tsne_perplexity: Optional[float] = None,
+    tsne_max_iter: Optional[int] = None,
+    umap_n_neighbors: Optional[int] = None,
+    umap_min_dist: Optional[float] = None,
+    random_state: int = 0,
+) -> Optional[Tuple[np.ndarray, Dict[str, Any]]]:
+    if method == LatentClusterMethod.umap:
+        return fit_umap_projection(
+            latents,
+            n_neighbors=umap_n_neighbors,
+            min_dist=umap_min_dist,
+            random_state=random_state,
+        )
+    return fit_tsne_projection(
+        latents,
+        perplexity=tsne_perplexity,
+        max_iter=tsne_max_iter,
+        random_state=random_state,
+    )
+
+
+def latent_projection_metrics_from_info(
+    *,
+    projection_info: Optional[Dict[str, Any]],
+    method: LatentClusterMethod,
+    png_path: Path,
+    mode_names: Optional[List[str]],
+) -> Dict[str, Any]:
+    out: Dict[str, Any] = {
+        "latent_cluster_method": method.value,
+        "latent_projection_png": str(png_path) if projection_info is not None else None,
+        "latent_projection_colored_by": "source_mode",
+        "latent_projection_source_mode_names": mode_names,
+    }
+    if projection_info is None:
+        out.update(
+            {
+                "tsne_perplexity_used": None,
+                "tsne_max_iter_used": None,
+                "tsne_png": None,
+                "umap_n_neighbors_used": None,
+                "umap_min_dist_used": None,
+            }
+        )
+        return out
+    out.update(
+        {
+            "latent_projection_n_gt_modes_seen": projection_info["n_gt_modes_seen"],
+            "latent_projection_gt_modes_seen": projection_info["gt_modes_seen"],
+            "latent_projection_gt_mode_names": projection_info["gt_mode_names"],
+            "latent_projection_gt_mode_counts": projection_info["gt_mode_counts"],
+        }
+    )
+    if method == LatentClusterMethod.tsne:
+        out.update(
+            {
+                "tsne_perplexity_used": projection_info.get("perplexity"),
+                "tsne_max_iter_used": projection_info.get("max_iter"),
+                "tsne_png": str(png_path),
+                "umap_n_neighbors_used": None,
+                "umap_min_dist_used": None,
+            }
+        )
+    else:
+        out.update(
+            {
+                "tsne_perplexity_used": None,
+                "tsne_max_iter_used": None,
+                "tsne_png": None,
+                "umap_n_neighbors_used": projection_info.get("n_neighbors"),
+                "umap_min_dist_used": projection_info.get("min_dist"),
+            }
+        )
+    return out
+
+
+def projection_mode_legend_ncol(n_modes: int) -> int:
+    return min(8, max(1, n_modes))
+
+
+def projection_mode_display_names(
+    modes: List[int], mode_names: Optional[List[str]]
+) -> Dict[int, str]:
+    return {
+        int(m): source_mode_display_name(int(m), mode_names=mode_names) for m in modes
+    }
+
+
+def plot_latent_projection_scatter_on_ax(
+    ax: Axes,
+    proj: np.ndarray,
+    y: np.ndarray,
+    *,
+    method: LatentClusterMethod,
+    mode_names: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """Scatter 2D latent embedding on ``ax``, colored by integer ``source_mode`` labels."""
+    y_int = np.asarray(y).astype(int).reshape(-1)
+    uniq_modes, mode_counts = np.unique(y_int, return_counts=True)
+    gt_modes_seen = [int(m) for m in uniq_modes]
+    gt_mode_names = projection_mode_display_names(gt_modes_seen, mode_names=mode_names)
+    gt_mode_counts = {int(m): int(c) for m, c in zip(uniq_modes, mode_counts)}
+
+    cmap = plt.get_cmap("tab10")
+    for mode in sorted(gt_modes_seen):
+        mask = y_int == mode
+        color = cmap(mode % 10)
+        ax.scatter(
+            proj[mask, 0],
+            proj[mask, 1],
+            c=[color],
+            s=6,
+            alpha=0.75,
+        )
+    xlabel, ylabel = projection_axis_labels(method=method)
+    ax.set_xlabel(xlabel, fontsize=8)
+    ax.set_ylabel(ylabel, fontsize=8)
+    ax.tick_params(labelsize=7)
+    return {
+        "gt_modes_seen": gt_modes_seen,
+        "gt_mode_names": gt_mode_names,
+        "gt_mode_counts": gt_mode_counts,
+        "n_gt_modes_seen": int(len(gt_modes_seen)),
+        "n_samples": int(len(y_int)),
+    }
+
+
+def add_projection_mode_legend_below(
+    fig: plt.Figure,
+    modes: List[int],
+    *,
+    mode_names: Optional[List[str]] = None,
+    title: str = "source mode",
+    fontsize: int = 8,
+    bbox_y: float = 0.0,
+) -> None:
+    """Shared figure legend matching individual latent projection plots."""
+    cmap = plt.get_cmap("tab10")
+    display = projection_mode_display_names(modes, mode_names=mode_names)
+    handles = [
+        Line2D(
+            [0],
+            [0],
+            marker="o",
+            linestyle="",
+            markersize=4,
+            markerfacecolor=cmap(int(mode) % 10),
+            markeredgecolor=cmap(int(mode) % 10),
+            label=display[int(mode)],
+        )
+        for mode in sorted(int(m) for m in modes)
+    ]
+    n_modes = len(handles)
+    ncol = projection_mode_legend_ncol(n_modes)
+    fig.legend(
+        handles=handles,
+        title=title,
+        fontsize=fontsize,
+        loc="lower center",
+        bbox_to_anchor=(0.5, bbox_y),
+        ncol=ncol,
+        frameon=True,
+    )
+
+
+def save_aggregate_latent_projection_sweep_grid(
+    runs: List[Dict[str, Any]],
+    outpath: Path,
+    mode_color: np.ndarray,
+    *,
+    method: LatentClusterMethod,
+    mode_names: Optional[List[str]] = None,
+    tsne_perplexity: Optional[float] = None,
+    tsne_max_iter: Optional[int] = None,
+    umap_n_neighbors: Optional[int] = None,
+    umap_min_dist: Optional[float] = None,
+    title_fontsize: int = 7,
+    random_state: int = 0,
+) -> None:
+    """One latent embedding subplot per sweep run; shared source-mode legend below the grid."""
+    n = len(runs)
+    if n == 0:
+        return
+
+    ncols = min(4, n)
+    nrows = math.ceil(n / ncols)
+    col_w_in, row_h_in = 3.4, 3.2
+    fig, axes = plt.subplots(
+        nrows,
+        ncols,
+        figsize=(col_w_in * ncols, row_h_in * nrows),
+        squeeze=False,
+    )
+
+    all_modes_seen: set[int] = set()
+    last_i = 0
+    display = projection_display_name(method=method)
+    for i, run in enumerate(runs):
+        row, col = divmod(i, ncols)
+        ax = axes[row][col]
+        latents = np.asarray(run["latents"])
+        fit = fit_latent_projection(
+            latents,
+            method=method,
+            tsne_perplexity=tsne_perplexity,
+            tsne_max_iter=tsne_max_iter,
+            umap_n_neighbors=umap_n_neighbors,
+            umap_min_dist=umap_min_dist,
+            random_state=random_state,
+        )
+        if fit is None:
+            ax.set_title(
+                run.get("run_title", run.get("name", "")), fontsize=title_fontsize
+            )
+            ax.text(
+                0.5,
+                0.5,
+                f"{display} skipped\n(N < 3)",
+                ha="center",
+                va="center",
+                transform=ax.transAxes,
+            )
+            ax.set_xticks([])
+            ax.set_yticks([])
+        else:
+            proj, _params = fit
+            info = plot_latent_projection_scatter_on_ax(
+                ax,
+                proj,
+                mode_color,
+                method=method,
+                mode_names=mode_names,
+            )
+            all_modes_seen.update(int(m) for m in info["gt_modes_seen"])
+            ax.set_title(
+                str(run.get("run_title", run.get("name", ""))),
+                fontsize=title_fontsize,
+            )
+        last_i = i
+
+    for j in range(last_i + 1, nrows * ncols):
+        row, col = divmod(j, ncols)
+        axes[row][col].set_visible(False)
+
+    legend_modes = (
+        list(range(len(mode_names))) if mode_names is not None else sorted(all_modes_seen)
+    )
+    n_legend = len(legend_modes)
+    ncol_leg = projection_mode_legend_ncol(n_legend)
+    nrow_leg = (n_legend + ncol_leg - 1) // ncol_leg if n_legend else 1
+    add_projection_mode_legend_below(
+        fig,
+        legend_modes,
+        mode_names=mode_names,
+        bbox_y=0.0,
+    )
+    fig.suptitle(f"{display} by source mode (best_model.pt)", fontsize=11, y=1.01)
+    fig.tight_layout(rect=[0, 0.02 + 0.05 * nrow_leg, 1, 0.99])
+    fig.savefig(outpath, dpi=200, bbox_inches="tight", pad_inches=0.1)
+    plt.close(fig)
+
+
+def maybe_save_latent_projection(
+    latents: np.ndarray,
+    y: np.ndarray,
+    outpath: str,
+    title: str,
+    *,
+    method: LatentClusterMethod,
+    tsne_perplexity: Optional[float] = None,
+    tsne_max_iter: Optional[int] = None,
+    umap_n_neighbors: Optional[int] = None,
+    umap_min_dist: Optional[float] = None,
+    random_state: int = 0,
+    enabled: bool = True,
+    mode_names: Optional[List[str]] = None,
+    title_fontsize: int = 8,
+) -> Optional[Dict[str, Any]]:
+    """2D latent embedding; one point per preference row, colored by ``y`` (GT ``source_mode``)."""
+    if not enabled:
+        return None
+    fit = fit_latent_projection(
+        latents,
+        method=method,
+        tsne_perplexity=tsne_perplexity,
+        tsne_max_iter=tsne_max_iter,
+        umap_n_neighbors=umap_n_neighbors,
+        umap_min_dist=umap_min_dist,
+        random_state=random_state,
+    )
+    if fit is None:
+        return None
+    proj, params = fit
+
+    fig, ax = plt.subplots(figsize=(6, 5))
+    info = plot_latent_projection_scatter_on_ax(
+        ax, proj, y, method=method, mode_names=mode_names
+    )
+    ax.set_title(title, fontsize=title_fontsize)
+    n_gt_modes_seen = int(info["n_gt_modes_seen"])
+    ncol = projection_mode_legend_ncol(n_gt_modes_seen)
+    nrow = (n_gt_modes_seen + ncol - 1) // ncol
+    add_projection_mode_legend_below(
+        fig,
+        info["gt_modes_seen"],
+        mode_names=mode_names,
+        bbox_y=-0.14 - 0.05 * (nrow - 1),
+    )
+    fig.tight_layout(rect=[0, 0.02 + 0.05 * nrow, 1, 1])
+    fig.savefig(outpath, dpi=200, bbox_inches="tight", pad_inches=0.08)
+    plt.close(fig)
+    return {**params, **info}
+
+
+def maybe_save_tsne(
+    latents: np.ndarray,
+    y: np.ndarray,
+    outpath: str,
+    title: str,
+    *,
+    perplexity: Optional[float] = None,
+    max_iter: Optional[int] = None,
+    random_state: int = 0,
+    enabled: bool = True,
+    mode_names: Optional[List[str]] = None,
+    title_fontsize: int = 8,
+) -> Optional[Dict[str, Any]]:
+    """Backward-compatible t-SNE wrapper around :func:`maybe_save_latent_projection`."""
+    return maybe_save_latent_projection(
+        latents,
+        y,
+        outpath,
+        title,
+        method=LatentClusterMethod.tsne,
+        tsne_perplexity=perplexity,
+        tsne_max_iter=max_iter,
+        random_state=random_state,
+        enabled=enabled,
+        mode_names=mode_names,
+        title_fontsize=title_fontsize,
+    )
+
+
+def save_aggregate_tsne_sweep_grid(
+    runs: List[Dict[str, Any]],
+    outpath: Path,
+    mode_color: np.ndarray,
+    *,
+    mode_names: Optional[List[str]] = None,
+    perplexity: Optional[float] = None,
+    max_iter: Optional[int] = None,
+    title_fontsize: int = 7,
+    random_state: int = 0,
+) -> None:
+    """Backward-compatible t-SNE wrapper around :func:`save_aggregate_latent_projection_sweep_grid`."""
+    save_aggregate_latent_projection_sweep_grid(
+        runs,
+        outpath,
+        mode_color,
+        method=LatentClusterMethod.tsne,
+        mode_names=mode_names,
+        tsne_perplexity=perplexity,
+        tsne_max_iter=max_iter,
+        title_fontsize=title_fontsize,
+        random_state=random_state,
+    )
 
 
 def main(args: AnalysisCLI) -> None:
-    run_dir = args.run_dir.expanduser().resolve()
-    variant_path = run_dir / "variant.json"
-    ckpt_path = run_dir / args.ckpt_name
+    input_dir = args.input_dir.expanduser().resolve()
+    variant_path = input_dir / "variant.json"
+    ckpt_path = input_dir / args.ckpt_name
 
     if not variant_path.is_file():
-        raise FileNotFoundError(f"Missing variant.json under run_dir: {variant_path}")
+        raise FileNotFoundError(f"Missing variant.json under --input-dir: {variant_path}")
 
     eval_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    outdir = run_dir / "evals" / eval_timestamp
+    outdir = eval_run_outdir(input_dir, eval_timestamp, sweep=False)
     outdir.mkdir(parents=True, exist_ok=True)
 
     (
-        obs1,
+        obs1,  # (N, A, T, O)
         obs2,
-        labels,
-        sources,
+        labels,  # (N, A, T)
+        sources,  # (N, S), where S is num source variables
         source_names,
         source_keys,
         batch_size,
@@ -748,47 +1783,128 @@ def main(args: AnalysisCLI) -> None:
         dataset_path,
         device,
     ) = prepare_infomec_eval_arrays(
-        run_dir,
+        input_dir,
         split=args.split,
-        source_keys=args.source_keys,
         num_bins=args.num_bins,
         batch_size=args.batch_size,
         set_length=args.set_length,
         dataset_override=args.dataset,
         device_str=args.device,
     )
-
-    if args.epoch_checkpoint_plot:
-        run_epoch_checkpoint_infomec_curve(
-            run_dir,
-            outdir,
-            obs1,
-            obs2,
-            labels,
-            sources,
-            batch_size,
-            device,
-            args.discrete_latents,
-            beta_x_axis=args.beta_x_axis,
-        )
+    print(
+        f"Loaded eval split={args.split!r} pref_dataset="
+        f"{variant['pref_dataset']!r} from {dataset_path} ({len(obs1)} queries)"
+        f"(device={device})"
+    )
 
     if not ckpt_path.is_file():
         raise FileNotFoundError(
-            f"Missing checkpoint {args.ckpt_name!r} under run_dir: {ckpt_path}"
+            f"Missing checkpoint {args.ckpt_name!r} under --input-dir: {ckpt_path}"
         )
 
     model = torch.load(ckpt_path, map_location=device, weights_only=False).to(device)
     model.eval()
+    discrete_latents = resolve_discrete_latents(model=model, variant=variant)
 
-    latents = batched_encode(model, obs1, obs2, labels, batch_size, device)
+    epoch_payload = collect_epoch_checkpoint_infomec_series(
+        input_dir,
+        obs1,
+        obs2,
+        labels,
+        sources,
+        batch_size,
+        device,
+        discrete_latents,
+    )
+
+    latent_xy_table_grid_png: Optional[Path] = None
+    env_name = str(variant.get("env", ""))
+    if (
+        args.latent_xy_table_grid
+        and env_name == LatentTableMapEnvId.sort_easy_v0
+        and len(obs1) > 0
+    ):
+        lo, hi = xy_table_extents_from_dataset_observations(
+            obs1, frame_index=-1, pad_rel=float(args.xy_grid_pad_rel)
+        )
+        g = int(args.xy_grid_resolution)
+        # lo[0:2], hi[0:2] = (obj_x, obj_y) world; horiz. subplot = object y, vert. = object x
+        obj_x_grid = np.linspace(float(lo[0]), float(hi[0]), g)  # (G,) = O[3]
+        obj_y_grid = np.linspace(float(lo[1]), float(hi[1]), g)  # (G,) = O[4] — goal axis
+        tpl_mu, tpl_logvar = encode_posterior_mu_logvar_unperturbed(
+            model,
+            obs1[0:1],
+            obs2[0:1],
+            labels[0:1],
+            device,
+        )  # (L,), (L,)
+        means = encode_latent_means_on_xy_table_grid(
+            model,
+            obs1[0:1],
+            obs2[0:1],
+            labels[0:1],
+            obj_y_grid,  # x_vals in encoder = Gx, object y (columns)
+            obj_x_grid,  # y_vals = Gy, object x (rows)
+            device,
+            annotation_index=0,
+            time_index=-1,
+            move="obs1",
+        )  # (G, G, L)
+        latent_xy_table_grid_png = outdir / "latent_mean_vs_xy_table_grid.png"
+        save_latent_xy_grid_heatmaps(
+            means,
+            obj_y_grid,
+            obj_x_grid,
+            latent_xy_table_grid_png,
+            template_mean=tpl_mu,
+            template_log_var=tpl_logvar,
+            title=f"{LatentTableMapEnvId.sort_easy_v0.value}: encoder mean vs object (x,y) on table — template=first {args.split!r} row",
+        )
+
+    set_length_used = (
+        int(variant["set_size"]) if args.set_length is None else int(args.set_length)
+    )
+    with open(dataset_path, "rb") as _fp:
+        _raw_batch = pickle.load(_fp)
+    action_dim = int(_raw_batch["actions"].shape[-1])
+    observation_dim = int(obs1.shape[-1])
+    pref_loader = preference_dataloader_for_split(
+        dataset_path=dataset_path,
+        split=args.split,
+        set_length=set_length_used,
+        observation_dim=observation_dim,
+        action_dim=action_dim,
+        batch_size=batch_size,
+    )
+    latents = encode_latents_dataloader(model=model, loader=pref_loader, device=device)
+    assert latents.shape[0] == len(obs1), (
+        f"DataLoader latents N={latents.shape[0]} != split obs1 N={len(obs1)}"
+    )
 
     result = compute_infomec(
-        sources=sources, latents=latents, discrete_latents=args.discrete_latents
+        sources=sources, latents=latents, discrete_latents=discrete_latents
+    )
+    n_varies, n_inform, n_active_latents, latent_dim_counts = (
+        latent_mask_counts_from_result(result)
+    )
+    assert latent_dim_counts == int(latents.shape[1])
+    best_epoch = resolve_best_checkpoint_epoch(input_dir, ckpt_name=args.ckpt_name)
+    run_title = format_infomec_run_title(
+        infom=float(result.infom),
+        infoe=float(result.infoe),
+        infoc=float(result.infoc),
+        n_varies=n_varies,
+        n_inform=n_inform,
+        n_active=n_active_latents,
+        latent_dim=int(latents.shape[1]),
+        run_label=infomec_run_label(input_dir, variant),
+        ckpt_name=args.ckpt_name,
+        best_epoch=best_epoch,
     )
 
     metrics = save_eval_artifacts_after_encode(
         outdir,
-        run_dir,
+        input_dir,
         latents,
         sources,
         result,
@@ -800,8 +1916,34 @@ def main(args: AnalysisCLI) -> None:
         args.split,
         source_keys,
         eval_timestamp,
+        run_title=run_title,
+        nmi_heatmap_active_dots=args.nmi_heatmap_active_dots,
+        latent_cluster=args.latent_cluster,
+        latent_cluster_method=args.latent_cluster_method,
+        tsne_perplexity=args.tsne_perplexity,
+        tsne_max_iter=args.tsne_max_iter,
+        umap_n_neighbors=args.umap_n_neighbors,
+        umap_min_dist=args.umap_min_dist,
     )
-    print(json.dumps(metrics, indent=2))
+    if epoch_payload is not None:
+        save_infomec_epoch_series_artifacts(
+            epoch_payload,
+            outdir,
+            title=run_title,
+            best_epoch=best_epoch,
+            best_selection=BEST_CHECKPOINT_SELECTION,
+        )
+    if latent_xy_table_grid_png is not None:
+        metrics = {
+            **metrics,
+            "latent_xy_table_grid_png": str(latent_xy_table_grid_png),
+            "latent_xy_table_grid_env": env_name,
+        }
+    print(
+        f"Wrote {outdir}  \n"
+        f"InfoM={metrics['infom']:.3f} InfoE={metrics['infoe']:.3f} "
+        f"InfoC={metrics['infoc']:.3f}"
+    )
 
 
 if __name__ == "__main__":

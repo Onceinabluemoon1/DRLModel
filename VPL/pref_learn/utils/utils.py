@@ -38,7 +38,7 @@ class WandBLogger(object):
         config = ConfigDict()
         config.online = True
         config.prefix = ""
-        config.project = os.environ.get("WANDB_PROJECT", "JaxPref")
+        config.project = os.environ.get("WANDB_PROJECT", "disentangled_reward")
         config.output_dir = "./reward_model"
         config.random_delay = 0.0
         config.group = config_dict.placeholder(str)
@@ -78,7 +78,7 @@ class WandBLogger(object):
             config=self._variant,
             project=self.config.project,
             dir=self.config.output_dir,
-            # group=self.config.group,
+            group=self.config.group,
             name=self.config.experiment_id,
             # anonymous=self.config.anonymous,
             notes=self.config.notes,
@@ -131,9 +131,13 @@ def define_flags_with_default(**kwargs):
     return kwargs
 
 
-def set_random_seed(seed):
+def set_random_seed(seed: int) -> int:
+    if seed == -1:
+        seed = random.randint(0, 2**31 - 1)
+        logging.info("Using random seed: %d", seed)
     np.random.seed(seed)
     random.seed(seed)
+    return seed
 
 
 def print_flags(flags, flags_def):

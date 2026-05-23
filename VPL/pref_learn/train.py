@@ -7,11 +7,14 @@ from pathlib import Path
 import absl.app
 import absl.flags
 import gym
-import jaxrl_m.envs
+import jaxrl_m.envs  # noqa: F401 — registers Gym env IDs via import side effects
 import numpy as np
 import torch
+from jaxrl_m.envs.sort_easy import preference_training_adapter_from_gym_env
+from tqdm import tqdm
 
 import pref_learn.utils.plot_utils as putils
+from pref_learn.configs.data_configs import get_train_vae_dataset
 from pref_learn.models.mlp import (
     CategoricalModel,
     MeanVarianceModel,
@@ -63,7 +66,9 @@ FLAGS_DEF = define_flags_with_default(
     save_freq=50,
     device="cuda",
     # Dataset
+    pref_dataset="",
     dataset_path="",
+    infomec_dataset_path="",
     logging=WandBLogger.get_default_config(),
     seed=42,
     # plotting
@@ -84,6 +89,18 @@ def log_metrics(metrics, epoch, logger):
     logger.log(metrics, step=epoch)
 
 
+def resolve_dataset_flags(FLAGS) -> None:
+    if FLAGS.pref_dataset.strip():
+        cfg = get_train_vae_dataset(pref_dataset=FLAGS.pref_dataset.strip())
+        FLAGS.env = cfg["env"]
+        FLAGS.dataset_path = cfg["pref_dataset_path"]
+        FLAGS.infomec_dataset_path = cfg["pref_infomec_dataset_path"]
+        return
+
+    assert FLAGS.dataset_path.strip(), "Provide --pref_dataset or --dataset_path."
+    assert FLAGS.env.strip(), "Provide --pref_dataset or --env."
+
+
 def main(_):
     FLAGS = absl.flags.FLAGS
     # timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -91,42 +108,46 @@ def main(_):
         timestamp = FLAGS.run_timestamp.strip()
     else:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    assert os.path.exists(FLAGS.dataset_path), "You must provide a dataset path."
+    resolve_dataset_flags(FLAGS)
+    assert os.path.exists(FLAGS.dataset_path), f"Dataset not found: {FLAGS.dataset_path}"
+    if FLAGS.infomec_dataset_path.strip():
+        assert os.path.exists(FLAGS.infomec_dataset_path), (
+            f"InfoMEC dataset not found: {FLAGS.infomec_dataset_path}"
+        )
     variant = get_user_flags(FLAGS, FLAGS_DEF)
 
     assert FLAGS.comment, "You must leave your comment for logging experiment."
-    FLAGS.logging.group = f"{FLAGS.env}_{FLAGS.model_type}"
-    FLAGS.logging.group += f"_{FLAGS.comment}"
-    FLAGS.logging.experiment_id = FLAGS.logging.group
+    run_label = FLAGS.pref_dataset.strip() or FLAGS.env
+    ld_tag = f"z={FLAGS.latent_dim}"
+    FLAGS.logging.experiment_id = (
+        f"{run_label}_{FLAGS.model_type}_{ld_tag}_{FLAGS.comment}"
+    )
+    if FLAGS.run_timestamp.strip():
+        # Array beta sweeps: one W&B group per submit-time RUN_TIMESTAMP.
+        FLAGS.logging.group = f"{run_label}_{FLAGS.model_type}_{ld_tag}_{timestamp}"
+    else:
+        FLAGS.logging.group = FLAGS.logging.experiment_id
     save_dir = (
         Path(FLAGS.logging.output_dir)
-        / FLAGS.env
+        / run_label
         / str(FLAGS.model_type)
-        / f"{timestamp}/{FLAGS.comment}"
+        / f"{timestamp}_ld={FLAGS.latent_dim}_learned-prior={FLAGS.learned_prior}/{FLAGS.comment}"
     )
     FLAGS.logging.output_dir = str(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
     # Per-epoch checkpoints (save_freq); best_model.pt stays in save_dir
     (save_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
-    with open(save_dir / "variant.json", "w", encoding="utf-8") as vf:
-        json.dump(
-            {"resolved_run_timestamp": timestamp, "variant": variant},
-            vf,
-            indent=2,
-            sort_keys=True,
-            default=str,
-        )
-    wb_logger = WandBLogger(FLAGS.logging, variant=variant)
 
     gym_env = gym.make(FLAGS.env)
     gym_env.seed(FLAGS.seed)
     gym_env.action_space.seed(FLAGS.seed)
     gym_env.observation_space.seed(FLAGS.seed)
+    reward_env = preference_training_adapter_from_gym_env(gym_env=gym_env)
     set_random_seed(FLAGS.seed)
     if hasattr(gym_env, "reward_observation_space"):
-        observation_dim = gym_env.reward_observation_space.shape[0]
+        obs_dim = gym_env.reward_observation_space.shape[0]
     else:
-        observation_dim = gym_env.observation_space.shape[0]
+        obs_dim = gym_env.observation_space.shape[0]
     if "maze" in FLAGS.env:
         gym_env.set_biased_mode(FLAGS.biased_mode)
     action_dim = gym_env.action_space.shape[0]
@@ -136,12 +157,12 @@ def main(_):
         test_loader,
         train_dataset,
         eval_dataset,
-        len_set,
-        len_query,
+        set_size,
+        segment_len,
         obs_dim,
     ) = get_datasets(
         FLAGS.dataset_path,
-        observation_dim,
+        obs_dim,
         action_dim,
         FLAGS.batch_size,
         FLAGS.set_size,
@@ -180,12 +201,12 @@ def main(_):
             reward_model = VAEModel
             decoder_input = obs_dim + FLAGS.latent_dim
         reward_model = reward_model(
-            encoder_input=len_set * (2 * observation_dim * len_query + 1),
+            encoder_input=set_size * (2 * obs_dim * segment_len + 1),
             decoder_input=decoder_input,
             latent_dim=FLAGS.latent_dim,
             hidden_dim=FLAGS.hidden_dim,
-            annotation_size=len_set,
-            size_segment=len_query,
+            annotation_size=set_size,
+            size_segment=segment_len,
             kl_weight=FLAGS.kl_weight,
             learned_prior=FLAGS.learned_prior,
             flow_prior=FLAGS.flow_prior,
@@ -199,10 +220,21 @@ def main(_):
 
     device = FLAGS.device
     reward_model = reward_model.to(device)
+    variant["resolved_set_size"] = set_size
+    variant["discrete_latents"] = bool(reward_model.discrete_latents)
+    with open(save_dir / "variant.json", "w", encoding="utf-8") as vf:
+        json.dump(
+            {"resolved_run_timestamp": timestamp, "variant": variant},
+            vf,
+            indent=2,
+            sort_keys=True,
+            default=str,
+        )
+    wb_logger = WandBLogger(FLAGS.logging, variant=variant)
     optimizer = torch.optim.Adam(reward_model.parameters(), lr=FLAGS.lr)
     early_stop = EarlyStopper(FLAGS.patience, FLAGS.min_delta)
     best_criteria = None
-    for epoch in range(FLAGS.n_epochs):
+    for epoch in tqdm(range(1, FLAGS.n_epochs + 1), desc="epochs"):
         metrics = defaultdict(list)
         metrics["epoch"] = epoch
 
@@ -218,7 +250,8 @@ def main(_):
             for key, val in prefix_metrics(batch_metrics, "train").items():
                 metrics[key].append(val)
 
-        if epoch % FLAGS.eval_freq == 0:
+        should_eval = (epoch % FLAGS.eval_freq == 0) or (epoch == FLAGS.n_epochs)
+        if should_eval:
             for batch in test_loader:
                 with torch.no_grad():
                     observations = batch["observations"].to(device).float()
@@ -233,14 +266,16 @@ def main(_):
 
             if FLAGS.debug_plots and "maze2d" in FLAGS.env:
                 if FLAGS.model_type == "MLP":
-                    fig_dict = putils.plot_mlp(gym_env, reward_model)
+                    fig_dict = putils.plot_mlp(reward_env, reward_model)
                 elif FLAGS.model_type == "Categorical" or FLAGS.model_type == "MeanVar":
-                    fig_dict = putils.plot_mlp_samples(gym_env, reward_model)
+                    fig_dict = putils.plot_mlp_samples(reward_env, reward_model)
                 elif FLAGS.model_type == "MLPClassifier":
-                    fig_dict = putils.plot_classifier(gym_env, reward_model, eval_dataset)
+                    fig_dict = putils.plot_classifier(
+                        reward_env, reward_model, eval_dataset
+                    )
                 else:
                     fig_dict = putils.plot_vae(
-                        gym_env,
+                        reward_env,
                         reward_model,
                         eval_dataset,
                         classifier="Classifier" in FLAGS.model_type,
@@ -248,7 +283,7 @@ def main(_):
 
                 metrics.update(prefix_metrics(fig_dict, "debug_plots"))
             elif "VAE" in FLAGS.model_type:
-                putils.update_posterior(gym_env, reward_model, eval_dataset)
+                putils.update_posterior(reward_env, reward_model, eval_dataset)
 
             criteria = np.mean(metrics["eval/loss"])
 
@@ -265,7 +300,8 @@ def main(_):
                 torch.save(reward_model, save_dir / "checkpoints" / f"model_{epoch}.pt")
                 break
 
-        if epoch % FLAGS.save_freq == 0:
+        should_save = (epoch % FLAGS.save_freq == 0) or (epoch == FLAGS.n_epochs)
+        if should_save:
             torch.save(reward_model, save_dir / "checkpoints" / f"model_{epoch}.pt")
 
         if (

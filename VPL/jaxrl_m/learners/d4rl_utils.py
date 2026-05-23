@@ -337,7 +337,7 @@ def relabel_rewards_with_env(env, dataset, append_goal):
     print("Modes during relabel_rewards_with_env:")
     for m, c in zip(uniq_modes, mode_counts):
         pct = 100.0 * float(c) / float(n_tot)
-        print(f"  mode {int(m):>4}: count {int(c):>8} ({pct:6.2f}%)")
+        print(f"  traj mode {int(m):>4}: count {int(c):>8} ({pct:6.2f}%)")
     print(f"  total:       {n_tot:>8}")
     print(f"  mean mode:   {float(np.mean(modes_arr)):8.4f}")
 

@@ -639,3 +639,43 @@ def annotator_from_env(
     raise ValueError(
         f"sort_preference_from_sort_env expects SortEnv with 2 or 4 goal poses; got {n}"
     )
+
+
+class SortAnnotatorGymAdapter:
+    """
+    Preference-learning wrapper around a Gym ``SortEnv`` handle (same pattern as dataset relabeling).
+
+    ``get_num_modes`` / ``compute_reward`` follow :func:`annotator_from_env`; everything else forwards to
+    the underlying env (spaces, seeding, optional Ravens viz hooks).
+    """
+
+    def __init__(
+        self,
+        *,
+        gym_env: gym.Env,
+        annot: SortPreferenceTwoGoals | SortPreferenceFourGoals,
+    ):
+        self._gym_env = gym_env
+        self.annot = annot
+
+    def get_num_modes(self) -> int:
+        return int(self.annot.n_pref_modes)
+
+    def compute_reward(self, state: np.ndarray, mode: int) -> np.ndarray:
+        return self.annot.compute_reward(state=state, mode=int(mode))
+
+    def __getattr__(self, name: str):
+        return getattr(self._gym_env, name)
+
+
+def preference_training_adapter_from_gym_env(
+    gym_env: gym.Env,
+) -> SortAnnotatorGymAdapter | gym.Env:
+    """If ``SortEnv`` has 2 or 4 goals, wrap with annotator reward/mode counts; else return ``gym_env``."""
+    raw = gym_env.unwrapped
+    if isinstance(raw, SortEnv) and len(raw.goal_poses) in (2, 4):
+        return SortAnnotatorGymAdapter(
+            gym_env=gym_env,
+            annot=annotator_from_env(env=raw),
+        )
+    return gym_env

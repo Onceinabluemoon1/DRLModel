@@ -3,37 +3,38 @@ import pickle
 
 import numpy as np
 import torch
+from einops import rearrange
 from pref_learn.utils.data_utils import get_labels
 from torch.utils.data import DataLoader, Dataset
 
 
-def get_datasets(query_path, observation_dim, action_dim, batch_size, set_length):
+def get_datasets(query_path, observation_dim, action_dim, batch_size, set_size):
     with open(query_path, "rb") as fp:
         batch = pickle.load(fp)
 
     batch["observations"] = batch["observations"][..., :observation_dim]
     batch["observations_2"] = batch["observations_2"][..., :observation_dim]
     assert batch["actions"].shape[-1] == action_dim
-    if set_length < 0:
-        set_length = batch["observations"].shape[1]
+    if set_size < 0:
+        set_size = batch["observations"].shape[1]
 
     eval_data_size = int(0.1 * len(batch["observations"]))
     train_data_size = len(batch["observations"]) - eval_data_size
 
     train_batch = {
-        "observations": batch["observations"][:train_data_size, :set_length],
-        "actions": batch["actions"][:train_data_size, :set_length],
-        "observations_2": batch["observations_2"][:train_data_size, :set_length],
-        "actions_2": batch["actions_2"][:train_data_size, :set_length],
-        "labels": batch["labels"][:train_data_size, :set_length],
+        "observations": batch["observations"][:train_data_size, :set_size],
+        "actions": batch["actions"][:train_data_size, :set_size],
+        "observations_2": batch["observations_2"][:train_data_size, :set_size],
+        "actions_2": batch["actions_2"][:train_data_size, :set_size],
+        "labels": batch["labels"][:train_data_size, :set_size],
     }
 
     eval_batch = {
-        "observations": batch["observations"][train_data_size:, :set_length],
-        "actions": batch["actions"][train_data_size:, :set_length],
-        "observations_2": batch["observations_2"][train_data_size:, :set_length],
-        "actions_2": batch["actions_2"][train_data_size:, :set_length],
-        "labels": batch["labels"][train_data_size:, :set_length],
+        "observations": batch["observations"][train_data_size:, :set_size],
+        "actions": batch["actions"][train_data_size:, :set_size],
+        "observations_2": batch["observations_2"][train_data_size:, :set_size],
+        "actions_2": batch["actions_2"][train_data_size:, :set_size],
+        "labels": batch["labels"][train_data_size:, :set_size],
     }
 
     train_dataset = PreferenceDataset(train_batch)
@@ -46,14 +47,14 @@ def get_datasets(query_path, observation_dim, action_dim, batch_size, set_length
         dataset=eval_dataset, batch_size=batch_size, shuffle=False, **kwargs
     )
 
-    _, _, len_query, obs_dim = batch["observations"].shape
+    _, _, segment_len, obs_dim = batch["observations"].shape  # (Q, S, T, O)
     return (
         train_loader,
         test_loader,
         train_dataset,
         eval_dataset,
-        set_length,
-        len_query,
+        set_size,
+        segment_len,
         obs_dim,
     )
 
@@ -155,24 +156,20 @@ class EarlyStopper:
 
 def get_latent(batch, env, reward_model, mode, num_samples):
     # obs_dim = env.reward_observation_space.shape[0]
-    obs1 = batch["observations"]
-    obs2 = batch["observations_2"]
-    obs_dim = obs1.shape[-1]
-    seg_reward_1 = env.compute_reward(
-        obs1.reshape(-1, reward_model.size_segment, obs_dim), mode
-    )
-    seg_reward_2 = env.compute_reward(
-        obs2.reshape(-1, reward_model.size_segment, obs_dim), mode
-    )
+    set_size = batch["observations"].shape[1]
+    obs1 = batch["observations"]  # (B, S, T, O)
+    obs2 = batch["observations_2"]  # (B, S, T, O)
+    obs1_flat = rearrange(obs1, "b s t o -> (b s) t o")  # (B*S, T, O)
+    obs2_flat = rearrange(obs2, "b s t o -> (b s) t o")  # (B*S, T, O)
+    rewards1 = env.compute_reward(obs1_flat, mode)  # ((B*S), T, ...)
+    rewards2 = env.compute_reward(obs2_flat, mode)
 
-    seg_reward_1 = seg_reward_1.reshape(
-        num_samples, reward_model.annotation_size, reward_model.size_segment, -1
-    )
-    seg_reward_2 = seg_reward_2.reshape(
-        num_samples, reward_model.annotation_size, reward_model.size_segment, -1
-    )
+    rewards1 = rearrange(rewards1, "(b s) t ... -> b s t ...", b=num_samples, s=set_size)
+    rewards2 = rearrange(rewards2, "(b s) t ... -> b s t ...", b=num_samples, s=set_size)
 
-    labels = get_labels(seg_reward_1, seg_reward_2)
+    labels = get_labels(rewards1, rewards2)
+    # todo: why wasn't this needed before?
+    labels = rearrange(labels, "(b s) ... -> b s ...", b=num_samples, s=set_size)
     device = next(reward_model.parameters()).device
     obs1 = torch.from_numpy(obs1).float().to(device)
     obs2 = torch.from_numpy(obs2).float().to(device)

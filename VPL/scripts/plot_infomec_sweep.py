@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """Aggregate InfoMEC / NMI plots across subruns under a sweep training directory."""
 
+import os
+
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
+os.environ.setdefault("NUMBA_THREADING_LAYER", "workqueue")
+
 import csv
 import json
 import math
@@ -8,10 +13,11 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 import matplotlib
 import tyro
+from matplotlib.axes import Axes
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -22,25 +28,22 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
-import plot_infomec as plt_info  # noqa: E402
+import plot_infomec as plt_infomec  # noqa: E402
 from pref_learn.utils.infomec import compute_infomec  # noqa: E402
 
 
 @dataclass
 class SweepCLI:
-    """Aggregate InfoMEC / NMI across beta subdirs under sweep-root."""
+    """Aggregate InfoMEC / NMI across beta subdirs under ``input_dir``."""
 
-    sweep_root: Path
+    input_dir: Path
     """Parent directory; each child with variant.json + best_model.pt is one run."""
 
     outdir: Optional[Path] = None
-    """Aggregate PNG/CSV/manifest; default <sweep-root>/evals/<timestamp>/."""
+    """Aggregate PNG/CSV/manifest; default ``<input_dir>/evals_sweep/<timestamp>/``."""
 
-    split: Literal["all", "train", "eval"] = "eval"
+    split: Literal["all", "train", "eval"] = "all"
     """Dataset split for metrics (same as single-run analysis)."""
-
-    source_keys: str = "auto"
-    """Comma-separated source fields or 'auto'."""
 
     batch_size: Optional[int] = None
     """Override batch size; default from each variant.json."""
@@ -48,48 +51,44 @@ class SweepCLI:
     set_length: Optional[int] = None
     """Override set truncation; default from each variant.json."""
 
-    discrete_latents: bool = False
-    """If True, treat latents as discrete for InfoMEC."""
-
     num_bins: int = 10
     """Histogram bins when discretizing continuous sources."""
 
     device: str = "auto"
     """torch device name, or 'auto'."""
 
-    beta_x_axis: Literal["auto", "linear", "log"] = "auto"
-    """``auto`` / ``linear`` / ``log`` for aggregate β plot; same mode for per-run checkpoint-epoch curves (PNG + epoch grid)."""
+    nmi_heatmap_active_dots: bool = True
+    """If True, mark active latents on aggregate and per-run NMI heatmaps (red dots). Tyro: ``--no-nmi-heatmap-active-dots`` turns this off."""
+
+    latent_cluster: bool = True
+    """If True, 2D latent embedding colored by ``source_mode`` (see ``latent-cluster-method``). Tyro: ``--no-latent-cluster`` turns this off."""
+
+    latent_cluster_method: plt_infomec.LatentClusterMethod = (
+        plt_infomec.LatentClusterMethod.tsne
+    )
+    """Dimensionality reduction for latent scatter plots: ``tsne`` or ``umap``."""
+
+    tsne_perplexity: Optional[float] = None
+    """t-SNE perplexity; default min(30, max(2, N//3)) for N samples."""
+
+    tsne_max_iter: Optional[int] = None
+    """t-SNE ``max_iter``; sklearn default 1000 when unset. Use e.g. ``50`` for fast debug sweeps."""
+
+    umap_n_neighbors: Optional[int] = None
+    """UMAP ``n_neighbors``; default min(15, N-1) with N>=3."""
+
+    umap_min_dist: Optional[float] = None
+    """UMAP ``min_dist``; default 0.1."""
 
 
 def beta_from_variant(variant: dict) -> float:
     return float(variant.get("kl_weight", 0.0))
 
 
-def beta_sweep_prefers_log_x(betas: np.ndarray) -> bool:
-    """Use log-scaled β only when values span orders of magnitude and bunch toward small β.
-
-    Keeps linear x for comparable, evenly spaced β (e.g. 0.2 … 2.0).
-    """
-    b = np.sort(np.unique(np.asarray(betas, dtype=np.float64)))
-    if b.size < 3 or np.any(b <= 0) or not np.all(np.isfinite(b)):
-        return False
-    dynamic_range = float(b[-1] / b[0])
-    if dynamic_range < 10.0:
-        return False
-    median = float(np.median(b))
-    b0, b1 = float(b[0]), float(b[-1])
-    linear_mid = 0.5 * (b0 + b1)
-    # Most runs packed on the low-β side of the linear range (e.g. 0.01…100 with many points <10).
-    skewed_toward_small = median < 0.22 * linear_mid + 0.78 * b0
-    if skewed_toward_small:
-        return True
-    return dynamic_range >= 50.0
-
-
-def discover_sweep_run_dirs(sweep_root: Path) -> List[Path]:
-    root = sweep_root.expanduser().resolve()
+def discover_sweep_run_dirs(input_dir: Path) -> List[Path]:
+    root = input_dir.expanduser().resolve()
     if not root.is_dir():
-        raise FileNotFoundError(f"--sweep-root is not a directory: {root}")
+        raise FileNotFoundError(f"--input-dir is not a directory: {root}")
 
     def sort_key(p: Path) -> tuple:
         with open(p / "variant.json", encoding="utf-8") as vf:
@@ -136,88 +135,180 @@ def _add_active_latents_twin_beta_sweep(
         tick_lbl = [str(int(round(t * Lmax))) for t in tick_pos]
     ax_right.set_yticks(tick_pos)
     ax_right.set_yticklabels(tick_lbl)
-    h1, lab1 = ax_left.get_legend_handles_labels()
-    h2, lab2 = ax_right.get_legend_handles_labels()
-    ax_left.legend(h1 + h2, lab1 + lab2, loc="best", fontsize=8)
+    plt_infomec.place_infomec_twin_legend_outside(ax_left, ax_right, legend_fontsize=8)
+
+
+def _effective_sweep_eval_settings(
+    run_dir: Path,
+    *,
+    batch_size: Optional[int],
+    set_length: Optional[int],
+) -> Tuple[str, int, int]:
+    """Resolved dataset path + batch/set sizes used for InfoMEC eval (must match across a sweep)."""
+    with open(run_dir / "variant.json", encoding="utf-8") as vf:
+        variant = json.load(vf)["variant"]
+    dataset_path = plt_infomec.resolve_infomec_dataset_path(
+        run_dir, variant, override=None
+    )
+    bs = int(variant["batch_size"]) if batch_size is None else int(batch_size)
+    sl = int(variant["set_size"]) if set_length is None else int(set_length)
+    return str(dataset_path.resolve()), bs, sl
+
+
+def assert_sweep_runs_share_eval_data(
+    run_dirs: List[Path],
+    *,
+    batch_size: Optional[int],
+    set_length: Optional[int],
+) -> None:
+    if len(run_dirs) <= 1:
+        return
+    ref = _effective_sweep_eval_settings(
+        run_dirs[0], batch_size=batch_size, set_length=set_length
+    )
+    for run_dir in run_dirs[1:]:
+        fp = _effective_sweep_eval_settings(
+            run_dir, batch_size=batch_size, set_length=set_length
+        )
+        if fp != ref:
+            raise ValueError(
+                "Sweep subruns must share infomec dataset_path, batch_size, and set_size for "
+                f"shared eval arrays; {run_dirs[0].name} has {ref!r}, "
+                f"{run_dir.name} has {fp!r}"
+            )
+
+
+def _color_log_beta_one_tick_red(ax: Axes) -> None:
+    """If β=1 (10^0) appears as a major x tick, draw that label in red (log-β sweeps)."""
+    for loc, tlab in zip(ax.get_xticks(), ax.get_xticklabels()):
+        if loc > 0 and np.isclose(loc, 1.0, rtol=0.0, atol=1e-9):
+            tlab.set_color("red")
 
 
 def main(args: SweepCLI) -> None:
     eval_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    sweep_root = Path(args.sweep_root).expanduser().resolve()
+    input_dir = args.input_dir.expanduser().resolve()
     outdir: Path
     if args.outdir is not None:
         outdir = Path(args.outdir).expanduser().resolve()
     else:
-        outdir = sweep_root / "evals_sweep" / eval_ts
+        outdir = input_dir / "evals_sweep" / eval_ts
     outdir.mkdir(parents=True, exist_ok=True)
 
-    run_dirs = discover_sweep_run_dirs(sweep_root)
+    run_dirs = discover_sweep_run_dirs(input_dir)
     if not run_dirs:
         raise SystemExit(
-            f"No subruns with variant.json + best_model.pt under {args.sweep_root}"
+            f"No subruns with variant.json + best_model.pt under {input_dir}"
         )
 
-    device = plt_info.resolve_eval_device(args.device)
+    device = plt_infomec.resolve_eval_device(args.device)
+    assert_sweep_runs_share_eval_data(
+        run_dirs,
+        batch_size=args.batch_size,
+        set_length=args.set_length,
+    )
+    (
+        obs1,  # (Q, Qset, T, O)
+        obs2,
+        labels,  # (Q, Qset, T)
+        sources,  # (Q, S)
+        source_names,
+        source_keys,
+        batch_size,
+        _shared_variant,
+        dataset_path,
+        _dev,
+    ) = plt_infomec.prepare_infomec_eval_arrays(
+        run_dirs[0],
+        split=args.split,
+        num_bins=args.num_bins,
+        batch_size=args.batch_size,
+        set_length=args.set_length,
+        dataset_override=None,
+        device_str=args.device,
+    )
+    mode_color = plt_infomec.source_mode_labels_for_split(
+        dataset_path=dataset_path, split=args.split
+    )
+    mode_names = plt_infomec.source_mode_names_from_dataset(dataset_path=dataset_path)
+    print(
+        f"Loaded shared eval split={args.split!r} pref_dataset="
+        f"{_shared_variant['pref_dataset']!r} once from {dataset_path} "
+        f"({len(obs1)} queries)"
+    )
+
     runs_data: List[Dict[str, Any]] = []
 
-    for rd in run_dirs:
-        with open(rd / "variant.json", encoding="utf-8") as vf:
+    n_runs = len(run_dirs)
+    cluster_part = (
+        "none (--no-latent-cluster)"
+        if not args.latent_cluster
+        else args.latent_cluster_method.value
+    )
+    print(
+        f"\nFound {n_runs} runs to process "
+        f"(device={device}, latent cluster={cluster_part})..."
+    )
+    for i, run_dir in enumerate(run_dirs, start=1):
+        with open(run_dir / "variant.json", encoding="utf-8") as vf:
             variant = json.load(vf)["variant"]
         beta = beta_from_variant(variant)
 
-        (
-            obs1,
-            obs2,
-            labels,
-            sources,
-            source_names,
-            source_keys,
-            batch_size,
-            variant,
-            dataset_path,
-            _dev,
-        ) = plt_info.prepare_infomec_eval_arrays(
-            rd,
-            split=args.split,
-            source_keys=args.source_keys,
-            num_bins=args.num_bins,
-            batch_size=args.batch_size,
-            set_length=args.set_length,
-            dataset_override=None,
-            device_str=args.device,
-        )
-
-        ckpt = rd / "best_model.pt"
+        ckpt = run_dir / "best_model.pt"
         model = torch.load(ckpt, map_location=device, weights_only=False).to(device)
         model.eval()
-        latents = plt_info.batched_encode(model, obs1, obs2, labels, batch_size, device)
+        discrete_latents = plt_infomec.resolve_discrete_latents(
+            model=model, variant=variant
+        )
+        latents = plt_infomec.batched_encode(
+            model, obs1, obs2, labels, batch_size, device
+        )  # (Q, Z)
         result = compute_infomec(
-            sources=sources, latents=latents, discrete_latents=args.discrete_latents
+            sources=sources, latents=latents, discrete_latents=discrete_latents
         )
         latent_dim = int(latents.shape[1])
         latent_names = [f"z{j}" for j in range(latent_dim)]
-        n_active = int(np.sum(result.active_latents))
+        n_varies, n_inform, n_active, _latent_dim = (
+            plt_infomec.latent_mask_counts_from_result(result)
+        )
 
         epoch_series: Optional[Dict[str, Any]] = (
-            plt_info.collect_epoch_checkpoint_infomec_series(
-                rd,
+            plt_infomec.collect_epoch_checkpoint_infomec_series(
+                run_dir,
                 obs1,
                 obs2,
                 labels,
                 sources,
                 batch_size,
                 device,
-                args.discrete_latents,
+                discrete_latents,
             )
         )
-
-        per_run_eval = rd / "evals" / eval_ts
-        plt_info.save_infomec_epoch_series_artifacts(
-            epoch_series, per_run_eval, beta_x_axis=args.beta_x_axis
+        best_epoch = plt_infomec.resolve_best_checkpoint_epoch(run_dir=run_dir)
+        run_title = plt_infomec.format_infomec_run_title(
+            infom=float(result.infom),
+            infoe=float(result.infoe),
+            infoc=float(result.infoc),
+            n_varies=n_varies,
+            n_inform=n_inform,
+            n_active=n_active,
+            latent_dim=latent_dim,
+            run_label=run_dir.name,
+            ckpt_name="best_model.pt",
+            best_epoch=best_epoch,
         )
-        plt_info.save_eval_artifacts_after_encode(
+
+        per_run_eval = plt_infomec.eval_run_outdir(run_dir, eval_ts, sweep=True)
+        plt_infomec.save_infomec_epoch_series_artifacts(
+            epoch_series,
             per_run_eval,
-            rd,
+            title=run_title,
+            best_epoch=best_epoch,
+            best_selection=plt_infomec.BEST_CHECKPOINT_SELECTION,
+        )
+        plt_infomec.save_eval_artifacts_after_encode(
+            per_run_eval,
+            run_dir,
             latents,
             sources,
             result,
@@ -229,25 +320,41 @@ def main(args: SweepCLI) -> None:
             args.split,
             source_keys,
             eval_ts,
+            run_title=run_title,
+            nmi_heatmap_active_dots=args.nmi_heatmap_active_dots,
+            latent_cluster=args.latent_cluster,
+            latent_cluster_method=args.latent_cluster_method,
+            tsne_perplexity=args.tsne_perplexity,
+            tsne_max_iter=args.tsne_max_iter,
+            umap_n_neighbors=args.umap_n_neighbors,
+            umap_min_dist=args.umap_min_dist,
         )
 
         runs_data.append(
             {
-                "run_dir": str(rd),
-                "name": rd.name,
+                "run_dir": str(run_dir),
+                "name": run_dir.name,
                 "beta": beta,
                 "eval_dir": str(per_run_eval),
+                "run_title": run_title,
                 "nmi": np.asarray(result.nmi),
                 "source_names": source_names,
                 "latent_names": latent_names,
                 "infom": float(result.infom),
                 "infoe": float(result.infoe),
                 "infoc": float(result.infoc),
+                "max_nmi": float(result.max_nmi),
+                "n_varies": n_varies,
+                "n_inform": n_inform,
                 "n_active": n_active,
+                "active_latents": np.asarray(result.active_latents, dtype=bool),
                 "latent_dim": latent_dim,
                 "epoch_series": epoch_series,
+                "best_epoch": best_epoch,
+                **({"latents": latents} if args.latent_cluster else {}),
             }
         )
+        print(f"======= [{i}/{n_runs}] Finished beta={beta} ({run_dir.name}) ========")
 
     n = len(runs_data)
     ncols = min(4, n)
@@ -260,20 +367,37 @@ def main(args: SweepCLI) -> None:
     for i, r in enumerate(runs_data):
         row, col = divmod(i, ncols)
         ax = axes[row][col]
-        title = (
-            f"β={r['beta']:.4g}\n"
-            f"InfoM={r['infom']:.3f}  InfoC={r['infoc']:.3f}\n"
-            f"{r['n_active']}/{r['latent_dim']} active latents\n"
-            f"{r['name']}"
+        title = plt_infomec.format_infomec_run_title(
+            infom=float(r["infom"]),
+            infoe=float(r["infoe"]),
+            infoc=float(r["infoc"]),
+            n_varies=int(r["n_varies"]),
+            n_inform=int(r["n_inform"]),
+            n_active=int(r["n_active"]),
+            latent_dim=int(r["latent_dim"]),
+            run_label=r["name"],
+            ckpt_name="best_model.pt",
+            best_epoch=r.get("best_epoch"),
         )
-        plt_info.plot_nmi_heatmap_on_ax(
+        al = r["active_latents"] if args.nmi_heatmap_active_dots else None
+        plt_infomec.plot_nmi_heatmap_on_ax(
             ax,
             r["nmi"],
             r["source_names"],
             r["latent_names"],
             title,
             title_fontsize=7,
+            active_latents=al,
         )
+        # plt_infomec.plot_nmi_heatmap_on_ax(
+        #     ax,
+        #     r["nmi"],
+        #     r["source_names"],
+        #     r["latent_names"],
+        #     title,
+        #     title_fontsize=7,
+        #     active_latents=r["active_latents"],
+        # )
     for j in range(i + 1, nrows * ncols):
         row, col = divmod(j, ncols)
         axes[row][col].set_visible(False)
@@ -282,70 +406,95 @@ def main(args: SweepCLI) -> None:
     fig_h.savefig(outdir / "aggregate_nmi_heatmaps.png", dpi=200, bbox_inches="tight")
     plt.close(fig_h)
 
+    projection_grid_path = (
+        outdir / f"aggregate_{args.latent_cluster_method.value}_by_source_mode.png"
+    )
+    if args.latent_cluster:
+        plt_infomec.save_aggregate_latent_projection_sweep_grid(
+            runs_data,
+            projection_grid_path,
+            mode_color,
+            method=args.latent_cluster_method,
+            mode_names=mode_names,
+            tsne_perplexity=args.tsne_perplexity,
+            tsne_max_iter=args.tsne_max_iter,
+            umap_n_neighbors=args.umap_n_neighbors,
+            umap_min_dist=args.umap_min_dist,
+        )
+
     betas = np.array([r["beta"] for r in runs_data], dtype=np.float64)
     infoms = np.array([r["infom"] for r in runs_data], dtype=np.float64)
     infoes = np.array([r["infoe"] for r in runs_data], dtype=np.float64)
     infocs = np.array([r["infoc"] for r in runs_data], dtype=np.float64)
+    max_nmis = np.array([r["max_nmi"] for r in runs_data], dtype=np.float64)
     n_act = np.array([r["n_active"] for r in runs_data], dtype=np.float64)
     Ls = np.array([r["latent_dim"] for r in runs_data], dtype=np.int64)
 
-    fig_b, ax_b = plt.subplots(figsize=(8, 5))
-    ax_b.plot(
-        betas,
-        infoms,
-        marker="o",
-        label="InfoM",
-        color=plt_info.INFOMEC_COLOR_INFOM,
-    )
-    ax_b.plot(
-        betas,
-        infoes,
-        marker="o",
-        label="InfoE",
-        color=plt_info.INFOMEC_COLOR_INFOE,
-    )
-    ax_b.plot(
-        betas,
-        infocs,
-        marker="o",
-        label="InfoC",
-        color=plt_info.INFOMEC_COLOR_INFOC,
-    )
-    if args.beta_x_axis == "auto":
-        use_log_beta = beta_sweep_prefers_log_x(betas)
-    elif args.beta_x_axis == "log":
-        use_log_beta = True
-    else:
-        use_log_beta = False
-    if use_log_beta and np.any(betas <= 0):
-        raise ValueError(
-            "log β axis requires strictly positive kl_weight for all runs; "
-            f"got betas={betas!r}. Use --beta-x-axis linear or fix variants."
-        )
-    if use_log_beta:
-        ax_b.set_xscale("log")
-    ax_b.set_xlabel(
-        "β (kl_weight from variant.json)" + (" — log scale" if use_log_beta else "")
-    )
-    ax_b.set_ylabel("InfoM / InfoE / InfoC ([0, 1])")
-    ax_b.set_ylim(-0.02, 1.02)
-    ax_b.grid(alpha=0.3, which=("both" if use_log_beta else "major"))
-    _add_active_latents_twin_beta_sweep(ax_b, betas, n_act, Ls)
     L_unique = np.unique(Ls)
     if L_unique.size == 1:
         ld_part = f"L={int(L_unique[0])}"
     else:
         ld_part = "L=" + ",".join(str(int(x)) for x in sorted(L_unique.tolist()))
-    fig_b.suptitle(f"InfoMEC vs β (best_model.pt), {ld_part}", fontsize=11)
-    plt.tight_layout()
-    fig_b.savefig(outdir / "aggregate_infomec_vs_beta.png", dpi=200, bbox_inches="tight")
-    plt.close(fig_b)
+    supt = f"InfoMEC vs β (best_model.pt), {ld_part}"
+
+    beta_plot_path = outdir / "aggregate_infomec_vs_beta_log.png"
+    if np.any(betas <= 0):
+        print(f"Skip {beta_plot_path.name}: all β must be >0 for log x; got {betas!r}")
+    else:
+        fig_b, ax_b = plt.subplots(figsize=(8, 5))
+        ax_b.plot(
+            betas,
+            infoms,
+            marker="o",
+            label="InfoM",
+            color=plt_infomec.InfoMECCurveColor.infom,
+        )
+        ax_b.plot(
+            betas,
+            infoes,
+            marker="o",
+            label="InfoE",
+            color=plt_infomec.InfoMECCurveColor.infoe,
+        )
+        ax_b.plot(
+            betas,
+            infocs,
+            marker="o",
+            label="InfoC",
+            color=plt_infomec.InfoMECCurveColor.infoc,
+        )
+        ax_b.plot(
+            betas,
+            max_nmis,
+            linestyle=":",
+            color="gray",
+            linewidth=1.2,
+            label="max NMI",
+        )
+        ax_b.set_xscale("log")
+        ax_b.set_xlabel("β (kl_weight from variant.json) — log scale")
+        ax_b.grid(alpha=0.3, which="both")
+        ax_b.set_ylabel("InfoM / InfoE / InfoC / max NMI ([0, 1])")
+        ax_b.set_ylim(-0.02, 1.02)
+        _add_active_latents_twin_beta_sweep(ax_b, betas, n_act, Ls)
+        fig_b.suptitle(supt, fontsize=11)
+        fig_b.tight_layout(rect=[0, 0.1, 1, 0.99])
+        fig_b.canvas.draw()
+        _color_log_beta_one_tick_red(ax_b)
+        fig_b.savefig(
+            beta_plot_path,
+            dpi=200,
+            bbox_inches="tight",
+            pad_inches=0.12,
+        )
+        plt.close(fig_b)
 
     ncols_e = min(4, max(1, int(math.ceil(math.sqrt(n)))))
     nrows_e = math.ceil(n / ncols_e)
     fig_e, axes_e = plt.subplots(
         nrows_e, ncols_e, figsize=(4.0 * ncols_e, 3.5 * nrows_e), squeeze=False
     )
+    first_legend_ax_pair: Optional[Tuple[Any, Any]] = None
     last_i = 0
     for i, r in enumerate(runs_data):
         row, col = divmod(i, ncols_e)
@@ -353,7 +502,19 @@ def main(args: SweepCLI) -> None:
         ax_r = ax_l.twinx()
         ep = r["epoch_series"]
         if ep is not None:
-            plt_info.draw_infomec_epoch_trajectory_axes(
+            sub_title = plt_infomec.format_infomec_run_title(
+                infom=float(r["infom"]),
+                infoe=float(r["infoe"]),
+                infoc=float(r["infoc"]),
+                n_varies=int(r["n_varies"]),
+                n_inform=int(r["n_inform"]),
+                n_active=int(r["n_active"]),
+                latent_dim=int(r["latent_dim"]),
+                run_label=r["name"],
+                ckpt_name="best_model.pt",
+                best_epoch=r.get("best_epoch"),
+            )
+            plt_infomec.draw_infomec_epoch_trajectory_axes(
                 ax_l,
                 ax_r,
                 ep["epochs"],
@@ -362,10 +523,11 @@ def main(args: SweepCLI) -> None:
                 np.asarray(ep["infoc"], dtype=np.float64),
                 np.asarray(ep["n_active_latents"], dtype=np.float64),
                 int(ep["latent_dim"]),
-                title=f"β={r['beta']:.4g}",
-                legend_fontsize=6,
+                title=sub_title,
+                show_legend=False,
             )
-            plt_info.apply_checkpoint_epoch_x_scale(ax_l, ep["epochs"], args.beta_x_axis)
+            if first_legend_ax_pair is None:
+                first_legend_ax_pair = (ax_l, ax_r)
         else:
             ax_l.set_title(f"β={r['beta']:.4g} (no model_*.pt)")
             ax_l.set_ylim(0, 1)
@@ -373,10 +535,30 @@ def main(args: SweepCLI) -> None:
     for j in range(last_i + 1, nrows_e * ncols_e):
         row, col = divmod(j, ncols_e)
         axes_e[row][col].set_visible(False)
-    fig_e.suptitle("InfoMEC vs epoch (per-run checkpoints)", fontsize=11, y=1.01)
-    plt.tight_layout()
+    if first_legend_ax_pair is not None:
+        ax0, ax1 = first_legend_ax_pair
+        lines_leg = ax0.get_lines() + ax1.get_lines()
+        leg_labels = [ln.get_label() for ln in lines_leg]
+        fig_e.legend(
+            lines_leg,
+            leg_labels,
+            loc="lower center",
+            bbox_to_anchor=(0.5, 0.0),
+            ncol=4,
+            fontsize=8,
+            frameon=True,
+        )
+    fig_e.suptitle(
+        f"InfoMEC vs epoch (best selected by {plt_infomec.BEST_CHECKPOINT_SELECTION})",
+        fontsize=11,
+        y=1.01,
+    )
+    fig_e.tight_layout(rect=[0, 0.05, 1, 0.99])
     fig_e.savefig(
-        outdir / "aggregate_infomec_vs_epoch_grid.png", dpi=200, bbox_inches="tight"
+        outdir / "aggregate_infomec_vs_epoch_grid.png",
+        dpi=200,
+        bbox_inches="tight",
+        pad_inches=0.1,
     )
     plt.close(fig_e)
 
@@ -389,6 +571,7 @@ def main(args: SweepCLI) -> None:
         "infom",
         "infoe",
         "infoc",
+        "max_nmi",
         "n_active",
         "latent_dim",
     ]
@@ -405,13 +588,14 @@ def main(args: SweepCLI) -> None:
                     "infom": r["infom"],
                     "infoe": r["infoe"],
                     "infoc": r["infoc"],
+                    "max_nmi": r["max_nmi"],
                     "n_active": r["n_active"],
                     "latent_dim": r["latent_dim"],
                 }
             )
 
     manifest = {
-        "sweep_root": str(sweep_root),
+        "input_dir": str(input_dir),
         "eval_timestamp": eval_ts,
         "aggregate_outdir": str(outdir),
         "runs": [
@@ -423,6 +607,7 @@ def main(args: SweepCLI) -> None:
                 "infom": r["infom"],
                 "infoe": r["infoe"],
                 "infoc": r["infoc"],
+                "max_nmi": r["max_nmi"],
                 "n_active": r["n_active"],
                 "latent_dim": r["latent_dim"],
             }
@@ -432,9 +617,15 @@ def main(args: SweepCLI) -> None:
     with open(outdir / "sweep_manifest.json", "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)
 
-    print(f"Per-run evals (timestamp {eval_ts}) under each subdir: .../evals/{eval_ts}/")
+    print(
+        f"Per-run evals (timestamp {eval_ts}) under each subdir: .../evals/{eval_ts}/ "
+        f"(sweep; single-run plot_infomec uses .../evals/{eval_ts}_individual/)"
+    )
     print(f"Wrote {outdir / 'aggregate_nmi_heatmaps.png'}")
-    print(f"Wrote {outdir / 'aggregate_infomec_vs_beta.png'}")
+    if args.latent_cluster:
+        print(f"Wrote {projection_grid_path}")
+    if not np.any(betas <= 0):
+        print(f"Wrote {beta_plot_path}")
     print(f"Wrote {outdir / 'aggregate_infomec_vs_epoch_grid.png'}")
     print(f"Wrote {csv_path}")
 

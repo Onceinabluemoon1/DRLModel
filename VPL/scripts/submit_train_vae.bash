@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=train_vae
-#SBATCH --gres=shard:24
+#SBATCH --gres=shard:12
 #SBATCH --array=0-10
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=16G
@@ -10,6 +10,7 @@
 #   • Wall-clock (set once at submit on the login node):
 #       sbatch --export=ALL,RUN_TIMESTAMP=$(date +%Y%m%d_%H%M%S) scripts/submit_train_vae.bash
 #   • If RUN_TIMESTAMP is unset but this is a Slurm array job, we default to arrayjob_<SLURM_ARRAY_JOB_ID>.
+#   • All array tasks with the same RUN_TIMESTAMP share one W&B group (beta sweep).
 # Each task writes to .../<RUN_TIMESTAMP>/<array_task_id>_beta=..._ld=.../
 
 source ~/miniconda3/etc/profile.d/conda.sh
@@ -30,14 +31,21 @@ BETAS=(
     100.0
     200.0
 )
+model_type=VAE
+latent_dim=4
 beta=${BETAS[${SLURM_ARRAY_TASK_ID}]}
-latent_dim=8
+learned_prior=True
+use_annealing=False
 
-env=sort-easy-v0
-dataset_path=./pref_datasets/${env}/relabelled_queries_num5000_q1_s16
-subrun="${SLURM_ARRAY_TASK_ID:-0}"
-comment="${subrun}_beta=${beta}_ld=${latent_dim}"
-# comment="beta=${beta}_ld=${latent_dim}"
+# pref_dataset="sort_2goals_T=1"
+pref_dataset="sort_4goals_T=1"
+# pref_dataset="sort_4goals_T=10"
+
+output_dir="/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/outputs"
+last_beta_idx=$((${#BETAS[@]} - 1))
+subrun_pad=${#last_beta_idx}
+subrun=$(printf "%0${subrun_pad}d" "${SLURM_ARRAY_TASK_ID:-0}")
+comment="${subrun}_beta=${beta}"
 
 TS_ARGS=()
 if [ -z "${RUN_TIMESTAMP:-}" ] && [ -n "${SLURM_ARRAY_JOB_ID:-}" ]; then
@@ -49,21 +57,27 @@ fi
 # If RUN_TIMESTAMP is still unset, train.py picks datetime per process (non-array local runs).
 
 python pref_learn/train.py \
-  --env=${env} \
-  --dataset_path=${dataset_path} \
-  --model_type=VAEClassifier \
+  --pref_dataset="${pref_dataset}" \
+  --model_type=${model_type} \
   --comment=${comment} \
   --latent_dim=${latent_dim} \
   --kl_weight=${beta} \
+  --learned_prior=${learned_prior} \
+  --use_annealing=${use_annealing} \
   --seed=42 \
   --batch_size=256 \
   --n_epochs=500 \
   --eval_freq=50 \
   --save_freq=50 \
   --device=cuda \
-  --logging.output_dir=./logs3 \
-  --logging.online=False \
+  --logging.output_dir=${output_dir} \
+  --logging.online=True \
   "${TS_ARGS[@]}"
+
+
+: <<'EOF'
+sbatch --export=ALL,RUN_TIMESTAMP=$(date +%Y%m%d_%H%M%S) scripts/submit_train_vae.bash
+EOF
 
 # CUDA_VISIBLE_DEVICES=0 python pref_learn/train.py \
 #  --env=sort-easy-v0 \

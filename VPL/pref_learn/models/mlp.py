@@ -9,8 +9,11 @@ import torch.nn.functional as F
 
 
 class MLPModel(nn.Module):
+    discrete_latents: bool = False
+
     def __init__(self, input_dim, hidden_dim):
         super(MLPModel, self).__init__()
+        self.discrete_latents = False
         self.reward_model = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.LeakyReLU(0.2),
@@ -50,6 +53,8 @@ class MLPModel(nn.Module):
 
 
 class CategoricalModel(nn.Module):
+    discrete_latents: bool = False
+
     def __init__(
         self,
         input_dim,
@@ -61,6 +66,7 @@ class CategoricalModel(nn.Module):
         device="cuda",
     ):
         super(CategoricalModel, self).__init__()
+        self.discrete_latents = False
         self.r_min = r_min
         self.r_max = r_max
         self.r_bins = torch.linspace(r_min, r_max, n_atoms).to(device)
@@ -147,8 +153,11 @@ class CategoricalModel(nn.Module):
 
 
 class MeanVarianceModel(nn.Module):
+    discrete_latents: bool = False
+
     def __init__(self, input_dim, hidden_dim, variance_penalty=0.1):
         super(MeanVarianceModel, self).__init__()
+        self.discrete_latents = False
         self.variance_penalty = variance_penalty
         self.reward_model = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
@@ -216,8 +225,11 @@ class MeanVarianceModel(nn.Module):
 
 
 class MLPClassifier(nn.Module):
+    discrete_latents: bool = False
+
     def __init__(self, input_dim, hidden_dim):
         super(MLPClassifier, self).__init__()
+        self.discrete_latents = False
         self.classifier_model = nn.Sequential(
             nn.Linear(2 * input_dim, hidden_dim),
             nn.LeakyReLU(0.2),
