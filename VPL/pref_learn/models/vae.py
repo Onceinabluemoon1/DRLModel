@@ -2,6 +2,7 @@ import math
 import os
 import pickle
 
+import einops as ei
 import numpy as np
 import torch
 import torch.nn as nn
@@ -51,6 +52,8 @@ class Decoder(nn.Module):
 
 
 class VAEModel(nn.Module):
+    discrete_latents: bool = False
+
     def __init__(
         self,
         encoder_input,
@@ -64,8 +67,10 @@ class VAEModel(nn.Module):
         flow_prior=False,
         annealer=None,
         reward_scaling=1.0,
+        discrete_latents: bool = False,
     ):
         super(VAEModel, self).__init__()
+        self.discrete_latents = bool(discrete_latents)
         self.Encoder = Encoder(encoder_input, hidden_dim, latent_dim)
         self.Decoder = Decoder(decoder_input, hidden_dim, 1)
         self.latent_dim = latent_dim
@@ -93,23 +98,33 @@ class VAEModel(nn.Module):
         return z
 
     def encode(self, s1, s2, y):
-        s1_ = s1.view(s1.shape[0], s1.shape[1], -1)  # B, Qset, (T, O)
-        s2_ = s2.view(s2.shape[0], s2.shape[1], -1)
-        y = y.reshape(s1.shape[0], s1.shape[1], -1)
+        """
+        Input:
+            traj1: (B, A, T, O)
+            traj2: (B, A, T, O)
+            y: (B, A, 1)
+        Output:
+            mean: (B, Z)
+            log_var: (B, Z)
+        """
 
-        encoder_input = torch.cat([s1_, s2_, y], dim=-1).view(
-            s1.shape[0], -1
-        )  # Batch x Ann x (2*T*State + 1)
-        mean, log_var = self.Encoder(encoder_input)
+        B, A, T, O = s1.shape
+        s1_ = ei.rearrange(s1, "B A T O -> B A (T O)")
+        s2_ = ei.rearrange(s2, "B A T O -> B A (T O)")
+        y = ei.rearrange(y, "B A 1 -> B A 1")
+
+        encoder_input = torch.cat([s1_, s2_, y], dim=-1)  # (B, A, (2*T*O + 1))
+        encoder_input = encoder_input.view(B, -1)  # (B, A*(2*T*O + 1))
+        mean, log_var = self.Encoder(encoder_input)  # (B, Z), (B, Z)
         return mean, log_var
 
     def decode(self, obs, z):
-        r = torch.cat([obs, z], dim=-1)  # Batch x Ann x T x (State + Z)
-        r = self.Decoder(r)  # Batch x Ann x T x 1
+        decoder_input = torch.cat([obs, z], dim=-1)  # (B, A, T, O + Z)
+        r = self.Decoder(decoder_input)  # (B, A, T, 1)
         return r
 
-    def get_reward(self, r):
-        r = self.Decoder(r)  # Batch x Ann x T x 1
+    def get_reward(self, x):
+        r = self.Decoder(x)  # (B, A, T, 1)
         return r
 
     def transform(self, mean, log_var):
@@ -138,34 +153,31 @@ class VAEModel(nn.Module):
             kl = -torch.sum(1.0 + log_var - mean.pow(2) - log_var.exp())
         return kl
 
-    def forward(self, s1, s2, y):  # Batch x Ann x T x State, Batch x Ann x 1
-        # import pdb; pdb.set_trace()
-        mean, log_var = self.encode(s1, s2, y)
+    def forward(self, s1, s2, y):  # (B, A, T, O), (B, A, 1)
+        mean, log_var = self.encode(s1, s2, y)  # (B, Z), (B, Z)
 
         if self.flow_prior:
             z, log_det = self.transform(mean, log_var)
         else:
-            z = self.reparameterization(mean, torch.exp(0.5 * log_var))  # Batch x Z
+            z = self.reparameterization(mean, torch.exp(0.5 * log_var))  # (B, Z)
             log_det = None
-        z = z.repeat((1, self.annotation_size * self.size_segment)).view(
-            -1, self.annotation_size, self.size_segment, z.shape[1]
-        )
+        # z: broadcast same latent to each (annotation, segment) pair
+        z = ei.repeat(z, "B Z -> B A T Z", A=self.annotation_size, T=self.size_segment)
 
-        r0 = self.decode(s1, z)
-        r1 = self.decode(s2, z)
-
-        r_hat1 = r0.sum(axis=2) / self.scaling
-        r_hat2 = r1.sum(axis=2) / self.scaling
-
-        p_hat = torch.nn.functional.sigmoid(r_hat1 - r_hat2).view(-1, 1)
-        labels = y.view(-1, 1)
+        # bradley-terry likelihood
+        r0 = self.decode(s1, z)  # (B, A, T, O+Z) -> (B, A, T, 1)
+        r1 = self.decode(s2, z)  # (B, A, T, O+Z) -> (B, A, T, 1)
+        r_hat1 = r0.sum(axis=2) / self.scaling  # (B, A, 1)
+        r_hat2 = r1.sum(axis=2) / self.scaling  # (B, A, 1)
+        p_hat = torch.nn.functional.sigmoid(r_hat1 - r_hat2).view(-1, 1)  # (B*A, 1)
+        labels = y.view(-1, 1)  # (B, A, 1) -> (B*A, 1)
 
         reconstruction_loss = self.reconstruction_loss(labels, p_hat)
         accuracy = self.accuracy(labels, p_hat)
-        latent_loss = self.latent_loss(mean, log_var)
+        kl_loss = self.latent_loss(mean, log_var)
 
         kl_weight = self.annealer.slope() if self.annealer else self.kl_weight
-        loss = reconstruction_loss + kl_weight * latent_loss
+        loss = reconstruction_loss + kl_weight * kl_loss
 
         if self.flow_prior:
             loss = loss - torch.sum(log_det)
@@ -173,7 +185,7 @@ class VAEModel(nn.Module):
         metrics = {
             "loss": loss.item(),
             "reconstruction_loss": reconstruction_loss.item(),
-            "kld_loss": latent_loss.item(),
+            "kld_loss": kl_loss.item(),
             "accuracy": accuracy.item(),
             "kl_weight": kl_weight,
         }
@@ -212,6 +224,7 @@ class VAEClassifier(VAEModel):
         flow_prior=False,
         annealer=None,
         reward_scaling=1.0,
+        discrete_latents: bool = False,
     ):
         super(VAEClassifier, self).__init__(
             encoder_input,
@@ -225,31 +238,31 @@ class VAEClassifier(VAEModel):
             flow_prior,
             annealer,
             reward_scaling,
+            discrete_latents=discrete_latents,
         )
 
-    def forward(self, s1, s2, y):  # Batch x Ann x T x State, Batch x Ann x 1
-        # import pdb; pdb.set_trace()
-        mean, log_var = self.encode(s1, s2, y)
+    def forward(self, s1, s2, y):  # (B, A, T, O), (B, A, 1)
+        mean, log_var = self.encode(s1, s2, y)  # (B, Z), (B, Z)
 
         if self.flow_prior:
             z, log_det = self.transform(mean, log_var)
         else:
-            z = self.reparameterization(mean, torch.exp(0.5 * log_var))  # Batch x Z
+            z = self.reparameterization(mean, torch.exp(0.5 * log_var))  # (B, Z)
             log_det = None
-        z = z.repeat((1, self.annotation_size * self.size_segment)).view(
-            -1, self.annotation_size, self.size_segment, z.shape[1]
-        )
+        # z: broadcast same latent to each (annotation, segment) pair
+        z = ei.repeat(z, "B Z -> B A T Z", A=self.annotation_size, T=self.size_segment)
 
-        p_hat = self.Decoder(torch.cat([s1, s2, z], dim=-1)).view(-1, 1)
-        p_hat = torch.nn.functional.sigmoid(p_hat).view(-1, 1)
-        labels = y.view(-1, 1)
+        decoder_input = torch.cat([s1, s2, z], dim=-1)  # (B, A, T, 2*O + Z)
+        p_hat = self.Decoder(decoder_input).view(-1, 1)  # (B, A, T, 1) -> (B*A*T, 1)
+        p_hat = torch.nn.functional.sigmoid(p_hat).view(-1, 1)  # (B*A*T, 1)
+        labels = y.view(-1, 1)  # (B, A, T) -> (B*A*T, 1)
 
         reconstruction_loss = self.reconstruction_loss(labels, p_hat)
         accuracy = self.accuracy(labels, p_hat)
-        latent_loss = self.latent_loss(mean, log_var)
+        kl_loss = self.latent_loss(mean, log_var)
 
         kl_weight = self.annealer.slope() if self.annealer else self.kl_weight
-        loss = reconstruction_loss + kl_weight * latent_loss
+        loss = reconstruction_loss + kl_weight * kl_loss
 
         if self.flow_prior:
             loss = loss - torch.sum(log_det)
@@ -257,7 +270,7 @@ class VAEClassifier(VAEModel):
         metrics = {
             "loss": loss.item(),
             "reconstruction_loss": reconstruction_loss.item(),
-            "kld_loss": latent_loss.item(),
+            "kld_loss": kl_loss.item(),
             "accuracy": accuracy.item(),
             "kl_weight": kl_weight,
         }
