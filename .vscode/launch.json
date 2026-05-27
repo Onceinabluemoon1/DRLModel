@@ -106,7 +106,36 @@
                 "--eval_freq=50",
                 "--save_freq=50",
                 "--device=cuda",
-                "--logging.output_dir=${workspaceFolder}/outputs",
+                "--logging.output_dir=${workspaceFolder}/outputs_debug",
+                "--logging.online=False"
+            ]
+        },
+        {
+            "name": "train TCVAE",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/VPL/pref_learn/train.py",
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}/VPL",
+            "env": {
+                "WANDB_MODE": "disabled"
+            },
+            "args": [
+                "--pref_dataset=sort_2goals_T=1",
+                // "--pref_dataset=sort_4goals_T=10",
+                "--model_type=TCVAE",
+                "--comment=debug_tc=1.0",
+                "--latent_dim=4",
+                "--tc_weight=1.0",
+                "--learned_prior=True",
+                "--use_annealing=False",
+                "--seed=42",
+                "--batch_size=256",
+                "--n_epochs=500",
+                "--eval_freq=50",
+                "--save_freq=50",
+                "--device=cuda",
+                "--logging.output_dir=${workspaceFolder}/outputs_debug",
                 "--logging.online=False"
             ]
         }
