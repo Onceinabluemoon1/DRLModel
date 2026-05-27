@@ -149,7 +149,7 @@ def relabel_rewards_with_model(
     sampled_z = None
     sample_every = 10
     comparison_obs = None
-    if "Classifier" in model_type or vae_norm == "learned_norm":
+    if "Classifier" in model_type or vae_norm in ("learned_norm", "prob"):
         comparison_obs = sample_comparison_states(
             observations=dataset["observations"],
             size=comp_size,
@@ -193,7 +193,9 @@ def relabel_rewards_with_model(
             with torch.no_grad():
                 rewards = reward_model.sample_reward(input_obs)
                 next_rewards = reward_model.sample_reward(input_next_obs)
-        elif model_type == "VAE" or model_type == "VAEClassifier":
+        elif (
+            model_type == "VAE" or model_type == "TCVAE" or model_type == "VAEClassifier"
+        ):
             with torch.no_grad():
                 if vae_sampling:
                     if sampled_z is None or traj_id % sample_every == 0:
@@ -214,16 +216,29 @@ def relabel_rewards_with_model(
                     .float()
                     .to(next(reward_model.parameters()).device)
                 )
-                if model_type == "VAE":
-                    rewards = reward_model.get_reward(
-                        torch.cat([input_obs, batch_z], dim=-1)
-                    )
-                    next_rewards = reward_model.get_reward(
-                        torch.cat([input_next_obs, batch_z], dim=-1)
-                    )
+                if model_type == "VAE" or model_type == "TCVAE":
+                    if vae_norm == "prob":
+                        assert comparison_obs is not None
+                        rewards = reward_model.get_prob_reward(
+                            s_a=input_obs,
+                            z=batch_z,
+                            comparison_obs=comparison_obs,
+                        )
+                        next_rewards = reward_model.get_prob_reward(
+                            s_a=input_next_obs,
+                            z=batch_z,
+                            comparison_obs=comparison_obs,
+                        )
+                    else:
+                        rewards = reward_model.get_reward(
+                            torch.cat([input_obs, batch_z], dim=-1)
+                        )
+                        next_rewards = reward_model.get_reward(
+                            torch.cat([input_next_obs, batch_z], dim=-1)
+                        )
 
-                    if vae_norm == "learned_norm":
-                        rewards = torch.exp((rewards - norm_z) * 1e-3)
+                        if vae_norm == "learned_norm":
+                            rewards = torch.exp((rewards - norm_z) * 1e-3)
                 elif model_type == "VAEClassifier":
                     rewards = []
                     next_rewards = []
@@ -282,7 +297,7 @@ def relabel_rewards_with_model(
         new_rewards = new_rewards * 1e-2
         dataset["rewards"] = new_rewards
         dataset["next_rewards"] = new_next_rewards
-    elif model_type == "VAE" and vae_norm == "fixed":
+    elif (model_type == "VAE" or model_type == "TCVAE") and vae_norm == "fixed":
         print("VAE with fixed norm")
         for mode in range(env.get_num_modes()):
             id_r = np.argwhere(mode_mask == mode)
@@ -292,6 +307,10 @@ def relabel_rewards_with_model(
         new_rewards = new_rewards * 1e-2
         dataset["rewards"] = new_rewards
         dataset["next_rewards"] = new_next_rewards
+    elif (model_type == "VAE" or model_type == "TCVAE") and vae_norm == "prob":
+        print("VAE with prob (BTL expected preference) scaling")
+        dataset["rewards"] = new_rewards.squeeze()
+        dataset["next_rewards"] = new_next_rewards.squeeze()
     elif vae_norm == "max":
         dataset["rewards"] = new_rewards / np.abs(new_rewards).max()
         dataset["next_rewards"] = new_next_rewards / np.abs(new_next_rewards).max()

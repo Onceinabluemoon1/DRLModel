@@ -32,51 +32,75 @@ BETAS=(
     200.0
 )
 model_type=VAE
+# model_type=TCVAE
 latent_dim=4
-beta=${BETAS[${SLURM_ARRAY_TASK_ID}]}
 learned_prior=True
 use_annealing=False
 
 # pref_dataset="sort_2goals_T=1"
-pref_dataset="sort_4goals_T=1"
+# pref_dataset="sort_4goals_T=1"
+pref_dataset="sort_4goals_T=1_Q=20000"
 # pref_dataset="sort_4goals_T=10"
 
 output_dir="/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/outputs"
 last_beta_idx=$((${#BETAS[@]} - 1))
 subrun_pad=${#last_beta_idx}
-subrun=$(printf "%0${subrun_pad}d" "${SLURM_ARRAY_TASK_ID:-0}")
-comment="${subrun}_beta=${beta}"
 
-TS_ARGS=()
-if [ -z "${RUN_TIMESTAMP:-}" ] && [ -n "${SLURM_ARRAY_JOB_ID:-}" ]; then
-  RUN_TIMESTAMP="arrayjob_${SLURM_ARRAY_JOB_ID}"
-fi
-if [ -n "${RUN_TIMESTAMP:-}" ]; then
-  TS_ARGS+=(--run_timestamp="${RUN_TIMESTAMP}")
-fi
-# If RUN_TIMESTAMP is still unset, train.py picks datetime per process (non-array local runs).
+run_train_beta() {
+  local idx="$1"
+  local beta="$2"
+  local subrun comment TS_ARGS=()
 
-python pref_learn/train.py \
-  --pref_dataset="${pref_dataset}" \
-  --model_type=${model_type} \
-  --comment=${comment} \
-  --latent_dim=${latent_dim} \
-  --kl_weight=${beta} \
-  --learned_prior=${learned_prior} \
-  --use_annealing=${use_annealing} \
-  --seed=42 \
-  --batch_size=256 \
-  --n_epochs=500 \
-  --eval_freq=50 \
-  --save_freq=50 \
-  --device=cuda \
-  --logging.output_dir=${output_dir} \
-  --logging.online=True \
-  "${TS_ARGS[@]}"
+  subrun=$(printf "%0${subrun_pad}d" "${idx}")
+  comment="${subrun}_beta=${beta}"
+
+  if [ -z "${RUN_TIMESTAMP:-}" ] && [ -n "${SLURM_ARRAY_JOB_ID:-}" ]; then
+    RUN_TIMESTAMP="arrayjob_${SLURM_ARRAY_JOB_ID}"
+  fi
+  if [ -n "${RUN_TIMESTAMP:-}" ]; then
+    TS_ARGS+=(--run_timestamp="${RUN_TIMESTAMP}")
+  fi
+  # If RUN_TIMESTAMP is still unset, train.py picks datetime per process (non-array local runs).
+
+  python pref_learn/train.py \
+    --pref_dataset="${pref_dataset}" \
+    --model_type=${model_type} \
+    --comment=${comment} \
+    --latent_dim=${latent_dim} \
+    --kl_weight=${beta} \
+    --learned_prior=${learned_prior} \
+    --use_annealing=${use_annealing} \
+    --seed=42 \
+    --batch_size=256 \
+    --n_epochs=500 \
+    --eval_freq=50 \
+    --save_freq=50 \
+    --device=cuda \
+    --logging.output_dir=${output_dir} \
+    --logging.online=True \
+    "${TS_ARGS[@]}"
+}
+
+if [ "${1:-}" = "serial" ] || [ -n "${SERIAL_SWEEP:-}" ]; then
+  RUN_TIMESTAMP="${RUN_TIMESTAMP:-$(date +%Y%m%d_%H%M%S)}"
+  export RUN_TIMESTAMP
+  for idx in "${!BETAS[@]}"; do
+    echo "=== serial sweep $((idx + 1))/${#BETAS[@]}: beta=${BETAS[$idx]} ==="
+    run_train_beta "${idx}" "${BETAS[$idx]}"
+  done
+else
+  idx="${SLURM_ARRAY_TASK_ID:-0}"
+  beta="${BETAS[$idx]}"
+  run_train_beta "${idx}" "${beta}"
+fi
 
 
 : <<'EOF'
+# Slurm array (parallel; one beta per task; shared parent dir via RUN_TIMESTAMP):
 sbatch --export=ALL,RUN_TIMESTAMP=$(date +%Y%m%d_%H%M%S) scripts/submit_train_vae.bash
+
+# Serial loop (one GPU; all betas in order; shared W&B group via RUN_TIMESTAMP):
+CUDA_VISIBLE_DEVICES=0 RUN_TIMESTAMP=$(date +%Y%m%d_%H%M%S) bash scripts/submit_train_vae.bash serial
 EOF
 
 # CUDA_VISIBLE_DEVICES=0 python pref_learn/train.py \

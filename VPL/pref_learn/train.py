@@ -21,6 +21,7 @@ from pref_learn.models.mlp import (
     MLPClassifier,
     MLPModel,
 )
+from pref_learn.models.tcvae import TCVAEModel
 from pref_learn.models.utils import Annealer, EarlyStopper, get_datasets
 from pref_learn.models.vae import VAEClassifier, VAEModel
 from pref_learn.utils.utils import (
@@ -54,6 +55,7 @@ FLAGS_DEF = define_flags_with_default(
     # VAE
     latent_dim=32,
     kl_weight=1.0,
+    tc_weight=1.0,
     learned_prior=False,
     flow_prior=False,
     use_annealing=False,
@@ -185,7 +187,29 @@ def main(_):
             hidden_dim=FLAGS.hidden_dim,
             variance_penalty=FLAGS.variance_penalty,
         )
-    elif "VAE" in FLAGS.model_type:
+    elif FLAGS.model_type == "TCVAE":
+        annealer = None
+        if FLAGS.use_annealing:
+            annealer = Annealer(
+                total_steps=FLAGS.n_epochs // FLAGS.annealer_cycles,
+                shape=FLAGS.annealer_type,
+                baseline=FLAGS.annealer_baseline,
+                cyclical=FLAGS.annealer_cycles > 1,
+            )
+        reward_model = TCVAEModel(
+            encoder_input=set_size * (2 * obs_dim * segment_len + 1),
+            decoder_input=obs_dim + FLAGS.latent_dim,
+            latent_dim=FLAGS.latent_dim,
+            hidden_dim=FLAGS.hidden_dim,
+            annotation_size=set_size,
+            segment_len=segment_len,
+            dataset_size=len(train_dataset),
+            tc_weight=FLAGS.tc_weight,
+            learned_prior=FLAGS.learned_prior,
+            annealer=annealer,
+            reward_scaling=FLAGS.reward_scaling,
+        )
+    elif FLAGS.model_type == "VAE" or FLAGS.model_type == "VAEClassifier":
         annealer = None
         if FLAGS.use_annealing:
             annealer = Annealer(
@@ -206,7 +230,7 @@ def main(_):
             latent_dim=FLAGS.latent_dim,
             hidden_dim=FLAGS.hidden_dim,
             annotation_size=set_size,
-            size_segment=segment_len,
+            segment_len=segment_len,
             kl_weight=FLAGS.kl_weight,
             learned_prior=FLAGS.learned_prior,
             flow_prior=FLAGS.flow_prior,
@@ -234,7 +258,7 @@ def main(_):
     optimizer = torch.optim.Adam(reward_model.parameters(), lr=FLAGS.lr)
     early_stop = EarlyStopper(FLAGS.patience, FLAGS.min_delta)
     best_criteria = None
-    for epoch in tqdm(range(1, FLAGS.n_epochs + 1), desc="epochs"):
+    for epoch in tqdm(range(FLAGS.n_epochs), desc="epochs"):
         metrics = defaultdict(list)
         metrics["epoch"] = epoch
 
@@ -250,7 +274,7 @@ def main(_):
             for key, val in prefix_metrics(batch_metrics, "train").items():
                 metrics[key].append(val)
 
-        should_eval = (epoch % FLAGS.eval_freq == 0) or (epoch == FLAGS.n_epochs)
+        should_eval = (epoch % FLAGS.eval_freq == 0) or (epoch == FLAGS.n_epochs - 1)
         if should_eval:
             for batch in test_loader:
                 with torch.no_grad():
@@ -280,12 +304,11 @@ def main(_):
                         eval_dataset,
                         classifier="Classifier" in FLAGS.model_type,
                     )
-
                 metrics.update(prefix_metrics(fig_dict, "debug_plots"))
             elif "VAE" in FLAGS.model_type:
                 putils.update_posterior(reward_env, reward_model, eval_dataset)
 
-            criteria = np.mean(metrics["eval/loss"])
+            criteria = np.mean(metrics["eval/total_loss"])
 
             if best_criteria is None:
                 best_criteria = criteria
@@ -300,7 +323,7 @@ def main(_):
                 torch.save(reward_model, save_dir / "checkpoints" / f"model_{epoch}.pt")
                 break
 
-        should_save = (epoch % FLAGS.save_freq == 0) or (epoch == FLAGS.n_epochs)
+        should_save = (epoch % FLAGS.save_freq == 0) or (epoch == FLAGS.n_epochs - 1)
         if should_save:
             torch.save(reward_model, save_dir / "checkpoints" / f"model_{epoch}.pt")
 

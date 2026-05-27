@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
 os.environ.setdefault("NUMBA_THREADING_LAYER", "workqueue")
 
+import einops as ei
 import matplotlib
 import tyro
 
@@ -25,7 +26,9 @@ from matplotlib.axes import Axes
 from matplotlib.lines import Line2D
 from pref_learn.configs.data_configs import infomec_dataset_path_for_variant
 from pref_learn.models.utils import PreferenceDataset
+from pref_learn.models.vae import VAEClassifier, VAEModel
 from pref_learn.utils.infomec import InfoMECResult, compute_infomec
+from pref_learn.utils.plot_utils import plot_observation_rewards_by_annotator_mode
 from sklearn.manifold import TSNE
 from torch.utils.data import DataLoader
 
@@ -44,11 +47,102 @@ class LatentTableMapEnvId(str, Enum):
     sort_easy_v0 = "sort-easy-v0"
 
 
+def is_ravens_sort_env(env_name: str) -> bool:
+    """True for Ravens sort-easy gym ids (``sort-easy-*``)."""
+    return str(env_name).startswith("sort-easy")
+
+
+_SORT_N_GOALS_RE = re.compile(r"sort-easy-(?P<n>\d+)goals")
+
+
+@dataclass(frozen=True)
+class SortLearnedRewardMapLayout:
+    """Scatter-grid layout for Ravens sort learned-reward maps."""
+
+    n_goals: Optional[int]
+    ncols: int
+    scatter_s: float
+    x_idx: int = 0
+    y_idx: int = 1
+    axis_xlabel: str = "EE x"
+    axis_ylabel: str = "EE y"
+    title_fontsize: int = 10
+
+
+def parse_sort_n_goals(env_name: str) -> Optional[int]:
+    """Parse goal count from ids like ``sort-easy-2goals-v0`` / ``sort-easy-4goals-v0``."""
+    match = _SORT_N_GOALS_RE.search(str(env_name))
+    if match is None:
+        return None
+    return int(match.group("n"))
+
+
+def sort_learned_reward_map_layout(
+    *, env_name: str, n_modes: int
+) -> SortLearnedRewardMapLayout:
+    """
+    Layout for learned-reward scatter grids on Ravens sort envs.
+
+    * 2 goals / 2 pref modes → 1×2 grid
+    * 4 goals / 8 pref modes → 2×4 grid (matches GT ``queries_relabelled_by_annot_mode.png``)
+    """
+    n_goals = parse_sort_n_goals(env_name=env_name)
+    if n_modes <= 2:
+        return SortLearnedRewardMapLayout(
+            n_goals=n_goals,
+            ncols=2,
+            scatter_s=0.4,
+            title_fontsize=10,
+        )
+    return SortLearnedRewardMapLayout(
+        n_goals=n_goals,
+        ncols=4,
+        scatter_s=0.25,
+        title_fontsize=9,
+    )
+
+
+def format_sort_learned_reward_map_suptitle(
+    *,
+    run_title: Optional[str],
+    env_name: str,
+    n_modes: int,
+    layout: SortLearnedRewardMapLayout,
+) -> str:
+    goal_part = (
+        f"{layout.n_goals} goals / {n_modes} pref modes"
+        if layout.n_goals is not None
+        else f"{n_modes} pref modes"
+    )
+    map_line = f"Learned reward vs EE (x,y): {goal_part} ({env_name})"
+    if run_title:
+        return f"{map_line}\n{run_title}"
+    return map_line
+
+
+def model_supports_obs_latent_reward_decode(model: Any) -> bool:
+    """``VAEModel.decode(obs, z)`` reward maps; not ``VAEClassifier``."""
+    return isinstance(model, VAEModel) and not isinstance(model, VAEClassifier)
+
+
 class LatentClusterMethod(str, Enum):
     """2D latent embedding for mode-colored scatter plots."""
 
+    none = "none"
     tsne = "tsne"
     umap = "umap"
+
+
+class ModelSelection(str, Enum):
+    """Which training checkpoint to load for InfoMEC eval plots."""
+
+    best = "best"
+    final = "final"
+
+
+def latent_cluster_enabled(method: LatentClusterMethod) -> bool:
+    """True when ``method`` requests a 2D latent embedding plot."""
+    return method != LatentClusterMethod.none
 
 
 @dataclass
@@ -59,7 +153,10 @@ class AnalysisCLI:
     """Training run directory with variant.json and the checkpoint (see ckpt-name)."""
 
     ckpt_name: str = "best_model.pt"
-    """Checkpoint file name inside ``input_dir``."""
+    """Checkpoint file name inside ``input_dir`` when ``model_selection=best``."""
+
+    model_selection: ModelSelection = ModelSelection.best
+    """``best``: ``best_model.pt``; ``final``: latest ``checkpoints/model_<epoch>.pt``."""
 
     dataset: Optional[Path] = None
     """Override InfoMEC eval dataset pickle; default from variant infomec_dataset_path."""
@@ -91,11 +188,8 @@ class AnalysisCLI:
     nmi_heatmap_active_dots: bool = True
     """If True, draw a small red dot per (source, latent) cell for active latents on the NMI heatmap. Tyro: ``--no-nmi-heatmap-active-dots`` turns this off."""
 
-    latent_cluster: bool = True
-    """If True, 2D latent embedding colored by ``source_mode`` (see ``latent-cluster-method``). Tyro: ``--no-latent-cluster`` turns this off."""
-
     latent_cluster_method: LatentClusterMethod = LatentClusterMethod.tsne
-    """Dimensionality reduction for latent scatter plots: ``tsne`` or ``umap``."""
+    """2D latent embedding colored by ``source_mode``: ``tsne``, ``umap``, or ``none`` to skip."""
 
     tsne_perplexity: Optional[float] = None
     """t-SNE perplexity; default min(30, max(2, N//3)) for N samples."""
@@ -109,18 +203,38 @@ class AnalysisCLI:
     umap_min_dist: Optional[float] = None
     """UMAP ``min_dist``; default 0.1."""
 
+    learned_reward_mode: Literal["raw", "prob"] = "prob"
+    """VAE learned-reward scatter: raw decoder vs VPL Sec. 4.1 BTL expected preference."""
+
+    learned_reward_max_comp: int = 512
+    """Max comparison states ``s_B`` for prob learned rewards."""
+
 
 _MODEL_CKPT_RE = re.compile(r"^model_(\d+)\.pt$")
 
-# Non-sweep ``plot_infomec.py`` runs use ``evals/<timestamp>_individual/``; sweep uses plain ``evals/<timestamp>/``.
-_INDIVIDUAL_EVAL_SUBDIR_TAG = "individual"
+# Per-run: ``evals_individual/<timestamp>/`` (plot_infomec) or ``evals_subsweep/<timestamp>/`` (plot_infomec_sweep).
+# Sweep aggregate: ``evals_sweep/<timestamp>_model=<best|final>/``.
 BEST_CHECKPOINT_SELECTION = "best_eval_pref"
+FINAL_CHECKPOINT_SELECTION = "final_epoch_checkpoint"
+LATENT_PROJECTION_SCATTER_S = 2.0
+LATENT_PROJECTION_SCATTER_ALPHA = 0.85
 
 
-def eval_run_outdir(input_dir: Path, eval_timestamp: str, *, sweep: bool = False) -> Path:
-    """``input_dir/evals/<timestamp>`` for sweep; ``.../<timestamp>_individual`` for single-run eval."""
-    name = eval_timestamp if sweep else f"{eval_timestamp}_{_INDIVIDUAL_EVAL_SUBDIR_TAG}"
-    return input_dir / "evals" / name
+def learned_reward_sweep_copy_path(sweep_outdir: Path, *, comment: str) -> Path:
+    """Aggregate sweep copy: ``.../learned_rewards_by_annot_mode/learned_reward_<comment>.png``."""
+    stem = str(comment).strip() or "run"
+    return sweep_outdir / "learned_rewards_by_annot_mode" / f"learned_reward_{stem}.png"
+
+
+def eval_run_outdir(
+    input_dir: Path,
+    eval_timestamp: str,
+    *,
+    kind: Literal["individual", "subsweep"] = "individual",
+) -> Path:
+    """Per-run InfoMEC artifacts under ``evals_individual/`` or ``evals_subsweep/``."""
+    subdir = "evals_individual" if kind == "individual" else "evals_subsweep"
+    return input_dir / subdir / eval_timestamp
 
 
 def beta_from_variant(variant: dict) -> float:
@@ -140,9 +254,10 @@ def format_checkpoint_choice_line(
     best_epoch: Optional[int],
     best_selection: str = BEST_CHECKPOINT_SELECTION,
 ) -> str:
+    """Epoch index only (for plot titles; ``ckpt_name`` / ``best_selection`` kept for callers)."""
     if best_epoch is not None:
-        return f"{ckpt_name} = epoch {best_epoch} ({best_selection})"
-    return f"{ckpt_name} ({best_selection})"
+        return f"epoch_{int(best_epoch)}"
+    return ""
 
 
 def format_latent_mask_counts_line(
@@ -182,24 +297,26 @@ def format_infomec_run_title(
     best_epoch: Optional[int] = None,
     best_selection: str = BEST_CHECKPOINT_SELECTION,
 ) -> str:
-    """Run label, InfoM/E/C, latent mask counts, and checkpoint selection (sweep + individual subplots)."""
-    ckpt_line = format_checkpoint_choice_line(
-        ckpt_name=ckpt_name,
-        best_epoch=best_epoch,
-        best_selection=best_selection,
-    )
+    """Run label, InfoM/E/C, latent mask counts, and checkpoint epoch (sweep + individual subplots)."""
     counts_line = format_latent_mask_counts_line(
         n_varies=n_varies,
         n_inform=n_inform,
         n_active=n_active,
         latent_dim=latent_dim,
     )
-    return (
-        f"{run_label}\n"
-        f"InfoMEC = {infom:.3f} / {infoe:.3f} / {infoc:.3f}\n"
-        f"{counts_line}\n"
-        f"{ckpt_line}"
+    title_lines = [
+        run_label,
+        f"InfoMEC = {infom:.3f} / {infoe:.3f} / {infoc:.3f}",
+        counts_line,
+    ]
+    ckpt_line = format_checkpoint_choice_line(
+        ckpt_name=ckpt_name,
+        best_epoch=best_epoch,
+        best_selection=best_selection,
     )
+    if ckpt_line:
+        title_lines.append(ckpt_line)
+    return "\n".join(title_lines)
 
 
 def gather_epoch_checkpoints(run_dir: Path) -> List[Tuple[int, Path]]:
@@ -217,6 +334,56 @@ def gather_epoch_checkpoints(run_dir: Path) -> List[Tuple[int, Path]]:
             pairs.append((int(m.group(1)), p))
     pairs.sort(key=lambda x: x[0])
     return pairs
+
+
+def resolve_final_epoch_checkpoint(run_dir: Path) -> Optional[Tuple[int, Path]]:
+    """Latest ``checkpoints/model_<epoch>.pt`` by epoch; None if ``checkpoints/`` is empty."""
+    ckpts = gather_epoch_checkpoints(run_dir)
+    if not ckpts:
+        return None
+    return ckpts[-1]
+
+
+def run_dir_has_checkpoint(run_dir: Path, *, model_selection: ModelSelection) -> bool:
+    run_dir = run_dir.expanduser().resolve()
+    if not (run_dir / "variant.json").is_file():
+        return False
+    if model_selection == ModelSelection.best:
+        return (run_dir / "best_model.pt").is_file()
+    return resolve_final_epoch_checkpoint(run_dir) is not None
+
+
+def model_selection_display_label(model_selection: ModelSelection) -> str:
+    if model_selection == ModelSelection.best:
+        return "best_model.pt"
+    return "final checkpoint"
+
+
+def resolve_run_checkpoint(
+    run_dir: Path,
+    *,
+    model_selection: ModelSelection,
+    ckpt_name: str = "best_model.pt",
+) -> Tuple[Path, str, Optional[int], str]:
+    """Return ``(path, title_label, epoch, selection_tag)`` for one training run."""
+    run_dir = run_dir.expanduser().resolve()
+    if model_selection == ModelSelection.best:
+        ckpt_path = run_dir / ckpt_name
+        if not ckpt_path.is_file():
+            raise FileNotFoundError(
+                f"Missing checkpoint {ckpt_name!r} under run dir: {ckpt_path}"
+            )
+        epoch = resolve_best_checkpoint_epoch(run_dir, ckpt_name=ckpt_name)
+        return ckpt_path, ckpt_name, epoch, BEST_CHECKPOINT_SELECTION
+
+    final = resolve_final_epoch_checkpoint(run_dir)
+    if final is None:
+        raise FileNotFoundError(
+            f"No checkpoints/model_<epoch>.pt under {run_dir / 'checkpoints'}"
+        )
+    epoch, ckpt_path = final
+    ckpt_label = f"checkpoints/{ckpt_path.name}"
+    return ckpt_path, ckpt_label, int(epoch), FINAL_CHECKPOINT_SELECTION
 
 
 def _model_state_dict(model_or_state: Any) -> Dict[str, torch.Tensor]:
@@ -514,12 +681,18 @@ def save_eval_artifacts_after_encode(
     *,
     run_title: Optional[str] = None,
     nmi_heatmap_active_dots: bool = True,
-    latent_cluster: bool = True,
     latent_cluster_method: LatentClusterMethod = LatentClusterMethod.tsne,
     tsne_perplexity: Optional[float] = None,
     tsne_max_iter: Optional[int] = None,
     umap_n_neighbors: Optional[int] = None,
     umap_min_dist: Optional[float] = None,
+    model: Optional[torch.nn.Module] = None,
+    obs2: Optional[np.ndarray] = None,
+    labels: Optional[np.ndarray] = None,
+    device: Optional[torch.device] = None,
+    learned_reward_mode: Literal["raw", "prob"] = "prob",
+    learned_reward_max_comp: int = 512,
+    learned_reward_also_save_as: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Persist latents, NMI heatmap, latent 2D embedding, infomec_metrics.json, summary.txt under outdir.
 
@@ -574,7 +747,6 @@ def save_eval_artifacts_after_encode(
         tsne_max_iter=tsne_max_iter,
         umap_n_neighbors=umap_n_neighbors,
         umap_min_dist=umap_min_dist,
-        enabled=latent_cluster,
         mode_names=mode_names,
         title_fontsize=7,
     )
@@ -584,6 +756,30 @@ def save_eval_artifacts_after_encode(
         png_path=projection_png,
         mode_names=mode_names,
     )
+
+    learned_reward_metrics: Optional[Dict[str, Any]] = None
+    if (
+        model is not None
+        and obs2 is not None
+        and labels is not None
+        and device is not None
+    ):
+        learned_reward_metrics = maybe_save_learned_reward_by_annotator_mode(
+            model=model,
+            obs1=obs1,
+            obs2=obs2,
+            labels=labels,
+            variant=variant,
+            dataset_path=dataset_path,
+            split=split,
+            outdir=outdir,
+            device=device,
+            batch_size=batch_size,
+            run_title=run_title,
+            learned_reward_mode=learned_reward_mode,
+            learned_reward_max_comp=learned_reward_max_comp,
+            also_save_as=learned_reward_also_save_as,
+        )
 
     metrics = result.to_dict()
     metrics.update(
@@ -604,6 +800,8 @@ def save_eval_artifacts_after_encode(
             **projection_metrics,
         }
     )
+    if learned_reward_metrics is not None:
+        metrics.update(learned_reward_metrics)
     if (outdir / "infomec_epoch_checkpoint_curve.json").is_file():
         metrics["infomec_epoch_checkpoint_curve_json"] = str(
             outdir / "infomec_epoch_checkpoint_curve.json"
@@ -808,6 +1006,227 @@ def batched_encode(model, obs1, obs2, labels, batch_size, device):
             mean, _ = model.encode(o1, o2, y)  # B, Z
         means.append(mean.cpu().numpy())
     return np.concatenate(means, axis=0)
+
+
+def batched_learned_rewards_on_obs1(
+    model: VAEModel,
+    obs1: np.ndarray,
+    obs2: np.ndarray,
+    labels: np.ndarray,
+    batch_size: int,
+    device: torch.device,
+    *,
+    comparison_obs: np.ndarray | None = None,
+    reward_mode: Literal["raw", "prob"] = "prob",
+) -> np.ndarray:
+    """Encoder posterior mean per query, then reward on ``obs1`` segments.
+
+    ``prob`` (default): VPL Sec. 4.1 expected BTL preference vs a comparison pool.
+    ``raw``: decoder output ``r(s, z)``.
+    """
+    q_n = int(len(obs1))
+    s_n = int(obs1.shape[1])
+    t_n = int(obs1.shape[2])
+    o_dim = int(obs1.shape[-1])
+    rewards = np.zeros((q_n, s_n, t_n), dtype=np.float64)
+    comp_t: torch.Tensor | None = None
+    if reward_mode == "prob":
+        assert comparison_obs is not None, "prob reward_mode requires comparison_obs pool"
+        comp_t = torch.from_numpy(comparison_obs).float().to(device)  # (N, O)
+
+    for start in range(0, q_n, batch_size):
+        end = min(start + batch_size, q_n)
+        o1 = torch.from_numpy(obs1[start:end]).float().to(device)  # (B, S, T, O)
+        o2 = torch.from_numpy(obs2[start:end]).float().to(device)
+        y = torch.from_numpy(labels[start:end]).float().to(device)
+        b_n = end - start
+        with torch.no_grad():
+            mean, _ = model.encode(o1, o2, y)  # (B, Z)
+            if reward_mode == "prob":
+                assert comp_t is not None
+                o_flat = o1.reshape(b_n * s_n * t_n, o_dim)  # (B*S*T, O)
+                z_flat = ei.repeat(mean, "B Z -> (B S T) Z", S=s_n, T=t_n)
+                r_flat = model.get_probabilistic_reward(
+                    s_a=o_flat,
+                    z=z_flat,
+                    comparison_obs=comp_t,
+                    chunk_size=64,
+                )
+                r = r_flat.reshape(b_n, s_n, t_n)
+            else:
+                z = ei.repeat(mean, "B Z -> B S T Z", S=s_n, T=t_n)
+                r = model.decode(o1, z).squeeze(-1)  # (B, S, T)
+        rewards[start:end] = r.detach().cpu().numpy()
+    return rewards
+
+
+def build_comparison_obs_pool(
+    obs1: np.ndarray,
+    obs2: np.ndarray,
+    *,
+    max_comp: int = 2048,
+    seed: int = 0,
+) -> np.ndarray:
+    """Sample comparison states ``s_B`` from preference dataset observations."""
+    pool = np.concatenate(
+        [
+            obs1.reshape(-1, obs1.shape[-1]),
+            obs2.reshape(-1, obs2.shape[-1]),
+        ],
+        axis=0,
+    )
+    if pool.shape[0] > max_comp:
+        rng = np.random.default_rng(seed=seed)
+        idx = rng.choice(pool.shape[0], size=max_comp, replace=False)
+        pool = pool[idx]
+    return pool
+
+
+def gather_learned_rewards_by_annotator_mode(
+    obs1: np.ndarray,
+    rewards: np.ndarray,
+    mode_labels: np.ndarray,
+    *,
+    n_modes: int,
+) -> Tuple[List[np.ndarray], List[np.ndarray]]:
+    """Group flattened (obs, r) pairs by integer annotator mode index."""
+    o_dim = int(obs1.shape[-1])
+    per_mode_obs: List[np.ndarray] = []
+    per_mode_r: List[np.ndarray] = []
+    mode_labels = np.asarray(mode_labels).reshape(-1)
+    for mode in range(n_modes):
+        mask = mode_labels == mode
+        if not np.any(mask):
+            per_mode_obs.append(np.empty((0, o_dim), dtype=np.float64))
+            per_mode_r.append(np.empty((0, 1), dtype=np.float64))
+            continue
+        ob = obs1[mask]  # (Q_m, S, T, O)
+        rw = rewards[mask]  # (Q_m, S, T)
+        per_mode_obs.append(ei.rearrange(ob, "q s t o -> (q s t) o"))
+        per_mode_r.append(ei.rearrange(rw, "q s t -> (q s t) 1"))
+    return per_mode_obs, per_mode_r
+
+
+def resolve_n_annotator_modes(
+    mode_labels: np.ndarray,
+    mode_names: Optional[List[str]],
+) -> int:
+    if mode_names is not None:
+        return len(mode_names)
+    if mode_labels.size == 0:
+        return 0
+    return int(np.max(mode_labels)) + 1
+
+
+def maybe_save_learned_reward_by_annotator_mode(
+    *,
+    model: Optional[torch.nn.Module],
+    obs1: np.ndarray,
+    obs2: np.ndarray,
+    labels: np.ndarray,
+    variant: dict,
+    dataset_path: Path,
+    split: str,
+    outdir: Path,
+    device: torch.device,
+    batch_size: int,
+    run_title: Optional[str] = None,
+    learned_reward_mode: Literal["raw", "prob"] = "prob",
+    learned_reward_max_comp: int = 512,
+    also_save_as: Optional[Path] = None,
+) -> Optional[Dict[str, Any]]:
+    """Ravens sort env: scatter learned reward vs EE (x,y), one subplot per GT annotator mode.
+
+    Supports ``sort-easy-2goals-v0`` (2 modes) and ``sort-easy-4goals-v0`` (8 modes).
+    """
+    env_name = str(variant.get("env", ""))
+    if not is_ravens_sort_env(env_name):
+        return None
+    if model is None or not model_supports_obs_latent_reward_decode(model):
+        return None
+
+    mode_labels = source_mode_labels_for_split(dataset_path=dataset_path, split=split)
+    mode_names = source_mode_names_from_dataset(dataset_path=dataset_path)
+    n_modes = resolve_n_annotator_modes(mode_labels=mode_labels, mode_names=mode_names)
+    if n_modes <= 0:
+        return None
+    layout = sort_learned_reward_map_layout(env_name=env_name, n_modes=n_modes)
+
+    comparison_pool: np.ndarray | None = None
+    if learned_reward_mode == "prob":
+        comparison_pool = build_comparison_obs_pool(
+            obs1=obs1,
+            obs2=obs2,
+            max_comp=learned_reward_max_comp,
+        )
+
+    rewards = batched_learned_rewards_on_obs1(
+        model=model,
+        obs1=obs1,
+        obs2=obs2,
+        labels=labels,
+        batch_size=batch_size,
+        device=device,
+        comparison_obs=comparison_pool,
+        reward_mode=learned_reward_mode,
+    )
+    per_mode_obs, per_mode_r = gather_learned_rewards_by_annotator_mode(
+        obs1,
+        rewards,
+        mode_labels,
+        n_modes=n_modes,
+    )
+    if mode_names is not None:
+        mode_titles = [f"mode: {name}" for name in mode_names]
+    else:
+        mode_titles = [
+            f"mode: {source_mode_display_name(m, mode_names=None)}"
+            for m in range(n_modes)
+        ]
+
+    fig = plot_observation_rewards_by_annotator_mode(
+        per_mode_obs,
+        per_mode_r,
+        mode_titles=mode_titles,
+        suptitle=format_sort_learned_reward_map_suptitle(
+            run_title=run_title,
+            env_name=env_name,
+            n_modes=n_modes,
+            layout=layout,
+        ),
+        scatter_s=layout.scatter_s,
+        ncols=layout.ncols,
+        x_idx=layout.x_idx,
+        y_idx=layout.y_idx,
+        axis_xlabel=layout.axis_xlabel,
+        axis_ylabel=layout.axis_ylabel,
+        title_fontsize=layout.title_fontsize,
+        reward_vmin=0.0 if learned_reward_mode == "prob" else None,
+        reward_vmax=1.0 if learned_reward_mode == "prob" else None,
+    )
+    png_path = outdir / "learned_reward_by_annot_mode.png"
+    savefig_kw = dict(dpi=150, bbox_inches="tight", pad_inches=0.12)
+    fig.savefig(png_path, **savefig_kw)
+    sweep_copy_path: Optional[Path] = None
+    if also_save_as is not None:
+        also_save_as = Path(also_save_as)
+        also_save_as.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(also_save_as, **savefig_kw)
+        sweep_copy_path = also_save_as
+    plt.close(fig)
+    metrics_out: Dict[str, Any] = {
+        "learned_reward_by_annot_mode_png": str(png_path),
+        "learned_reward_by_annot_mode_env": env_name,
+        "learned_reward_by_annot_mode_n_modes": int(n_modes),
+        "learned_reward_by_annot_mode_n_goals": layout.n_goals,
+        "learned_reward_mode": learned_reward_mode,
+        "learned_reward_max_comp": (
+            int(comparison_pool.shape[0]) if comparison_pool is not None else None
+        ),
+    }
+    if sweep_copy_path is not None:
+        metrics_out["learned_reward_sweep_copy_png"] = str(sweep_copy_path)
+    return metrics_out
 
 
 def preference_dataloader_for_split(
@@ -1502,8 +1921,10 @@ def plot_latent_projection_scatter_on_ax(
             proj[mask, 0],
             proj[mask, 1],
             c=[color],
-            s=6,
-            alpha=0.75,
+            s=LATENT_PROJECTION_SCATTER_S,
+            alpha=LATENT_PROJECTION_SCATTER_ALPHA,
+            linewidths=0,
+            edgecolors="none",
         )
     xlabel, ylabel = projection_axis_labels(method=method)
     ax.set_xlabel(xlabel, fontsize=8)
@@ -1569,6 +1990,7 @@ def save_aggregate_latent_projection_sweep_grid(
     umap_min_dist: Optional[float] = None,
     title_fontsize: int = 7,
     random_state: int = 0,
+    ckpt_label: str = "best_model.pt",
 ) -> None:
     """One latent embedding subplot per sweep run; shared source-mode legend below the grid."""
     n = len(runs)
@@ -1647,7 +2069,7 @@ def save_aggregate_latent_projection_sweep_grid(
         mode_names=mode_names,
         bbox_y=0.0,
     )
-    fig.suptitle(f"{display} by source mode (best_model.pt)", fontsize=11, y=1.01)
+    fig.suptitle(f"{display} by source mode ({ckpt_label})", fontsize=11, y=1.01)
     fig.tight_layout(rect=[0, 0.02 + 0.05 * nrow_leg, 1, 0.99])
     fig.savefig(outpath, dpi=200, bbox_inches="tight", pad_inches=0.1)
     plt.close(fig)
@@ -1665,12 +2087,11 @@ def maybe_save_latent_projection(
     umap_n_neighbors: Optional[int] = None,
     umap_min_dist: Optional[float] = None,
     random_state: int = 0,
-    enabled: bool = True,
     mode_names: Optional[List[str]] = None,
     title_fontsize: int = 8,
 ) -> Optional[Dict[str, Any]]:
     """2D latent embedding; one point per preference row, colored by ``y`` (GT ``source_mode``)."""
-    if not enabled:
+    if not latent_cluster_enabled(method=method):
         return None
     fit = fit_latent_projection(
         latents,
@@ -1762,13 +2183,17 @@ def save_aggregate_tsne_sweep_grid(
 def main(args: AnalysisCLI) -> None:
     input_dir = args.input_dir.expanduser().resolve()
     variant_path = input_dir / "variant.json"
-    ckpt_path = input_dir / args.ckpt_name
+    ckpt_path, ckpt_label, selected_epoch, model_selection_tag = resolve_run_checkpoint(
+        input_dir,
+        model_selection=args.model_selection,
+        ckpt_name=args.ckpt_name,
+    )
 
     if not variant_path.is_file():
         raise FileNotFoundError(f"Missing variant.json under --input-dir: {variant_path}")
 
     eval_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    outdir = eval_run_outdir(input_dir, eval_timestamp, sweep=False)
+    outdir = eval_run_outdir(input_dir=input_dir, eval_timestamp=eval_timestamp)
     outdir.mkdir(parents=True, exist_ok=True)
 
     (
@@ -1798,9 +2223,7 @@ def main(args: AnalysisCLI) -> None:
     )
 
     if not ckpt_path.is_file():
-        raise FileNotFoundError(
-            f"Missing checkpoint {args.ckpt_name!r} under --input-dir: {ckpt_path}"
-        )
+        raise FileNotFoundError(f"Missing checkpoint under --input-dir: {ckpt_path}")
 
     model = torch.load(ckpt_path, map_location=device, weights_only=False).to(device)
     model.eval()
@@ -1888,7 +2311,6 @@ def main(args: AnalysisCLI) -> None:
         latent_mask_counts_from_result(result)
     )
     assert latent_dim_counts == int(latents.shape[1])
-    best_epoch = resolve_best_checkpoint_epoch(input_dir, ckpt_name=args.ckpt_name)
     run_title = format_infomec_run_title(
         infom=float(result.infom),
         infoe=float(result.infoe),
@@ -1898,8 +2320,9 @@ def main(args: AnalysisCLI) -> None:
         n_active=n_active_latents,
         latent_dim=int(latents.shape[1]),
         run_label=infomec_run_label(input_dir, variant),
-        ckpt_name=args.ckpt_name,
-        best_epoch=best_epoch,
+        ckpt_name=ckpt_label,
+        best_epoch=selected_epoch,
+        best_selection=model_selection_tag,
     )
 
     metrics = save_eval_artifacts_after_encode(
@@ -1918,20 +2341,25 @@ def main(args: AnalysisCLI) -> None:
         eval_timestamp,
         run_title=run_title,
         nmi_heatmap_active_dots=args.nmi_heatmap_active_dots,
-        latent_cluster=args.latent_cluster,
         latent_cluster_method=args.latent_cluster_method,
         tsne_perplexity=args.tsne_perplexity,
         tsne_max_iter=args.tsne_max_iter,
         umap_n_neighbors=args.umap_n_neighbors,
         umap_min_dist=args.umap_min_dist,
+        model=model,
+        obs2=obs2,
+        labels=labels,
+        device=device,
+        learned_reward_mode=args.learned_reward_mode,
+        learned_reward_max_comp=args.learned_reward_max_comp,
     )
     if epoch_payload is not None:
         save_infomec_epoch_series_artifacts(
             epoch_payload,
             outdir,
             title=run_title,
-            best_epoch=best_epoch,
-            best_selection=BEST_CHECKPOINT_SELECTION,
+            best_epoch=selected_epoch,
+            best_selection=model_selection_tag,
         )
     if latent_xy_table_grid_png is not None:
         metrics = {

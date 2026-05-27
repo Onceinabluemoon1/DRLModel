@@ -17,13 +17,18 @@ def plot_reward(
     r,
     no_norm=False,
     *,
+    x_idx: int = 0,
+    y_idx: int = 1,
     reward_size_threshold: float | None = None,
     s_below: float = 6.0,
     s_above: float = 32.0,
+    scatter_s: float | None = None,
     vmin: float | None = None,
     vmax: float | None = None,
     cmap: str | matplotlib.colors.Colormap | None = None,
     colorbar: bool = True,
+    xlabel: str | None = None,
+    ylabel: str | None = None,
 ):
     # if not no_norm:
     #     r = (r - r.min()) / (r.max() - r.min())
@@ -31,7 +36,9 @@ def plot_reward(
     #     r = (r - r.min()) / (r.max() - r.min())
     r_plot = np.asarray(r).reshape(-1)
     kwargs = {}
-    if reward_size_threshold is not None:
+    if scatter_s is not None:
+        kwargs["s"] = scatter_s
+    elif reward_size_threshold is not None:
         kwargs["s"] = np.where(r_plot < reward_size_threshold, s_below, s_above)
     lim_kw = {}
     if vmin is not None:
@@ -40,7 +47,11 @@ def plot_reward(
         lim_kw["vmax"] = vmax
     if cmap is not None:
         lim_kw["cmap"] = cmap
-    sc = ax.scatter(obs[:, 0], obs[:, 1], c=r_plot, **lim_kw, **kwargs)
+    sc = ax.scatter(obs[:, x_idx], obs[:, y_idx], c=r_plot, **lim_kw, **kwargs)
+    if xlabel is not None:
+        ax.set_xlabel(xlabel)
+    if ylabel is not None:
+        ax.set_ylabel(ylabel)
     if colorbar:
         cb = plt.colorbar(sc, ax=ax)
         cb.set_label("r(s)")
@@ -55,6 +66,17 @@ def plot_observation_rewards_by_annotator_mode(
     suptitle: str | None = None,
     cmap: str = "viridis",
     reward_size_threshold: float = 0.5,
+    scatter_s: float | None = None,
+    s_below: float = 6.0,
+    s_above: float = 32.0,
+    reward_vmin: float | None = None,
+    reward_vmax: float | None = None,
+    ncols: int | None = None,
+    x_idx: int = 0,
+    y_idx: int = 1,
+    axis_xlabel: str = "EE x",
+    axis_ylabel: str = "EE y",
+    title_fontsize: int = 10,
 ):
     """
     One scatter panel per annotator mode; each uses only (obs, r) from that mode.
@@ -73,29 +95,43 @@ def plot_observation_rewards_by_annotator_mode(
         axis=0,
     )
     if all_r.size > 0:
-        vmin = float(np.min(all_r))
-        vmax = float(np.max(all_r))
+        if reward_vmin is not None and reward_vmax is not None:
+            vmin = float(reward_vmin)
+            vmax = float(reward_vmax)
+        else:
+            vmin = float(np.min(all_r))
+            vmax = float(np.max(all_r))
     else:
         vmin, vmax = 0.0, 1.0
 
-    ncols = min(4, n_modes)
+    ncols = min(4, n_modes) if ncols is None else min(int(ncols), n_modes)
     nrows = int(np.ceil(n_modes / ncols))
+    n_suptitle_lines = (suptitle.count("\n") + 1) if suptitle else 0
     # * Last column is only for the shared colorbar so it does not overlap subplot data.
-    fig_w = 4.2 * ncols + 0.95
+    fig_w = 4.2 * ncols + 1.25
+    suptitle_line_frac = 0.032  # figure-height fraction per suptitle line (~fontsize 9)
+    suptitle_top_margin = 0.012
+    if suptitle:
+        top = 1.0 - suptitle_top_margin - n_suptitle_lines * suptitle_line_frac
+        top = max(top, 0.52 + 0.04 * max(nrows - 1, 0))
+        suptitle_y = 1.0 - suptitle_top_margin
+    else:
+        top = 0.92
+        suptitle_y = None
     fig_h = 4.1 * nrows
     fig = plt.figure(figsize=(fig_w, fig_h))
     gs = fig.add_gridspec(
         nrows,
         ncols + 1,
-        width_ratios=[1.0] * ncols + [0.065],
+        width_ratios=[1.0] * ncols + [0.10],
         wspace=0.32,
         hspace=0.38,
     )
     gs.update(
         left=0.07,
-        right=0.98,
+        right=0.91,
         bottom=0.08,
-        top=0.78 if suptitle else 0.90,
+        top=top,
     )
     flat_axes: list = []
     for row in range(nrows):
@@ -112,7 +148,7 @@ def plot_observation_rewards_by_annotator_mode(
         ax = flat_axes[m]
         ob = np.asarray(per_mode_obs[m])
         rw = np.asarray(per_mode_r[m])
-        ax.set_title(mode_titles[m], fontsize=10)
+        ax.set_title(mode_titles[m], fontsize=title_fontsize)
         if ob.size == 0 or rw.size == 0:
             ax.text(
                 0.5,
@@ -131,11 +167,18 @@ def plot_observation_rewards_by_annotator_mode(
             ob,
             rw,
             no_norm=False,
+            x_idx=x_idx,
+            y_idx=y_idx,
             reward_size_threshold=reward_size_threshold,
+            scatter_s=scatter_s,
+            s_below=s_below,
+            s_above=s_above,
             vmin=vmin,
             vmax=vmax,
             cmap=cmap,
             colorbar=False,
+            xlabel=axis_xlabel,
+            ylabel=axis_ylabel,
         )
 
     for k in range(n_modes, len(flat_axes)):
@@ -145,12 +188,13 @@ def plot_observation_rewards_by_annotator_mode(
     any_data = all_r.size > 0
     if any_data:
         mappable.set_array(np.linspace(vmin, vmax, 256))
-        fig.colorbar(mappable, cax=cax, label="r(s)")
+        cb = fig.colorbar(mappable, cax=cax, label="r(s)")
+        cb.ax.tick_params(labelsize=8)
     else:
         cax.set_visible(False)
 
     if suptitle:
-        fig.suptitle(suptitle, fontsize=11, y=0.94)
+        fig.suptitle(suptitle, fontsize=9, y=suptitle_y, va="top")
     plt.close(fig)
     return fig
 

@@ -37,10 +37,13 @@ class SweepCLI:
     """Aggregate InfoMEC / NMI across beta subdirs under ``input_dir``."""
 
     input_dir: Path
-    """Parent directory; each child with variant.json + best_model.pt is one run."""
+    """Parent directory; each child with variant.json + a usable checkpoint is one run."""
+
+    model_selection: plt_infomec.ModelSelection = plt_infomec.ModelSelection.best
+    """``best``: ``best_model.pt``; ``final``: latest ``checkpoints/model_<epoch>.pt``."""
 
     outdir: Optional[Path] = None
-    """Aggregate PNG/CSV/manifest; default ``<input_dir>/evals_sweep/<timestamp>/``."""
+    """Aggregate PNG/CSV/manifest; default ``<input_dir>/evals_sweep/<timestamp>_model=<best|final>/``."""
 
     split: Literal["all", "train", "eval"] = "all"
     """Dataset split for metrics (same as single-run analysis)."""
@@ -60,13 +63,10 @@ class SweepCLI:
     nmi_heatmap_active_dots: bool = True
     """If True, mark active latents on aggregate and per-run NMI heatmaps (red dots). Tyro: ``--no-nmi-heatmap-active-dots`` turns this off."""
 
-    latent_cluster: bool = True
-    """If True, 2D latent embedding colored by ``source_mode`` (see ``latent-cluster-method``). Tyro: ``--no-latent-cluster`` turns this off."""
-
     latent_cluster_method: plt_infomec.LatentClusterMethod = (
         plt_infomec.LatentClusterMethod.tsne
     )
-    """Dimensionality reduction for latent scatter plots: ``tsne`` or ``umap``."""
+    """2D latent embedding colored by ``source_mode``: ``tsne``, ``umap``, or ``none`` to skip."""
 
     tsne_perplexity: Optional[float] = None
     """t-SNE perplexity; default min(30, max(2, N//3)) for N samples."""
@@ -80,12 +80,22 @@ class SweepCLI:
     umap_min_dist: Optional[float] = None
     """UMAP ``min_dist``; default 0.1."""
 
+    learned_reward_mode: Literal["raw", "prob"] = "prob"
+    """VAE learned-reward scatter: raw decoder vs VPL Sec. 4.1 BTL expected preference."""
+
+    learned_reward_max_comp: int = 512
+    """Max comparison states ``s_B`` for prob learned rewards."""
+
 
 def beta_from_variant(variant: dict) -> float:
     return float(variant.get("kl_weight", 0.0))
 
 
-def discover_sweep_run_dirs(input_dir: Path) -> List[Path]:
+def discover_sweep_run_dirs(
+    input_dir: Path,
+    *,
+    model_selection: plt_infomec.ModelSelection,
+) -> List[Path]:
     root = input_dir.expanduser().resolve()
     if not root.is_dir():
         raise FileNotFoundError(f"--input-dir is not a directory: {root}")
@@ -99,8 +109,7 @@ def discover_sweep_run_dirs(input_dir: Path) -> List[Path]:
         p
         for p in root.iterdir()
         if p.is_dir()
-        and (p / "variant.json").is_file()
-        and (p / "best_model.pt").is_file()
+        and plt_infomec.run_dir_has_checkpoint(p, model_selection=model_selection)
     ]
     return sorted(dirs, key=sort_key)
 
@@ -186,7 +195,9 @@ def _color_log_beta_one_tick_red(ax: Axes) -> None:
 
 
 def main(args: SweepCLI) -> None:
-    eval_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    eval_ts = (
+        f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_model={args.model_selection.value}"
+    )
     input_dir = args.input_dir.expanduser().resolve()
     outdir: Path
     if args.outdir is not None:
@@ -195,11 +206,18 @@ def main(args: SweepCLI) -> None:
         outdir = input_dir / "evals_sweep" / eval_ts
     outdir.mkdir(parents=True, exist_ok=True)
 
-    run_dirs = discover_sweep_run_dirs(input_dir)
+    run_dirs = discover_sweep_run_dirs(input_dir, model_selection=args.model_selection)
     if not run_dirs:
-        raise SystemExit(
-            f"No subruns with variant.json + best_model.pt under {input_dir}"
+        ckpt_hint = (
+            "best_model.pt"
+            if args.model_selection == plt_infomec.ModelSelection.best
+            else "checkpoints/model_<epoch>.pt"
         )
+        raise SystemExit(
+            f"No subruns with variant.json + {ckpt_hint} under {input_dir}"
+        )
+
+    ckpt_display = plt_infomec.model_selection_display_label(args.model_selection)
 
     device = plt_infomec.resolve_eval_device(args.device)
     assert_sweep_runs_share_eval_data(
@@ -240,22 +258,22 @@ def main(args: SweepCLI) -> None:
     runs_data: List[Dict[str, Any]] = []
 
     n_runs = len(run_dirs)
-    cluster_part = (
-        "none (--no-latent-cluster)"
-        if not args.latent_cluster
-        else args.latent_cluster_method.value
-    )
+    cluster_part = args.latent_cluster_method.value
     print(
         f"\nFound {n_runs} runs to process "
-        f"(device={device}, latent cluster={cluster_part})..."
+        f"(device={device}, latent cluster={cluster_part}, ckpt={ckpt_display})..."
     )
     for i, run_dir in enumerate(run_dirs, start=1):
         with open(run_dir / "variant.json", encoding="utf-8") as vf:
             variant = json.load(vf)["variant"]
         beta = beta_from_variant(variant)
 
-        ckpt = run_dir / "best_model.pt"
-        model = torch.load(ckpt, map_location=device, weights_only=False).to(device)
+        ckpt_path, ckpt_label, selected_epoch, model_selection_tag = (
+            plt_infomec.resolve_run_checkpoint(
+                run_dir, model_selection=args.model_selection
+            )
+        )
+        model = torch.load(ckpt_path, map_location=device, weights_only=False).to(device)
         model.eval()
         discrete_latents = plt_infomec.resolve_discrete_latents(
             model=model, variant=variant
@@ -284,7 +302,6 @@ def main(args: SweepCLI) -> None:
                 discrete_latents,
             )
         )
-        best_epoch = plt_infomec.resolve_best_checkpoint_epoch(run_dir=run_dir)
         run_title = plt_infomec.format_infomec_run_title(
             infom=float(result.infom),
             infoe=float(result.infoe),
@@ -294,17 +311,24 @@ def main(args: SweepCLI) -> None:
             n_active=n_active,
             latent_dim=latent_dim,
             run_label=run_dir.name,
-            ckpt_name="best_model.pt",
-            best_epoch=best_epoch,
+            ckpt_name=ckpt_label,
+            best_epoch=selected_epoch,
+            best_selection=model_selection_tag,
         )
 
-        per_run_eval = plt_infomec.eval_run_outdir(run_dir, eval_ts, sweep=True)
+        per_run_eval = plt_infomec.eval_run_outdir(
+            input_dir=run_dir, eval_timestamp=eval_ts, kind="subsweep"
+        )
+        comment = str(variant.get("comment", run_dir.name)).strip()
+        learned_reward_sweep_path = plt_infomec.learned_reward_sweep_copy_path(
+            outdir, comment=comment
+        )
         plt_infomec.save_infomec_epoch_series_artifacts(
             epoch_series,
             per_run_eval,
             title=run_title,
-            best_epoch=best_epoch,
-            best_selection=plt_infomec.BEST_CHECKPOINT_SELECTION,
+            best_epoch=selected_epoch,
+            best_selection=model_selection_tag,
         )
         plt_infomec.save_eval_artifacts_after_encode(
             per_run_eval,
@@ -322,12 +346,18 @@ def main(args: SweepCLI) -> None:
             eval_ts,
             run_title=run_title,
             nmi_heatmap_active_dots=args.nmi_heatmap_active_dots,
-            latent_cluster=args.latent_cluster,
             latent_cluster_method=args.latent_cluster_method,
             tsne_perplexity=args.tsne_perplexity,
             tsne_max_iter=args.tsne_max_iter,
             umap_n_neighbors=args.umap_n_neighbors,
             umap_min_dist=args.umap_min_dist,
+            model=model,
+            obs2=obs2,
+            labels=labels,
+            device=device,
+            learned_reward_mode=args.learned_reward_mode,
+            learned_reward_max_comp=args.learned_reward_max_comp,
+            learned_reward_also_save_as=learned_reward_sweep_path,
         )
 
         runs_data.append(
@@ -350,8 +380,16 @@ def main(args: SweepCLI) -> None:
                 "active_latents": np.asarray(result.active_latents, dtype=bool),
                 "latent_dim": latent_dim,
                 "epoch_series": epoch_series,
-                "best_epoch": best_epoch,
-                **({"latents": latents} if args.latent_cluster else {}),
+                "selected_epoch": selected_epoch,
+                "ckpt_label": ckpt_label,
+                "model_selection_tag": model_selection_tag,
+                **(
+                    {"latents": latents}
+                    if plt_infomec.latent_cluster_enabled(
+                        method=args.latent_cluster_method
+                    )
+                    else {}
+                ),
             }
         )
         print(f"======= [{i}/{n_runs}] Finished beta={beta} ({run_dir.name}) ========")
@@ -376,8 +414,9 @@ def main(args: SweepCLI) -> None:
             n_active=int(r["n_active"]),
             latent_dim=int(r["latent_dim"]),
             run_label=r["name"],
-            ckpt_name="best_model.pt",
-            best_epoch=r.get("best_epoch"),
+            ckpt_name=str(r["ckpt_label"]),
+            best_epoch=r.get("selected_epoch"),
+            best_selection=str(r["model_selection_tag"]),
         )
         al = r["active_latents"] if args.nmi_heatmap_active_dots else None
         plt_infomec.plot_nmi_heatmap_on_ax(
@@ -401,7 +440,7 @@ def main(args: SweepCLI) -> None:
     for j in range(i + 1, nrows * ncols):
         row, col = divmod(j, ncols)
         axes[row][col].set_visible(False)
-    fig_h.suptitle("NMI heatmaps (best_model.pt)", fontsize=11, y=1.02)
+    fig_h.suptitle(f"NMI heatmaps ({ckpt_display})", fontsize=11, y=1.02)
     plt.tight_layout()
     fig_h.savefig(outdir / "aggregate_nmi_heatmaps.png", dpi=200, bbox_inches="tight")
     plt.close(fig_h)
@@ -409,7 +448,7 @@ def main(args: SweepCLI) -> None:
     projection_grid_path = (
         outdir / f"aggregate_{args.latent_cluster_method.value}_by_source_mode.png"
     )
-    if args.latent_cluster:
+    if plt_infomec.latent_cluster_enabled(method=args.latent_cluster_method):
         plt_infomec.save_aggregate_latent_projection_sweep_grid(
             runs_data,
             projection_grid_path,
@@ -420,6 +459,7 @@ def main(args: SweepCLI) -> None:
             tsne_max_iter=args.tsne_max_iter,
             umap_n_neighbors=args.umap_n_neighbors,
             umap_min_dist=args.umap_min_dist,
+            ckpt_label=ckpt_display,
         )
 
     betas = np.array([r["beta"] for r in runs_data], dtype=np.float64)
@@ -435,7 +475,7 @@ def main(args: SweepCLI) -> None:
         ld_part = f"L={int(L_unique[0])}"
     else:
         ld_part = "L=" + ",".join(str(int(x)) for x in sorted(L_unique.tolist()))
-    supt = f"InfoMEC vs β (best_model.pt), {ld_part}"
+    supt = f"InfoMEC vs β ({ckpt_display}), {ld_part}"
 
     beta_plot_path = outdir / "aggregate_infomec_vs_beta_log.png"
     if np.any(betas <= 0):
@@ -511,8 +551,9 @@ def main(args: SweepCLI) -> None:
                 n_active=int(r["n_active"]),
                 latent_dim=int(r["latent_dim"]),
                 run_label=r["name"],
-                ckpt_name="best_model.pt",
-                best_epoch=r.get("best_epoch"),
+                ckpt_name=str(r["ckpt_label"]),
+                best_epoch=r.get("selected_epoch"),
+                best_selection=str(r["model_selection_tag"]),
             )
             plt_infomec.draw_infomec_epoch_trajectory_axes(
                 ax_l,
@@ -597,6 +638,7 @@ def main(args: SweepCLI) -> None:
     manifest = {
         "input_dir": str(input_dir),
         "eval_timestamp": eval_ts,
+        "model_selection": args.model_selection.value,
         "aggregate_outdir": str(outdir),
         "runs": [
             {
@@ -618,11 +660,14 @@ def main(args: SweepCLI) -> None:
         json.dump(manifest, f, indent=2)
 
     print(
-        f"Per-run evals (timestamp {eval_ts}) under each subdir: .../evals/{eval_ts}/ "
-        f"(sweep; single-run plot_infomec uses .../evals/{eval_ts}_individual/)"
+        f"Per-run evals (timestamp {eval_ts}) under each subdir: "
+        f".../evals_subsweep/{eval_ts}/"
     )
+    learned_rewards_dir = outdir / "learned_rewards_by_annot_mode"
+    if learned_rewards_dir.is_dir() and any(learned_rewards_dir.glob("*.png")):
+        print(f"Wrote learned-reward copies under {learned_rewards_dir}/")
     print(f"Wrote {outdir / 'aggregate_nmi_heatmaps.png'}")
-    if args.latent_cluster:
+    if plt_infomec.latent_cluster_enabled(method=args.latent_cluster_method):
         print(f"Wrote {projection_grid_path}")
     if not np.any(betas <= 0):
         print(f"Wrote {beta_plot_path}")

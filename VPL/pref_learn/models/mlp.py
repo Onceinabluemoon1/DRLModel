@@ -44,8 +44,8 @@ class MLPModel(nn.Module):
         accuracy = self.accuracy(labels, p_hat)
 
         metrics = {
-            "loss": loss.item(),
-            "reconstruction_loss": loss.item(),
+            "total_loss": loss.item(),
+            "recon_loss": loss.item(),
             "accuracy": accuracy.item(),
         }
 
@@ -137,19 +137,17 @@ class CategoricalModel(nn.Module):
         ).mean(dim=[0, 1])
 
         entropy_loss = torch.sum(mean_dist * mean_dist.log())
-        reconstruction_loss, accuracy = self.reconstruction_loss(
-            rewards_chosen, rewards_rejected
-        )
-        loss = reconstruction_loss + self.entropy_coeff * entropy_loss
+        recon_loss, accuracy = self.reconstruction_loss(rewards_chosen, rewards_rejected)
+        total_loss = recon_loss + self.entropy_coeff * entropy_loss
 
         metrics = {
-            "loss": loss.item(),
-            "reconstruction_loss": reconstruction_loss.item(),
+            "total_loss": total_loss.item(),
+            "recon_loss": recon_loss.item(),
             "entropy_loss": entropy_loss.item(),
             "accuracy": accuracy.item(),
         }
 
-        return loss, metrics
+        return total_loss, metrics
 
 
 class MeanVarianceModel(nn.Module):
@@ -209,19 +207,17 @@ class MeanVarianceModel(nn.Module):
         std_rejected = F.softplus(rewards_rejected[:, 1])
         variance_loss = (std_chosen**2 + std_rejected**2).mean()
 
-        reconstruction_loss, accuracy = self.reconstruction_loss(
-            rewards_chosen, rewards_rejected
-        )
-        loss = reconstruction_loss + self.variance_penalty * variance_loss
+        recon_loss, accuracy = self.reconstruction_loss(rewards_chosen, rewards_rejected)
+        total_loss = recon_loss + self.variance_penalty * variance_loss
 
         metrics = {
-            "loss": loss.item(),
-            "reconstruction_loss": reconstruction_loss.item(),
+            "total_loss": total_loss.item(),
+            "recon_loss": recon_loss.item(),
             "variance_loss": variance_loss.item(),
             "accuracy": accuracy.item(),
         }
 
-        return loss, metrics
+        return total_loss, metrics
 
 
 class MLPClassifier(nn.Module):
@@ -261,8 +257,8 @@ class MLPClassifier(nn.Module):
         accuracy = self.accuracy(labels, p_hat)
 
         metrics = {
-            "loss": loss.item(),
-            "reconstruction_loss": loss.item(),
+            "total_loss": loss.item(),
+            "recon_loss": loss.item(),
             "accuracy": accuracy.item(),
         }
 
