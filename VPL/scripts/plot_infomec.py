@@ -238,7 +238,10 @@ def eval_run_outdir(
 
 
 def beta_from_variant(variant: dict) -> float:
-    return float(variant.get("kl_weight", 0.0))
+    """Backward-compatible alias for the swept disentanglement hyperparameter."""
+    from pref_learn.utils.disentangle_sweep import sweep_from_variant
+
+    return sweep_from_variant(variant=variant)[1]
 
 
 def infomec_run_label(input_dir: Path, variant: dict) -> str:
@@ -458,6 +461,7 @@ def draw_infomec_epoch_trajectory_axes(
     title: Optional[str] = None,
     show_legend: bool = True,
     legend_fontsize: int = 8,
+    selected_epoch: Optional[int] = None,
 ) -> None:
     """Draw InfoM/E/C + active latents (twin) on existing axes. Set ``show_legend=False`` when a figure-level legend is used (e.g. sweep grid)."""
     infom_a = np.asarray(infom, dtype=np.float64)
@@ -491,7 +495,7 @@ def draw_infomec_epoch_trajectory_axes(
         markersize=3,
         color=InfoMECCurveColor.infoc,
     )
-    ax_left.set_xlabel("epoch (from checkpoint name)")
+    ax_left.set_xlabel("epoch")
     ax_left.set_ylabel("InfoM / InfoE / InfoC ([0, 1])")
     ax_left.set_ylim(-0.02, 1.02)
     ax_left.grid(alpha=0.3)
@@ -518,6 +522,23 @@ def draw_infomec_epoch_trajectory_axes(
     ax_right.set_yticks(tick_pos)
     ax_right.set_yticklabels(tick_lbl)
 
+    if selected_epoch is not None:
+        ep_arr = np.asarray(epochs, dtype=np.int64)
+        matches = np.flatnonzero(ep_arr == int(selected_epoch))
+        if matches.size:
+            j = int(matches[0])
+            eval_dot = dict(
+                color="red",
+                marker="o",
+                markersize=5,
+                linestyle="none",
+                zorder=5,
+            )
+            ax_left.plot(int(selected_epoch), infom_a[j], **eval_dot)
+            ax_left.plot(int(selected_epoch), infoe_a[j], **eval_dot)
+            ax_left.plot(int(selected_epoch), infoc_a[j], **eval_dot)
+            ax_right.plot(int(selected_epoch), n_active_norm[j], **eval_dot)
+
     if show_legend:
         place_infomec_twin_legend_outside(
             ax_left, ax_right, legend_fontsize=legend_fontsize
@@ -534,6 +555,7 @@ def plot_infomec_epoch_trajectory(
     outpath: Path,
     *,
     title: Optional[str] = None,
+    selected_epoch: Optional[int] = None,
 ) -> None:
     """Line plot: x=epoch (linear only); left y = InfoM/E/C in [0,1]; right = active = n_active/L (ticks show counts)."""
     fig, ax_left = plt.subplots(figsize=(8, 4.5))
@@ -548,6 +570,7 @@ def plot_infomec_epoch_trajectory(
         n_active,
         latent_dim,
         title=title,
+        selected_epoch=selected_epoch,
     )
     fig.tight_layout(rect=[0, 0.1, 1, 0.99])
     plt.savefig(outpath, dpi=200, bbox_inches="tight", pad_inches=0.12)
@@ -629,6 +652,7 @@ def save_infomec_epoch_series_artifacts(
         latent_dim,
         outdir / "infomec_over_epoch_checkpoints.png",
         title=title,
+        selected_epoch=best_epoch,
     )
 
     payload_out = {

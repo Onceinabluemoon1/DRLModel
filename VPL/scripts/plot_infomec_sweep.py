@@ -29,6 +29,7 @@ if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
 import plot_infomec as plt_infomec  # noqa: E402
+from pref_learn.utils.disentangle_sweep import sweep_from_variant
 from pref_learn.utils.infomec import compute_infomec  # noqa: E402
 
 
@@ -88,7 +89,7 @@ class SweepCLI:
 
 
 def beta_from_variant(variant: dict) -> float:
-    return float(variant.get("kl_weight", 0.0))
+    return sweep_from_variant(variant=variant)[1]
 
 
 def discover_sweep_run_dirs(
@@ -131,7 +132,7 @@ def _add_active_latents_twin_beta_sweep(
         linestyle="--",
         color="black",
         linewidth=0.9,
-        label="Active latents #",
+        label="# active latents",
     )
     ax_right.set_ylabel("Active latents (count)")
     ax_right.set_ylim(-0.02, 1.02)
@@ -144,7 +145,29 @@ def _add_active_latents_twin_beta_sweep(
         tick_lbl = [str(int(round(t * Lmax))) for t in tick_pos]
     ax_right.set_yticks(tick_pos)
     ax_right.set_yticklabels(tick_lbl)
-    plt_infomec.place_infomec_twin_legend_outside(ax_left, ax_right, legend_fontsize=8)
+
+    h_left, lab_left = ax_left.get_legend_handles_labels()
+    h_right, lab_right = ax_right.get_legend_handles_labels()
+    infomec_h: list = []
+    infomec_l: list = []
+    nmi_h: list = []
+    nmi_l: list = []
+    for h, lab in zip(h_left, lab_left):
+        if lab == "max NMI":
+            nmi_h.append(h)
+            nmi_l.append(lab)
+        else:
+            infomec_h.append(h)
+            infomec_l.append(lab)
+    ax_left.legend(
+        infomec_h + h_right + nmi_h,
+        infomec_l + lab_right + nmi_l,
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.2),
+        ncol=5,
+        fontsize=8,
+        frameon=True,
+    )
 
 
 def _effective_sweep_eval_settings(
@@ -266,7 +289,7 @@ def main(args: SweepCLI) -> None:
     for i, run_dir in enumerate(run_dirs, start=1):
         with open(run_dir / "variant.json", encoding="utf-8") as vf:
             variant = json.load(vf)["variant"]
-        beta = beta_from_variant(variant)
+        sweep_param_name, beta, sweep_param_label = sweep_from_variant(variant=variant)
 
         ckpt_path, ckpt_label, selected_epoch, model_selection_tag = (
             plt_infomec.resolve_run_checkpoint(
@@ -365,6 +388,9 @@ def main(args: SweepCLI) -> None:
                 "run_dir": str(run_dir),
                 "name": run_dir.name,
                 "beta": beta,
+                "sweep_param_name": sweep_param_name,
+                "sweep_param_value": beta,
+                "sweep_param_label": sweep_param_label,
                 "eval_dir": str(per_run_eval),
                 "run_title": run_title,
                 "nmi": np.asarray(result.nmi),
@@ -392,7 +418,9 @@ def main(args: SweepCLI) -> None:
                 ),
             }
         )
-        print(f"======= [{i}/{n_runs}] Finished beta={beta} ({run_dir.name}) ========")
+        print(
+            f"======= [{i}/{n_runs}] Finished {sweep_param_label}={beta} ({run_dir.name}) ========"
+        )
 
     n = len(runs_data)
     ncols = min(4, n)
@@ -475,7 +503,8 @@ def main(args: SweepCLI) -> None:
         ld_part = f"L={int(L_unique[0])}"
     else:
         ld_part = "L=" + ",".join(str(int(x)) for x in sorted(L_unique.tolist()))
-    supt = f"InfoMEC vs β ({ckpt_display}), {ld_part}"
+    sweep_param_label = runs_data[0]["sweep_param_label"] if runs_data else "β"
+    supt = f"InfoMEC vs {sweep_param_label} ({ckpt_display}), {ld_part}"
 
     beta_plot_path = outdir / "aggregate_infomec_vs_beta_log.png"
     if np.any(betas <= 0):
@@ -512,7 +541,9 @@ def main(args: SweepCLI) -> None:
             label="max NMI",
         )
         ax_b.set_xscale("log")
-        ax_b.set_xlabel("β (kl_weight from variant.json) — log scale")
+        ax_b.set_xlabel(
+            f"{runs_data[0]['sweep_param_label']} ({runs_data[0]['sweep_param_name']}) — log scale"
+        )
         ax_b.grid(alpha=0.3, which="both")
         ax_b.set_ylabel("InfoM / InfoE / InfoC / max NMI ([0, 1])")
         ax_b.set_ylim(-0.02, 1.02)
@@ -534,6 +565,11 @@ def main(args: SweepCLI) -> None:
     fig_e, axes_e = plt.subplots(
         nrows_e, ncols_e, figsize=(4.0 * ncols_e, 3.5 * nrows_e), squeeze=False
     )
+    epoch_xmax = 0
+    for r in runs_data:
+        ep = r.get("epoch_series")
+        if ep is not None and ep.get("epochs"):
+            epoch_xmax = max(epoch_xmax, max(int(e) for e in ep["epochs"]))
     first_legend_ax_pair: Optional[Tuple[Any, Any]] = None
     last_i = 0
     for i, r in enumerate(runs_data):
@@ -566,12 +602,15 @@ def main(args: SweepCLI) -> None:
                 int(ep["latent_dim"]),
                 title=sub_title,
                 show_legend=False,
+                selected_epoch=r.get("selected_epoch"),
             )
             if first_legend_ax_pair is None:
                 first_legend_ax_pair = (ax_l, ax_r)
         else:
-            ax_l.set_title(f"β={r['beta']:.4g} (no model_*.pt)")
+            ax_l.set_title(f"{r['sweep_param_label']}={r['sweep_param_value']:.4g} (no model_*.pt)")
             ax_l.set_ylim(0, 1)
+        if epoch_xmax > 0:
+            ax_l.set_xlim(0, epoch_xmax)
         last_i = i
     for j in range(last_i + 1, nrows_e * ncols_e):
         row, col = divmod(j, ncols_e)
@@ -606,6 +645,9 @@ def main(args: SweepCLI) -> None:
     csv_path = outdir / "sweep_runs_summary.csv"
     fieldnames = [
         "name",
+        "sweep_param_name",
+        "sweep_param_value",
+        "sweep_param_label",
         "beta",
         "run_dir",
         "eval_dir",
@@ -623,6 +665,9 @@ def main(args: SweepCLI) -> None:
             w.writerow(
                 {
                     "name": r["name"],
+                    "sweep_param_name": r["sweep_param_name"],
+                    "sweep_param_value": r["sweep_param_value"],
+                    "sweep_param_label": r["sweep_param_label"],
                     "beta": r["beta"],
                     "run_dir": r["run_dir"],
                     "eval_dir": r["eval_dir"],
@@ -640,9 +685,14 @@ def main(args: SweepCLI) -> None:
         "eval_timestamp": eval_ts,
         "model_selection": args.model_selection.value,
         "aggregate_outdir": str(outdir),
+        "sweep_param_name": runs_data[0]["sweep_param_name"] if runs_data else None,
+        "sweep_param_label": runs_data[0]["sweep_param_label"] if runs_data else None,
         "runs": [
             {
                 "name": r["name"],
+                "sweep_param_name": r["sweep_param_name"],
+                "sweep_param_value": r["sweep_param_value"],
+                "sweep_param_label": r["sweep_param_label"],
                 "beta": r["beta"],
                 "run_dir": r["run_dir"],
                 "eval_dir": r["eval_dir"],

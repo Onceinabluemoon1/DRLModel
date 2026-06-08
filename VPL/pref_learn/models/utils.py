@@ -8,6 +8,10 @@ from pref_learn.utils.data_utils import get_labels
 from torch.utils.data import DataLoader, Dataset
 
 
+def logvar_to_std(logvar: torch.Tensor) -> torch.Tensor:
+    return torch.exp(0.5 * logvar)
+
+
 def get_datasets(query_path, observation_dim, action_dim, batch_size, set_size):
     with open(query_path, "rb") as fp:
         batch = pickle.load(fp)

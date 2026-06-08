@@ -24,6 +24,7 @@ from pref_learn.models.mlp import (
 from pref_learn.models.tcvae import TCVAEModel
 from pref_learn.models.utils import Annealer, EarlyStopper, get_datasets
 from pref_learn.models.vae import VAEClassifier, VAEModel
+from pref_learn.utils.disentangle_sweep import enrich_variant_sweep_metadata
 from pref_learn.utils.utils import (
     WandBLogger,
     define_flags_with_default,
@@ -56,6 +57,7 @@ FLAGS_DEF = define_flags_with_default(
     latent_dim=32,
     kl_weight=1.0,
     tc_weight=1.0,
+    loss_aggregation="sum",
     learned_prior=False,
     flow_prior=False,
     use_annealing=False,
@@ -133,7 +135,7 @@ def main(_):
         Path(FLAGS.logging.output_dir)
         / run_label
         / str(FLAGS.model_type)
-        / f"{timestamp}_ld={FLAGS.latent_dim}_learned-prior={FLAGS.learned_prior}/{FLAGS.comment}"
+        / f"{timestamp}_ld={FLAGS.latent_dim}_learned-prior={FLAGS.learned_prior}_agg={FLAGS.loss_aggregation}/{FLAGS.comment}"
     )
     FLAGS.logging.output_dir = str(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
@@ -208,6 +210,7 @@ def main(_):
             learned_prior=FLAGS.learned_prior,
             annealer=annealer,
             reward_scaling=FLAGS.reward_scaling,
+            loss_aggregation=FLAGS.loss_aggregation,
         )
     elif FLAGS.model_type == "VAE" or FLAGS.model_type == "VAEClassifier":
         annealer = None
@@ -236,6 +239,7 @@ def main(_):
             flow_prior=FLAGS.flow_prior,
             annealer=annealer,
             reward_scaling=FLAGS.reward_scaling,
+            loss_aggregation=FLAGS.loss_aggregation,
         )
     elif FLAGS.model_type == "MLPClassifier":
         reward_model = MLPClassifier(obs_dim, FLAGS.hidden_dim)
@@ -246,6 +250,7 @@ def main(_):
     reward_model = reward_model.to(device)
     variant["resolved_set_size"] = set_size
     variant["discrete_latents"] = bool(reward_model.discrete_latents)
+    enrich_variant_sweep_metadata(variant=variant)
     with open(save_dir / "variant.json", "w", encoding="utf-8") as vf:
         json.dump(
             {"resolved_run_timestamp": timestamp, "variant": variant},

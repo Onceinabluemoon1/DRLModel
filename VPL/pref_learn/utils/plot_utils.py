@@ -306,7 +306,8 @@ def plot_prior(reward_model):
         x = np.linspace(-10, 10, 1000)
         for i in range(reward_model.latent_dim):
             y = stats.norm(
-                reward_model.mean[i].cpu(), np.exp(reward_model.log_var[i].cpu() * 0.5)
+                reward_model.prior_mean[i].cpu(),
+                np.exp(reward_model.prior_logvar[i].cpu() * 0.5),
             ).pdf(x)
             plt.plot(x, y)
         plt.title("Learned prior")

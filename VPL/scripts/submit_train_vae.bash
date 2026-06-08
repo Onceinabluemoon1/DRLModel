@@ -11,7 +11,8 @@
 #       sbatch --export=ALL,RUN_TIMESTAMP=$(date +%Y%m%d_%H%M%S) scripts/submit_train_vae.bash
 #   • If RUN_TIMESTAMP is unset but this is a Slurm array job, we default to arrayjob_<SLURM_ARRAY_JOB_ID>.
 #   • All array tasks with the same RUN_TIMESTAMP share one W&B group (beta sweep).
-# Each task writes to .../<RUN_TIMESTAMP>/<array_task_id>_beta=..._ld=.../
+# Each task writes to .../<RUN_TIMESTAMP>/<array_task_id>_beta=.../
+# variant.json records sweep_param_name=kl_weight, sweep_param_value=<beta>.
 
 source ~/miniconda3/etc/profile.d/conda.sh
 cd /scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/VPL
@@ -28,14 +29,15 @@ BETAS=(
     3.0
     10.0
     30.0
-    100.0
-    200.0
+    # 100.0
+    # 200.0
 )
 model_type=VAE
 # model_type=TCVAE
 latent_dim=4
 learned_prior=True
 use_annealing=False
+loss_aggregation=mean  # sum | mean
 
 # pref_dataset="sort_2goals_T=1"
 # pref_dataset="sort_4goals_T=1"
@@ -68,6 +70,7 @@ run_train_beta() {
     --comment=${comment} \
     --latent_dim=${latent_dim} \
     --kl_weight=${beta} \
+    --loss_aggregation=${loss_aggregation} \
     --learned_prior=${learned_prior} \
     --use_annealing=${use_annealing} \
     --seed=42 \
