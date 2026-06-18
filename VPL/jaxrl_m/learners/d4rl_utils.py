@@ -27,6 +27,32 @@ def expand_dataset(dataset, ratio=1):
     return dataset
 
 
+def full_horizon_qlearning_dataset(env, dataset=None, **kwargs):
+    """Q-learning layout keeping every env step, including each episode terminal."""
+    if dataset is None:
+        dataset = env.get_dataset(**kwargs)
+
+    obs = dataset["observations"].astype(np.float32)
+    actions = dataset["actions"].astype(np.float32)
+    rewards = dataset["rewards"].astype(np.float32)
+    terminals = dataset["terminals"].astype(bool)
+
+    next_obs = np.empty_like(obs)
+    next_obs[:-1] = obs[1:]
+    next_obs[-1] = obs[-1]
+    next_obs[terminals] = obs[terminals]
+
+    terminals_f = terminals.astype(np.float32)
+    return {
+        "observations": obs,
+        "actions": actions,
+        "next_observations": next_obs,
+        "rewards": rewards,
+        "terminals": terminals_f,
+        "traj_done": terminals_f.copy(),
+    }
+
+
 def get_dataset(
     env: gym.Env,
     clip_to_eps: bool = True,
@@ -44,7 +70,10 @@ def get_dataset(
     next_step: bool = False,
     exp_scaling_temp: float = 1.0,
 ):
-    dataset = d4rl.qlearning_dataset(env)
+    if terminate_on_end:
+        dataset = full_horizon_qlearning_dataset(env)
+    else:
+        dataset = d4rl.qlearning_dataset(env, terminate_on_end=False)
     # if comp_size < 10:
     dataset = expand_dataset(dataset)
     # comp_size = 1000
@@ -85,8 +114,11 @@ def get_dataset(
 
 
 def new_get_trj_idx(dataset):
-    if "traj_done" in dataset:
+    N = dataset["rewards"].shape[0]
+    if "traj_done" in dataset and len(dataset["traj_done"]) == N:
         dones_float = dataset["traj_done"]
+    elif "dones_float" in dataset:
+        dones_float = dataset["dones_float"]
     else:
         dones_float = dataset["dones_float"]
     # If the dones are dropped just split uniformly to relabel the trajectories

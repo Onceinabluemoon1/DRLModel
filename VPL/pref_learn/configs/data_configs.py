@@ -1,30 +1,37 @@
 """Named pref-learning datasets for VAE training sweeps."""
 
 TRAIN_VAE_DATASETS = {
-    "sort_2goals_T=1": {
+    # * sort 2 goals task
+    "sort_2goals_T=1_Q=5000": {
         "env": "sort-easy-2goals-v0",
         "pref_dataset_path": "/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/data/ravens/sort-easy-2goals-v0/_vpl_official/pref_datasets_20260518_143219_Q=5000_S=16_T=1/queries_relabelled.pkl",
         "pref_infomec_dataset_path": "/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/data/ravens/sort-easy-2goals-v0/_vpl_official/pref_datasets_20260523_214225_Q=5000_S=16_T=1/queries_relabelled.pkl",
     },
-    "sort_2goals_T=10": {
+    "sort_2goals_T=10_Q=5000": {
         "env": "sort-easy-2goals-v0",
         "pref_dataset_path": "/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/data/ravens/sort-easy-2goals-v0/_vpl_official/pref_datasets_20260518_143030_Q=5000_S=16_T=10/queries_relabelled.pkl",
         "pref_infomec_dataset_path": "/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/data/ravens/sort-easy-2goals-v0/_vpl_official/pref_datasets_20260523_214500_Q=5000_S=16_T=10/queries_relabelled.pkl",
     },
-    "sort_4goals_T=1": {
-        "env": "sort-easy-4goals-v0",
-        "pref_dataset_path": "/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/data/ravens/sort-easy-4goals-v0/20260517_212722_ntrajs=5000/pref_datasets_20260518_143204_Q=5000_S=16_T=1/queries_relabelled.pkl",
-        "pref_infomec_dataset_path": "/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/data/ravens/sort-easy-4goals-v0/20260517_212722_ntrajs=5000/pref_datasets_20260523_214211_Q=5000_S=16_T=1/queries_relabelled.pkl",
+    "sort_2goals_T=24_Q=5000": {
+        "env": "sort-easy-2goals-v0",
+        "pref_dataset_path": "/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/data/ravens/sort-easy-2goals-v0/_vpl_official/pref_datasets_20260618_230034_Q=5000_S=16_T=24/queries_relabelled.pkl",
+        "pref_infomec_dataset_path": "/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/data/ravens/sort-easy-2goals-v0/_vpl_official/pref_datasets_20260618_230034_Q=5000_S=16_T=24/queries_relabelled.pkl",
     },
+    # * sort 4 goals task
     "sort_4goals_T=1_Q=20000": {
         "env": "sort-easy-4goals-v0",
         "pref_dataset_path": "/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/data/ravens/sort-easy-4goals-v0/20260517_212722_ntrajs=5000/pref_datasets_20260525_161306_Q=20000_S=16_T=1/queries_relabelled.pkl",
         "pref_infomec_dataset_path": "/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/data/ravens/sort-easy-4goals-v0/20260517_212722_ntrajs=5000/pref_datasets_20260525_161338_Q=20000_S=16_T=1/queries_relabelled.pkl",
     },
-    "sort_4goals_T=10": {
+    "sort_4goals_T=10_Q=20000": {
         "env": "sort-easy-4goals-v0",
-        "pref_dataset_path": "/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/data/ravens/sort-easy-4goals-v0/20260517_212722_ntrajs=5000/pref_datasets_20260518_142917_Q=5000_S=16_T=10/queries_relabelled.pkl",
-        "pref_infomec_dataset_path": "/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/data/ravens/sort-easy-4goals-v0/20260517_212722_ntrajs=5000/pref_datasets_20260523_214433_Q=5000_S=16_T=10/queries_relabelled.pkl",
+        "pref_dataset_path": "/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/data/ravens/sort-easy-4goals-v0/20260517_212722_ntrajs=5000/pref_datasets_20260618_222111_Q=20000_S=16_T=10/queries_relabelled.pkl",
+        "pref_infomec_dataset_path": "/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/data/ravens/sort-easy-4goals-v0/20260517_212722_ntrajs=5000/pref_datasets_20260618_222111_Q=20000_S=16_T=10/queries_relabelled.pkl",
+    },
+    "sort_4goals_T=25_Q=20000": {
+        "env": "sort-easy-4goals-v0",
+        "pref_dataset_path": "/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/data/ravens/sort-easy-4goals-v0/20260517_212722_ntrajs=5000/pref_datasets_20260618_224415_Q=20000_S=16_T=25/queries_relabelled.pkl",
+        "pref_infomec_dataset_path": "/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/data/ravens/sort-easy-4goals-v0/20260517_212722_ntrajs=5000/pref_datasets_20260618_224415_Q=20000_S=16_T=25/queries_relabelled.pkl",
     },
 }
 

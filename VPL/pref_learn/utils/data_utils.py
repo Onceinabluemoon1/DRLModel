@@ -1,4 +1,3 @@
-import os
 import pickle
 from typing import Optional, Tuple
 
@@ -8,43 +7,6 @@ from tqdm import tqdm
 
 SegmentKey = Tuple[int, int, int]
 PairKey = Tuple[SegmentKey, SegmentKey]
-
-
-def sample_pref_from_env(env, n_query, set_sz, segment_len, query_path):
-    """Fallback random sampler used by some environments."""
-    assert segment_len == 1
-    observation_dim = env.reward_observation_space.shape[-1]
-    action_dim = env.action_space.shape[-1]
-    seg_obs_1 = np.stack(
-        [env.reward_observation_space.sample() for _ in range(n_query * set_sz)],
-        axis=1,
-    ).reshape(n_query, set_sz, segment_len, observation_dim)
-    seg_obs_2 = np.stack(
-        [env.reward_observation_space.sample() for _ in range(n_query * set_sz)],
-        axis=1,
-    ).reshape(n_query, set_sz, segment_len, observation_dim)
-    seg_act_1 = np.stack(
-        [env.action_space.sample() for _ in range(n_query * set_sz)], axis=1
-    ).reshape(n_query, set_sz, segment_len, action_dim)
-    seg_act_2 = np.stack(
-        [env.action_space.sample() for _ in range(n_query * set_sz)], axis=1
-    ).reshape(n_query, set_sz, segment_len, action_dim)
-    labels = np.zeros((n_query, set_sz))
-
-    # query_path = os.path.join(data_dir, f"queries_num{num_query}_q{len_query}_s{len_set}")
-    batch = {
-        "labels": labels.reshape(n_query, set_sz, 1),
-        "observations": seg_obs_1.reshape(n_query, set_sz, segment_len, observation_dim),
-        "observations_2": seg_obs_2.reshape(
-            n_query, set_sz, segment_len, observation_dim
-        ),
-        "actions": seg_act_1.reshape(n_query, set_sz, segment_len, action_dim),
-        "actions_2": seg_act_2.reshape(n_query, set_sz, segment_len, action_dim),
-    }
-    with open(query_path, "wb") as fp:
-        pickle.dump(batch, fp)
-
-    return batch, query_path
 
 
 def _segment_key(trj_idx: int, time_idx: int, len_query: int) -> SegmentKey:
@@ -61,18 +23,18 @@ def _sample_segment(
     trj_idx_list: np.ndarray,
     trj_len_list: np.ndarray,
     valid_trj_indices: np.ndarray,
-    seg_sz: int,
+    seg_len: int,
     skip_flag: int,
     first_reward_sum: Optional[float],
 ):
     trj_idx = int(np.random.choice(valid_trj_indices))
     len_trj = int(trj_len_list[trj_idx])
-    if len_trj <= seg_sz:
+    if len_trj < seg_len:
         return None
 
-    time_idx = int(np.random.choice(len_trj - seg_sz + 1))
+    time_idx = int(np.random.choice(len_trj - seg_len + 1))
     start_idx = int(trj_idx_list[trj_idx][0] + time_idx)
-    end_idx = start_idx + seg_sz
+    end_idx = start_idx + seg_len
     assert end_idx <= trj_idx_list[trj_idx][1] + 1
 
     reward_seq = dataset["rewards"][start_idx:end_idx]
@@ -89,7 +51,7 @@ def _sample_segment(
     obs_seq = dataset["observations"][start_idx:end_idx]
     next_obs_seq = dataset["next_observations"][start_idx:end_idx]
     act_seq = dataset["actions"][start_idx:end_idx]
-    timestep_seq = np.arange(1, seg_sz + 1)
+    timestep_seq = np.arange(1, seg_len + 1)
 
     return {
         "trj_idx": trj_idx,
@@ -100,7 +62,7 @@ def _sample_segment(
         "next_obs_seq": next_obs_seq,
         "act_seq": act_seq,
         "timestep_seq": timestep_seq,
-        "seg_key": _segment_key(trj_idx, time_idx, seg_sz),
+        "seg_key": _segment_key(trj_idx, time_idx, seg_len),
         "reward_sum": reward_sum,
     }
 
@@ -148,7 +110,7 @@ def sample_pref_from_dataset(
     valid_trj_indices = np.arange(len(trj_idx_list) - 1)[np.logical_not(labeler_info)]
 
     trj_len_list = trj_idx_list[:, 1] - trj_idx_list[:, 0] + 1  # (Ntrj,), traj len
-    assert max(trj_len_list) > seg_len
+    assert max(trj_len_list) >= seg_len
 
     total_reward_seq_1 = np.zeros((total_pairs, seg_len))
     total_reward_seq_2 = np.zeros((total_pairs, seg_len))
