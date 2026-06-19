@@ -1,5 +1,6 @@
 import math
 import pickle
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -12,7 +13,13 @@ def logvar_to_std(logvar: torch.Tensor) -> torch.Tensor:
     return torch.exp(0.5 * logvar)
 
 
-def get_datasets(query_path, observation_dim, action_dim, batch_size, set_size):
+def get_datasets(
+    query_path: str | Path,
+    observation_dim: int,
+    action_dim: int,
+    batch_size: int,
+    set_size: int = -1,  # -1 means use all queries in the query set
+):
     with open(query_path, "rb") as fp:
         batch = pickle.load(fp)
 

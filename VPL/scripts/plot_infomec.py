@@ -125,6 +125,11 @@ def model_supports_obs_latent_reward_decode(model: Any) -> bool:
     return isinstance(model, VAEModel) and not isinstance(model, VAEClassifier)
 
 
+def model_supports_probabilistic_reward(model: Any) -> bool:
+    """Models with VPL Sec. 4.1 ``get_probabilistic_reward`` (e.g. VAE, FSQLAE)."""
+    return callable(getattr(model, "get_probabilistic_reward", None))
+
+
 class LatentClusterMethod(str, Enum):
     """2D latent embedding for mode-colored scatter plots."""
 
@@ -204,7 +209,7 @@ class AnalysisCLI:
     """UMAP ``min_dist``; default 0.1."""
 
     learned_reward_mode: Literal["raw", "prob"] = "prob"
-    """VAE learned-reward scatter: raw decoder vs VPL Sec. 4.1 BTL expected preference."""
+    """Ignored when the model supports probabilistic rewards (both prob+raw are saved)."""
 
     learned_reward_max_comp: int = 512
     """Max comparison states ``s_B`` for prob learned rewards."""
@@ -220,10 +225,16 @@ LATENT_PROJECTION_SCATTER_S = 2.0
 LATENT_PROJECTION_SCATTER_ALPHA = 0.85
 
 
-def learned_reward_sweep_copy_path(sweep_outdir: Path, *, comment: str) -> Path:
-    """Aggregate sweep copy: ``.../learned_rewards_by_annot_mode/learned_reward_<comment>.png``."""
+def learned_reward_sweep_copy_path(
+    sweep_outdir: Path,
+    *,
+    comment: str,
+    mode: Literal["raw", "prob"],
+) -> Path:
+    """Aggregate sweep copy under ``learned_rewards_mode_{prob|raw}/``."""
     stem = str(comment).strip() or "run"
-    return sweep_outdir / "learned_rewards_by_annot_mode" / f"learned_reward_{stem}.png"
+    subdir = "learned_rewards_mode_prob" if mode == "prob" else "learned_rewards_mode_raw"
+    return sweep_outdir / subdir / f"learned_reward_{stem}.png"
 
 
 def eval_run_outdir(
@@ -717,6 +728,8 @@ def save_eval_artifacts_after_encode(
     learned_reward_mode: Literal["raw", "prob"] = "prob",
     learned_reward_max_comp: int = 512,
     learned_reward_also_save_as: Optional[Path] = None,
+    learned_reward_sweep_outdir: Optional[Path] = None,
+    learned_reward_sweep_comment: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Persist latents, NMI heatmap, latent 2D embedding, infomec_metrics.json, summary.txt under outdir.
 
@@ -788,7 +801,7 @@ def save_eval_artifacts_after_encode(
         and labels is not None
         and device is not None
     ):
-        learned_reward_metrics = maybe_save_learned_reward_by_annotator_mode(
+        reward_kw = dict(
             model=model,
             obs1=obs1,
             obs2=obs2,
@@ -800,10 +813,54 @@ def save_eval_artifacts_after_encode(
             device=device,
             batch_size=batch_size,
             run_title=run_title,
-            learned_reward_mode=learned_reward_mode,
             learned_reward_max_comp=learned_reward_max_comp,
-            also_save_as=learned_reward_also_save_as,
         )
+        if model_supports_probabilistic_reward(model=model):
+            sweep_comment = str(learned_reward_sweep_comment or input_dir.name).strip()
+            learned_reward_metrics = {}
+            for mode in ("prob", "raw"):
+                sweep_copy_path: Optional[Path] = None
+                if learned_reward_sweep_outdir is not None:
+                    sweep_copy_path = learned_reward_sweep_copy_path(
+                        learned_reward_sweep_outdir,
+                        comment=sweep_comment,
+                        mode=mode,
+                    )
+                mode_metrics = maybe_save_learned_reward_by_annotator_mode(
+                    **reward_kw,
+                    learned_reward_mode=mode,
+                    also_save_as=sweep_copy_path,
+                )
+                if mode_metrics is None:
+                    continue
+                learned_reward_metrics[f"learned_reward_by_annot_mode_{mode}_png"] = (
+                    mode_metrics["learned_reward_by_annot_mode_png"]
+                )
+                if sweep_copy_path is not None:
+                    learned_reward_metrics[f"learned_reward_sweep_{mode}_png"] = str(
+                        sweep_copy_path
+                    )
+                if mode == "prob":
+                    learned_reward_metrics.update(
+                        {
+                            k: v
+                            for k, v in mode_metrics.items()
+                            if k
+                            not in {
+                                "learned_reward_by_annot_mode_png",
+                                "learned_reward_sweep_copy_png",
+                                "learned_reward_mode",
+                            }
+                        }
+                    )
+            if not learned_reward_metrics:
+                learned_reward_metrics = None
+        else:
+            learned_reward_metrics = maybe_save_learned_reward_by_annotator_mode(
+                **reward_kw,
+                learned_reward_mode=learned_reward_mode,
+                also_save_as=learned_reward_also_save_as,
+            )
 
     metrics = result.to_dict()
     metrics.update(
@@ -1228,7 +1285,7 @@ def maybe_save_learned_reward_by_annotator_mode(
         reward_vmin=0.0 if learned_reward_mode == "prob" else None,
         reward_vmax=1.0 if learned_reward_mode == "prob" else None,
     )
-    png_path = outdir / "learned_reward_by_annot_mode.png"
+    png_path = outdir / f"learned_reward_by_annot_mode_{learned_reward_mode}.png"
     savefig_kw = dict(dpi=150, bbox_inches="tight", pad_inches=0.12)
     fig.savefig(png_path, **savefig_kw)
     sweep_copy_path: Optional[Path] = None

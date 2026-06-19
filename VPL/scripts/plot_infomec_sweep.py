@@ -29,7 +29,7 @@ if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
 import plot_infomec as plt_infomec  # noqa: E402
-from pref_learn.utils.disentangle_sweep import sweep_from_variant
+from pref_learn.utils.disentangle_sweep import discover_sweep_subruns, sweep_from_variant
 from pref_learn.utils.infomec import compute_infomec  # noqa: E402
 
 
@@ -38,7 +38,7 @@ class SweepCLI:
     """Aggregate InfoMEC / NMI across beta subdirs under ``input_dir``."""
 
     input_dir: Path
-    """Parent directory; each child with variant.json + a usable checkpoint is one run."""
+    """Sweep root with ``subruns/<task>/variant.json`` (+ checkpoint). Legacy flat subruns also supported."""
 
     model_selection: plt_infomec.ModelSelection = plt_infomec.ModelSelection.best
     """``best``: ``best_model.pt``; ``final``: latest ``checkpoints/model_<epoch>.pt``."""
@@ -82,7 +82,7 @@ class SweepCLI:
     """UMAP ``min_dist``; default 0.1."""
 
     learned_reward_mode: Literal["raw", "prob"] = "prob"
-    """VAE learned-reward scatter: raw decoder vs VPL Sec. 4.1 BTL expected preference."""
+    """Ignored when the model supports probabilistic rewards (both prob+raw are saved)."""
 
     learned_reward_max_comp: int = 512
     """Max comparison states ``s_B`` for prob learned rewards."""
@@ -97,10 +97,6 @@ def discover_sweep_run_dirs(
     *,
     model_selection: plt_infomec.ModelSelection,
 ) -> List[Path]:
-    root = input_dir.expanduser().resolve()
-    if not root.is_dir():
-        raise FileNotFoundError(f"--input-dir is not a directory: {root}")
-
     def sort_key(p: Path) -> tuple:
         with open(p / "variant.json", encoding="utf-8") as vf:
             v = json.load(vf)["variant"]
@@ -108,9 +104,8 @@ def discover_sweep_run_dirs(
 
     dirs = [
         p
-        for p in root.iterdir()
-        if p.is_dir()
-        and plt_infomec.run_dir_has_checkpoint(p, model_selection=model_selection)
+        for p in discover_sweep_subruns(input_dir)
+        if plt_infomec.run_dir_has_checkpoint(p, model_selection=model_selection)
     ]
     return sorted(dirs, key=sort_key)
 
@@ -236,9 +231,7 @@ def main(args: SweepCLI) -> None:
             if args.model_selection == plt_infomec.ModelSelection.best
             else "checkpoints/model_<epoch>.pt"
         )
-        raise SystemExit(
-            f"No subruns with variant.json + {ckpt_hint} under {input_dir}"
-        )
+        raise SystemExit(f"No subruns with variant.json + {ckpt_hint} under {input_dir}")
 
     ckpt_display = plt_infomec.model_selection_display_label(args.model_selection)
 
@@ -343,9 +336,6 @@ def main(args: SweepCLI) -> None:
             input_dir=run_dir, eval_timestamp=eval_ts, kind="subsweep"
         )
         comment = str(variant.get("comment", run_dir.name)).strip()
-        learned_reward_sweep_path = plt_infomec.learned_reward_sweep_copy_path(
-            outdir, comment=comment
-        )
         plt_infomec.save_infomec_epoch_series_artifacts(
             epoch_series,
             per_run_eval,
@@ -380,7 +370,8 @@ def main(args: SweepCLI) -> None:
             device=device,
             learned_reward_mode=args.learned_reward_mode,
             learned_reward_max_comp=args.learned_reward_max_comp,
-            learned_reward_also_save_as=learned_reward_sweep_path,
+            learned_reward_sweep_outdir=outdir,
+            learned_reward_sweep_comment=comment,
         )
 
         runs_data.append(
@@ -607,7 +598,9 @@ def main(args: SweepCLI) -> None:
             if first_legend_ax_pair is None:
                 first_legend_ax_pair = (ax_l, ax_r)
         else:
-            ax_l.set_title(f"{r['sweep_param_label']}={r['sweep_param_value']:.4g} (no model_*.pt)")
+            ax_l.set_title(
+                f"{r['sweep_param_label']}={r['sweep_param_value']:.4g} (no model_*.pt)"
+            )
             ax_l.set_ylim(0, 1)
         if epoch_xmax > 0:
             ax_l.set_xlim(0, epoch_xmax)
@@ -713,9 +706,10 @@ def main(args: SweepCLI) -> None:
         f"Per-run evals (timestamp {eval_ts}) under each subdir: "
         f".../evals_subsweep/{eval_ts}/"
     )
-    learned_rewards_dir = outdir / "learned_rewards_by_annot_mode"
-    if learned_rewards_dir.is_dir() and any(learned_rewards_dir.glob("*.png")):
-        print(f"Wrote learned-reward copies under {learned_rewards_dir}/")
+    for reward_subdir in ("learned_rewards_mode_prob", "learned_rewards_mode_raw"):
+        learned_rewards_dir = outdir / reward_subdir
+        if learned_rewards_dir.is_dir() and any(learned_rewards_dir.glob("*.png")):
+            print(f"Wrote learned-reward copies under {learned_rewards_dir}/")
     print(f"Wrote {outdir / 'aggregate_nmi_heatmaps.png'}")
     if plt_infomec.latent_cluster_enabled(method=args.latent_cluster_method):
         print(f"Wrote {projection_grid_path}")

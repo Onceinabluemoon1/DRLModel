@@ -16,11 +16,7 @@ from jaxrl_m.envs.sort_easy import SortEnv, annotator_from_env
 from jaxrl_m.learners.d4rl_utils import get_dataset
 from tqdm import tqdm
 
-from pref_learn.utils.data_utils import (
-    get_labels,
-    sample_pref_from_dataset,
-    sample_pref_from_env,
-)
+from pref_learn.utils.data_utils import get_labels, sample_pref_from_dataset
 from pref_learn.utils.plot_utils import (
     plot_observation_rewards,
     plot_observation_rewards_by_annotator_mode,
@@ -29,7 +25,6 @@ from pref_learn.utils.utils import define_flags_with_default, set_random_seed
 
 FLAGS_DEF = define_flags_with_default(
     env="sort-easy-4goals-v0",
-    sample_from_env=False,
     pref_data_dir="./pref_datasets",  # todo not used
     data_seed=42,
     num_query=100,  # Q
@@ -121,27 +116,23 @@ def main(_):
         query_path = FLAGS.dataset_path
         dataset = pickle.load(open(FLAGS.dataset_path, "rb"))
     else:
-        if FLAGS.sample_from_env:
-            dataset, query_path = sample_pref_from_env(
-                gym_env,
-                n_query=FLAGS.num_query,
-                set_sz=FLAGS.set_size,
-                segment_len=FLAGS.segment_len,
-                query_path=pref_fp,
-            )
-        else:
-            traj_dataset, _ = get_dataset(gym_env)  # qlearning style dataset
-            dataset, query_path = sample_pref_from_dataset(
-                env=gym_env,  # not used?
-                dataset=traj_dataset,
-                num_query=FLAGS.num_query,  # Q
-                seg_len=FLAGS.segment_len,  # T
-                set_sz=FLAGS.set_size,  # S
-                query_path=pref_fp,
-                ensure_unique_pairs=FLAGS.ensure_unique_pairs,
-                ensure_unique_segments_within_set=FLAGS.ensure_unique_segments_within_set,
-                max_sampling_attempts_per_pair=FLAGS.max_sampling_attempts_per_pair,
-            )
+        max_episode_steps = getattr(raw_env, "_max_episode_steps", FLAGS.segment_len)
+        terminate_on_end = FLAGS.segment_len >= max_episode_steps
+        traj_dataset, _ = get_dataset(
+            gym_env,
+            terminate_on_end=terminate_on_end,
+        )  # qlearning style dataset
+        dataset, query_path = sample_pref_from_dataset(
+            env=gym_env,  # not used?
+            dataset=traj_dataset,
+            num_query=FLAGS.num_query,  # Q
+            seg_len=FLAGS.segment_len,  # T
+            set_sz=FLAGS.set_size,  # S
+            query_path=pref_fp,
+            ensure_unique_pairs=FLAGS.ensure_unique_pairs,
+            ensure_unique_segments_within_set=FLAGS.ensure_unique_segments_within_set,
+            max_sampling_attempts_per_pair=FLAGS.max_sampling_attempts_per_pair,
+        )
         print("Saved queries at:", query_path)
 
     # * Step 2: compute pref label for each query set, according to pref behavior modes

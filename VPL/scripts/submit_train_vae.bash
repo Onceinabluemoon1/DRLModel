@@ -6,12 +6,15 @@
 #SBATCH --mem=16G
 #SBATCH --output=/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/logs_slurm/train_vae/train_vae_%A_%a.out
 #
-# All array tasks share one parent folder under logs3/<env>/<model>/<RUN_TIMESTAMP>/:
+# All array tasks share one parent folder under outputs/<env>/<model>/<RUN_TIMESTAMP>_ld=.../:
+#   subruns/
+#     <task>_beta=.../
+#   evals_sweep/
 #   • Wall-clock (set once at submit on the login node):
 #       sbatch --export=ALL,RUN_TIMESTAMP=$(date +%Y%m%d_%H%M%S) scripts/submit_train_vae.bash
 #   • If RUN_TIMESTAMP is unset but this is a Slurm array job, we default to arrayjob_<SLURM_ARRAY_JOB_ID>.
 #   • All array tasks with the same RUN_TIMESTAMP share one W&B group (beta sweep).
-# Each task writes to .../<RUN_TIMESTAMP>/<array_task_id>_beta=.../
+# Each task writes to .../<RUN_TIMESTAMP>/subruns/<array_task_id>_beta=.../
 # variant.json records sweep_param_name=kl_weight, sweep_param_value=<beta>.
 
 source ~/miniconda3/etc/profile.d/conda.sh
@@ -20,13 +23,13 @@ conda activate drl
 
 
 BETAS=(
-    0.0001
     0.001
     0.01
     0.1
     0.3
     1.0
     3.0
+    6.0
     10.0
     30.0
     # 100.0
@@ -35,14 +38,20 @@ BETAS=(
 model_type=VAE
 # model_type=TCVAE
 latent_dim=4
-learned_prior=True
+hidden_dim=128
+batch_size=256
+learned_prior=False
 use_annealing=False
 loss_aggregation=mean  # sum | mean
+normalize_kl=True
+set_size=16  # -1 = use full S from dataset; else truncate preference sets to this A
 
-# pref_dataset="sort_2goals_T=1"
-# pref_dataset="sort_4goals_T=1"
-pref_dataset="sort_4goals_T=1_Q=20000"
-# pref_dataset="sort_4goals_T=10"
+# pref_dataset="sort_2goals_T=1_Q=5000"
+# pref_dataset="sort_2goals_T=10_Q=5000"
+# pref_dataset="sort_2goals_T=24_Q=5000"
+# pref_dataset="sort_4goals_T=1_Q=20000"
+# pref_dataset="sort_4goals_T=10_Q=20000"
+pref_dataset="sort_4goals_T=25_Q=20000"
 
 output_dir="/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/outputs"
 last_beta_idx=$((${#BETAS[@]} - 1))
@@ -69,12 +78,15 @@ run_train_beta() {
     --model_type=${model_type} \
     --comment=${comment} \
     --latent_dim=${latent_dim} \
+    --hidden_dim=${hidden_dim} \
     --kl_weight=${beta} \
     --loss_aggregation=${loss_aggregation} \
+    --normalize_kl=${normalize_kl} \
     --learned_prior=${learned_prior} \
     --use_annealing=${use_annealing} \
     --seed=42 \
-    --batch_size=256 \
+    --batch_size=${batch_size} \
+    --set_size=${set_size} \
     --n_epochs=500 \
     --eval_freq=50 \
     --save_freq=50 \

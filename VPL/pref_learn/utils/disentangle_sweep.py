@@ -1,11 +1,26 @@
 """Disentanglement sweep metadata: model_type -> swept hyperparameter."""
 
+from pathlib import Path
+
 # model_type -> (flag name, plot label)
 MODEL_SWEEP_PARAMS: dict[str, tuple[str, str]] = {
     "VAE": ("kl_weight", "β_KL"),
     "VAEClassifier": ("kl_weight", "β_KL"),
     "TCVAE": ("tc_weight", "β_TC"),
+    "FSQLAE": ("weight_decay", "λ_wd"),
+    "Tripod": ("mi_reg_weight", "λ_MI"),
 }
+
+SWEEP_SUBRUNS_DIRNAME = "subruns"
+SWEEP_NON_SUBRUN_DIRNAMES = frozenset(
+    {
+        SWEEP_SUBRUNS_DIRNAME,
+        "evals_sweep",
+        "evals_latentgrid",
+        "evals_individual",
+        "evals_subsweep",
+    }
+)
 
 
 def enrich_variant_sweep_metadata(variant: dict) -> dict:
@@ -35,3 +50,29 @@ def sweep_from_variant(variant: dict) -> tuple[str, float, str]:
         return name, float(variant.get(name, 0.0)), name
     name, label = entry
     return name, float(variant.get(name, 0.0)), label
+
+
+def sweep_subruns_dir(*, sweep_root: Path) -> Path:
+    """``<sweep_root>/subruns/`` — one training checkpoint dir per array task."""
+    return sweep_root.expanduser().resolve() / SWEEP_SUBRUNS_DIRNAME
+
+
+def is_sweep_subrun_dir(path: Path) -> bool:
+    return path.is_dir() and (path / "variant.json").is_file()
+
+
+def discover_sweep_subruns(sweep_root: Path) -> list[Path]:
+    """List subrun dirs under ``subruns/``; fall back to legacy flat layout."""
+    root = sweep_root.expanduser().resolve()
+    if not root.is_dir():
+        raise FileNotFoundError(f"Sweep root is not a directory: {root}")
+
+    nested = sweep_subruns_dir(sweep_root=root)
+    if nested.is_dir():
+        return sorted(p for p in nested.iterdir() if is_sweep_subrun_dir(p))
+
+    return sorted(
+        p
+        for p in root.iterdir()
+        if is_sweep_subrun_dir(p) and p.name not in SWEEP_NON_SUBRUN_DIRNAMES
+    )

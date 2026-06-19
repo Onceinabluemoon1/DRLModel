@@ -21,7 +21,7 @@ TRAIN_VAE_DATASETS = {
     "sort_4goals_T=1_Q=20000": {
         "env": "sort-easy-4goals-v0",
         "pref_dataset_path": "/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/data/ravens/sort-easy-4goals-v0/20260517_212722_ntrajs=5000/pref_datasets_20260525_161306_Q=20000_S=16_T=1/queries_relabelled.pkl",
-        "pref_infomec_dataset_path": "/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/data/ravens/sort-easy-4goals-v0/20260517_212722_ntrajs=5000/pref_datasets_20260525_161338_Q=20000_S=16_T=1/queries_relabelled.pkl",
+        "pref_infomec_dataset_path": "/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/data/ravens/sort-easy-4goals-v0/20260517_212722_ntrajs=5000/pref_datasets_20260525_161306_Q=20000_S=16_T=1/queries_relabelled.pkl",
     },
     "sort_4goals_T=10_Q=20000": {
         "env": "sort-easy-4goals-v0",
