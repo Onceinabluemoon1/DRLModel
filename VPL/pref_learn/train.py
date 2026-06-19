@@ -1,5 +1,6 @@
 import json
 import os
+import pickle
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -21,10 +22,15 @@ from pref_learn.models.mlp import (
     MLPClassifier,
     MLPModel,
 )
+from pref_learn.models.qlae import QLAE, build_qlae_optimizer
 from pref_learn.models.tcvae import TCVAEModel
+from pref_learn.models.tripod import TripodModel
 from pref_learn.models.utils import Annealer, EarlyStopper, get_datasets
 from pref_learn.models.vae import VAEClassifier, VAEModel
-from pref_learn.utils.disentangle_sweep import enrich_variant_sweep_metadata
+from pref_learn.utils.disentangle_sweep import (
+    enrich_variant_sweep_metadata,
+    sweep_subruns_dir,
+)
 from pref_learn.utils.utils import (
     WandBLogger,
     define_flags_with_default,
@@ -57,13 +63,25 @@ FLAGS_DEF = define_flags_with_default(
     latent_dim=32,
     kl_weight=1.0,
     tc_weight=1.0,
+    mi_weight=1.0,
+    dwkl_weight=1.0,
     loss_aggregation="sum",
+    normalize_kl=True,
     learned_prior=False,
     flow_prior=False,
     use_annealing=False,
     annealer_baseline=0.0,
     annealer_type="cosine",
     annealer_cycles=4,
+    # QLAE / Tripod (discrete latents)
+    num_quantized_values=10,
+    use_mi_reg=False,
+    mi_reg_weight=1.0,
+    use_hessian_penalty=False,
+    hessian_penalty_weight=1.0,
+    hessian_num_perturbations=4,
+    hessian_epsilon=0.01,
+    weight_decay=0.0,
     # Training
     n_epochs=500,
     eval_freq=50,
@@ -83,6 +101,8 @@ FLAGS_DEF = define_flags_with_default(
     biased_mode="grid",
     # If empty, `main` uses datetime.now(); set via env for sweeps, e.g. RUN_TIMESTAMP=... sbatch ...
     run_timestamp="",
+    # e.g. latentsweep: shared sweep dir / W&B group for beta×latent_dim grids (see submit_train_vae_grid.bash)
+    sweep_folder_tag="",
 )
 
 
@@ -105,6 +125,13 @@ def resolve_dataset_flags(FLAGS) -> None:
     assert FLAGS.env.strip(), "Provide --pref_dataset or --env."
 
 
+def effective_set_size(*, flags_set_size: int, dataset_path: str) -> int:
+    if flags_set_size > 0:
+        return int(flags_set_size)
+    with open(dataset_path, "rb") as f:
+        return int(pickle.load(f)["observations"].shape[1])
+
+
 def main(_):
     FLAGS = absl.flags.FLAGS
     # timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -122,21 +149,63 @@ def main(_):
 
     assert FLAGS.comment, "You must leave your comment for logging experiment."
     run_label = FLAGS.pref_dataset.strip() or FLAGS.env
+    run_label = f"{run_label}_A={effective_set_size(flags_set_size=FLAGS.set_size, dataset_path=FLAGS.dataset_path)}"
     ld_tag = f"z={FLAGS.latent_dim}"
+    norm_kl_tag = f"norm-kl={FLAGS.normalize_kl}"
+    learned_prior_tag = f"learned-prior={FLAGS.learned_prior}"
+    run_tags = [ld_tag, norm_kl_tag, learned_prior_tag]
+    if "VAE" in FLAGS.model_type:
+        run_tags.append(f"anneal={FLAGS.use_annealing}")
+    if FLAGS.model_type == "Tripod":
+        run_tags.append(f"V={FLAGS.num_quantized_values}")
+        run_tags.append(f"mi_reg={FLAGS.use_mi_reg}")
+        run_tags.append(f"hessian={FLAGS.use_hessian_penalty}")
+    if FLAGS.model_type == "QLAE":
+        run_tags.append(f"V={FLAGS.num_quantized_values}")
+        run_tags.append(f"wd={FLAGS.weight_decay}")
+    run_tag_str = "_".join(run_tags)
+    sweep_folder_tag = FLAGS.sweep_folder_tag.strip()
+    if sweep_folder_tag:
+        sweep_scope_tags = [
+            sweep_folder_tag,
+            learned_prior_tag,
+            f"agg={FLAGS.loss_aggregation}",
+            norm_kl_tag,
+        ]
+        if "VAE" in FLAGS.model_type:
+            sweep_scope_tags.append(f"anneal={FLAGS.use_annealing}")
+        sweep_scope_tag = "_".join(sweep_scope_tags)
+    else:
+        sweep_scope_tag = f"ld={FLAGS.latent_dim}"
     FLAGS.logging.experiment_id = (
-        f"{run_label}_{FLAGS.model_type}_{ld_tag}_{FLAGS.comment}"
+        f"{run_label}_{FLAGS.model_type}_{run_tag_str}_{FLAGS.comment}"
     )
     if FLAGS.run_timestamp.strip():
-        # Array beta sweeps: one W&B group per submit-time RUN_TIMESTAMP.
-        FLAGS.logging.group = f"{run_label}_{FLAGS.model_type}_{ld_tag}_{timestamp}"
+        # Array sweeps: one W&B group per submit-time RUN_TIMESTAMP.
+        if sweep_folder_tag:
+            FLAGS.logging.group = (
+                f"{run_label}_{FLAGS.model_type}_{sweep_scope_tag}_{timestamp}"
+            )
+        else:
+            FLAGS.logging.group = (
+                f"{run_label}_{FLAGS.model_type}_{run_tag_str}_{timestamp}"
+            )
     else:
         FLAGS.logging.group = FLAGS.logging.experiment_id
-    save_dir = (
-        Path(FLAGS.logging.output_dir)
-        / run_label
-        / str(FLAGS.model_type)
-        / f"{timestamp}_ld={FLAGS.latent_dim}_learned-prior={FLAGS.learned_prior}_agg={FLAGS.loss_aggregation}/{FLAGS.comment}"
+    anneal_tag = ""
+    if "VAE" in FLAGS.model_type:
+        anneal_tag = f"_anneal={FLAGS.use_annealing}"
+    if sweep_folder_tag:
+        run_subdir = f"{timestamp}_{sweep_scope_tag}"
+    else:
+        run_subdir = f"{timestamp}_ld={FLAGS.latent_dim}_learned-prior={FLAGS.learned_prior}_agg={FLAGS.loss_aggregation}_{norm_kl_tag}{anneal_tag}"
+    sweep_root = (
+        Path(FLAGS.logging.output_dir) / run_label / str(FLAGS.model_type) / run_subdir
     )
+    if FLAGS.run_timestamp.strip():
+        save_dir = sweep_subruns_dir(sweep_root=sweep_root) / FLAGS.comment
+    else:
+        save_dir = sweep_root / FLAGS.comment
     FLAGS.logging.output_dir = str(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
     # Per-epoch checkpoints (save_freq); best_model.pt stays in save_dir
@@ -205,12 +274,16 @@ def main(_):
             hidden_dim=FLAGS.hidden_dim,
             annotation_size=set_size,
             segment_len=segment_len,
+            obs_dim=obs_dim,
             dataset_size=len(train_dataset),
             tc_weight=FLAGS.tc_weight,
+            mi_weight=FLAGS.mi_weight,
+            dwkl_weight=FLAGS.dwkl_weight,
             learned_prior=FLAGS.learned_prior,
             annealer=annealer,
             reward_scaling=FLAGS.reward_scaling,
             loss_aggregation=FLAGS.loss_aggregation,
+            normalize_kl=FLAGS.normalize_kl,
         )
     elif FLAGS.model_type == "VAE" or FLAGS.model_type == "VAEClassifier":
         annealer = None
@@ -234,15 +307,49 @@ def main(_):
             hidden_dim=FLAGS.hidden_dim,
             annotation_size=set_size,
             segment_len=segment_len,
+            obs_dim=obs_dim,
             kl_weight=FLAGS.kl_weight,
             learned_prior=FLAGS.learned_prior,
             flow_prior=FLAGS.flow_prior,
             annealer=annealer,
             reward_scaling=FLAGS.reward_scaling,
             loss_aggregation=FLAGS.loss_aggregation,
+            normalize_kl=FLAGS.normalize_kl,
         )
     elif FLAGS.model_type == "MLPClassifier":
         reward_model = MLPClassifier(obs_dim, FLAGS.hidden_dim)
+    elif FLAGS.model_type == "QLAE":
+        reward_model = QLAE(
+            encoder_input=set_size * (2 * obs_dim * segment_len + 1),
+            decoder_input=obs_dim + FLAGS.latent_dim,
+            latent_dim=FLAGS.latent_dim,
+            hidden_dim=FLAGS.hidden_dim,
+            annotation_size=set_size,
+            segment_len=segment_len,
+            obs_dim=obs_dim,
+            num_quantized_values=FLAGS.num_quantized_values,
+            reward_scaling=FLAGS.reward_scaling,
+            loss_aggregation=FLAGS.loss_aggregation,
+        )
+    elif FLAGS.model_type == "Tripod":
+        reward_model = TripodModel(
+            encoder_input=set_size * (2 * obs_dim * segment_len + 1),
+            decoder_input=obs_dim + FLAGS.latent_dim,
+            latent_dim=FLAGS.latent_dim,
+            hidden_dim=FLAGS.hidden_dim,
+            annotation_size=set_size,
+            segment_len=segment_len,
+            obs_dim=obs_dim,
+            num_quantized_values=FLAGS.num_quantized_values,
+            use_mi_reg=FLAGS.use_mi_reg,
+            mi_reg_weight=FLAGS.mi_reg_weight,
+            use_hessian_penalty=FLAGS.use_hessian_penalty,
+            hessian_penalty_weight=FLAGS.hessian_penalty_weight,
+            hessian_num_perturbations=FLAGS.hessian_num_perturbations,
+            hessian_epsilon=FLAGS.hessian_epsilon,
+            reward_scaling=FLAGS.reward_scaling,
+            loss_aggregation=FLAGS.loss_aggregation,
+        )
     else:
         raise NotImplementedError
 
@@ -260,7 +367,14 @@ def main(_):
             default=str,
         )
     wb_logger = WandBLogger(FLAGS.logging, variant=variant)
-    optimizer = torch.optim.Adam(reward_model.parameters(), lr=FLAGS.lr)
+    if FLAGS.model_type == "QLAE":
+        optimizer = build_qlae_optimizer(
+            model=reward_model,
+            lr=FLAGS.lr,
+            weight_decay=FLAGS.weight_decay,
+        )
+    else:
+        optimizer = torch.optim.Adam(reward_model.parameters(), lr=FLAGS.lr)
     early_stop = EarlyStopper(FLAGS.patience, FLAGS.min_delta)
     best_criteria = None
     for epoch in tqdm(range(FLAGS.n_epochs), desc="epochs"):
@@ -310,7 +424,7 @@ def main(_):
                         classifier="Classifier" in FLAGS.model_type,
                     )
                 metrics.update(prefix_metrics(fig_dict, "debug_plots"))
-            elif "VAE" in FLAGS.model_type:
+            elif "VAE" in FLAGS.model_type or FLAGS.model_type in ("Tripod", "QLAE"):
                 putils.update_posterior(reward_env, reward_model, eval_dataset)
 
             criteria = np.mean(metrics["eval/total_loss"])
@@ -332,9 +446,7 @@ def main(_):
         if should_save:
             torch.save(reward_model, save_dir / "checkpoints" / f"model_{epoch}.pt")
 
-        if (
-            FLAGS.model_type == "VAE" or "VAE" in FLAGS.model_type
-        ) and FLAGS.use_annealing:
+        if FLAGS.use_annealing and reward_model.annealer is not None:
             reward_model.annealer.step()
 
         log_metrics(metrics, epoch, wb_logger)

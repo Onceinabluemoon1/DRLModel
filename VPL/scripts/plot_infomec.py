@@ -25,6 +25,7 @@ import torch
 from matplotlib.axes import Axes
 from matplotlib.lines import Line2D
 from pref_learn.configs.data_configs import infomec_dataset_path_for_variant
+from pref_learn.models.qlae import QLAE
 from pref_learn.models.utils import PreferenceDataset
 from pref_learn.models.vae import VAEClassifier, VAEModel
 from pref_learn.utils.infomec import InfoMECResult, compute_infomec
@@ -121,12 +122,14 @@ def format_sort_learned_reward_map_suptitle(
 
 
 def model_supports_obs_latent_reward_decode(model: Any) -> bool:
-    """``VAEModel.decode(obs, z)`` reward maps; not ``VAEClassifier``."""
-    return isinstance(model, VAEModel) and not isinstance(model, VAEClassifier)
+    """``decode(obs, z)`` reward maps: ``VAEModel``, ``QLAE`` (incl. Tripod); not ``VAEClassifier``."""
+    if isinstance(model, VAEClassifier):
+        return False
+    return isinstance(model, (VAEModel, QLAE))
 
 
 def model_supports_probabilistic_reward(model: Any) -> bool:
-    """Models with VPL Sec. 4.1 ``get_probabilistic_reward`` (e.g. VAE, FSQLAE)."""
+    """Models with VPL Sec. 4.1 ``get_probabilistic_reward`` (e.g. VAE, QLAE)."""
     return callable(getattr(model, "get_probabilistic_reward", None))
 
 
@@ -1090,7 +1093,7 @@ def batched_encode(model, obs1, obs2, labels, batch_size, device):
 
 
 def batched_learned_rewards_on_obs1(
-    model: VAEModel,
+    model: Union[VAEModel, QLAE],
     obs1: np.ndarray,
     obs2: np.ndarray,
     labels: np.ndarray,
@@ -1100,7 +1103,7 @@ def batched_learned_rewards_on_obs1(
     comparison_obs: np.ndarray | None = None,
     reward_mode: Literal["raw", "prob"] = "prob",
 ) -> np.ndarray:
-    """Encoder posterior mean per query, then reward on ``obs1`` segments.
+    """Encoder latent per query (VAE posterior mean; QLAE ``z_q``), then reward on ``obs1``.
 
     ``prob`` (default): VPL Sec. 4.1 expected BTL preference vs a comparison pool.
     ``raw``: decoder output ``r(s, z)``.

@@ -1,32 +1,28 @@
+from typing import Tuple, Union
+
 import einops as ei
 import torch
 import torch.nn as nn
 
-
-class LatentEncoder(nn.Module):
-    """Preference-set encoder to continuous latents pre-quantization."""
-
-    def __init__(self, input_dim: int, hidden_dim: int, latent_dim: int):
-        super().__init__()
-        self.model = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.LeakyReLU(0.2),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.LeakyReLU(0.2),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.LeakyReLU(0.2),
-        )
-        self.fc_z = nn.Linear(hidden_dim, latent_dim)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.fc_z(self.model(x))
+PairEncoderOutput = Union[
+    torch.Tensor,  # deterministic latents
+    Tuple[torch.Tensor, torch.Tensor],  # gaussian latents (mean, logvar)
+]
 
 
 class PairEncoderMLP(nn.Module):
-    """(B, A, T, O), (B, A, T, O), (B, A, 1) -> (B, Z), (B, Z)"""
+    """(B, A, T, O), (B, A, T, O), (B, A, 1) -> (B, Z) or (B, Z), (B, Z)"""
 
-    def __init__(self, input_dim, hidden_dim, latent_dim):
-        super(PairEncoderMLP, self).__init__()
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dim: int,
+        latent_dim: int,
+        *,
+        gaussian_latent: bool = True,
+    ):
+        super().__init__()
+        self.gaussian_latent = bool(gaussian_latent)
 
         self.model = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
@@ -37,31 +33,32 @@ class PairEncoderMLP(nn.Module):
             nn.LeakyReLU(0.2),
         )
 
-        self.FC_mean = nn.Linear(hidden_dim, latent_dim)
-        self.FC_logvar = nn.Linear(hidden_dim, latent_dim)
+        if self.gaussian_latent:
+            self.fc_mean = nn.Linear(hidden_dim, latent_dim)
+            self.fc_logvar = nn.Linear(hidden_dim, latent_dim)
+        else:
+            self.fc_z = nn.Linear(hidden_dim, latent_dim)
 
     def forward(
         self,
         s1: torch.Tensor,
         s2: torch.Tensor,
         y: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> PairEncoderOutput:
         s1_ = ei.rearrange(s1, "B A T O -> B A (T O)")
         s2_ = ei.rearrange(s2, "B A T O -> B A (T O)")
         encoder_input = torch.cat([s1_, s2_, y], dim=-1)  # (B, A, (2*T*O + 1))
         x = ei.rearrange(encoder_input, "B A feats -> B (A feats)")
-
-        h_ = self.model(x)
-        mean = self.FC_mean(h_)
-        logvar = self.FC_logvar(h_)
-
-        return mean, logvar
+        h_ = self.model(x)  # (B, H)
+        if self.gaussian_latent:
+            return self.fc_mean(h_), self.fc_logvar(h_)
+        return self.fc_z(h_)  # (B, Z)
 
 
 class PairEncoder1DConv(nn.Module):
     """Siamese 1D-conv pair encoder: shared trunk on each traj, mean over T and A.
 
-    (B, A, T, O), (B, A, T, O), (B, A, 1) -> (B, Z), (B, Z)
+    (B, A, T, O), (B, A, T, O), (B, A, 1) -> (B, Z) or (B, Z), (B, Z)
     """
 
     def __init__(
@@ -70,8 +67,11 @@ class PairEncoder1DConv(nn.Module):
         hidden_dim: int,
         latent_dim: int,
         conv_channels: int = 64,
+        *,
+        gaussian_latent: bool = True,
     ):
         super().__init__()
+        self.gaussian_latent = bool(gaussian_latent)
         self.traj_conv = nn.Sequential(
             nn.Conv1d(obs_dim, conv_channels, kernel_size=3, padding=1),
             nn.LeakyReLU(0.2),
@@ -91,8 +91,11 @@ class PairEncoder1DConv(nn.Module):
             nn.Linear(hidden_dim, hidden_dim),
             nn.LeakyReLU(0.2),
         )
-        self.fc_mean = nn.Linear(hidden_dim, latent_dim)
-        self.fc_logvar = nn.Linear(hidden_dim, latent_dim)
+        if self.gaussian_latent:
+            self.fc_mean = nn.Linear(hidden_dim, latent_dim)
+            self.fc_logvar = nn.Linear(hidden_dim, latent_dim)
+        else:
+            self.fc_z = nn.Linear(hidden_dim, latent_dim)
 
     def _encode_traj(self, s: torch.Tensor) -> torch.Tensor:
         """(B, A, T, O) -> (B, A, H)"""
@@ -108,7 +111,7 @@ class PairEncoder1DConv(nn.Module):
         s1: torch.Tensor,
         s2: torch.Tensor,
         y: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> PairEncoderOutput:
         # * siamese encode each segment
         h1 = self._encode_traj(s=s1)  # (B,A,T,O) -> (B,A,H)
         h2 = self._encode_traj(s=s2)  # (B,A,T,O) -> (B,A,H)
@@ -119,9 +122,9 @@ class PairEncoder1DConv(nn.Module):
         h_set = h_annot.mean(dim=1)  # (B, H)
 
         h_ = self.model(h_set)
-        mean = self.fc_mean(h_)
-        logvar = self.fc_logvar(h_)
-        return mean, logvar
+        if self.gaussian_latent:
+            return self.fc_mean(h_), self.fc_logvar(h_)
+        return self.fc_z(h_)  # (B, Z)
 
 
 class Decoder(nn.Module):

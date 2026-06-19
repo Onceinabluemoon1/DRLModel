@@ -7,7 +7,7 @@ MODEL_SWEEP_PARAMS: dict[str, tuple[str, str]] = {
     "VAE": ("kl_weight", "β_KL"),
     "VAEClassifier": ("kl_weight", "β_KL"),
     "TCVAE": ("tc_weight", "β_TC"),
-    "FSQLAE": ("weight_decay", "λ_wd"),
+    "QLAE": ("weight_decay", "λ_wd"),
     "Tripod": ("mi_reg_weight", "λ_MI"),
 }
 

@@ -37,12 +37,14 @@ class VAEModel(nn.Module):
                 obs_dim=obs_dim,
                 hidden_dim=hidden_dim,
                 latent_dim=latent_dim,
+                gaussian_latent=True,
             )
         else:
             self.encoder = PairEncoderMLP(
                 input_dim=encoder_input,
                 hidden_dim=hidden_dim,
                 latent_dim=latent_dim,
+                gaussian_latent=True,
             )
         self.decoder = Decoder(decoder_input, hidden_dim, 1)
         self.latent_dim = latent_dim

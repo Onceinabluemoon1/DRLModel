@@ -110,9 +110,46 @@ def discover_sweep_run_dirs(
     return sorted(dirs, key=sort_key)
 
 
+def _format_sweep_axis_tick(value: float) -> str:
+    if value <= 0:
+        return "0"
+    return f"{value:g}"
+
+
+def prepare_sweep_log_x_axis(
+    sweep_values: np.ndarray,
+) -> tuple[np.ndarray, Optional[np.ndarray], Optional[list[str]]]:
+    """
+    Map sweep values for log-x plots when some entries are <= 0 (e.g. weight_decay=0).
+
+    Zeros are drawn at ``min(positive) / 10`` on the log axis with tick label ``"0"``.
+    Positive values keep their true positions. Returns ``(x_plot, tick_pos, tick_labels)``;
+    when all values are positive, ``tick_pos`` and ``tick_labels`` are ``None`` (auto ticks).
+    """
+    vals = np.asarray(sweep_values, dtype=np.float64)
+    positive = vals[vals > 0]
+    if positive.size == 0:
+        raise ValueError(
+            f"need at least one positive sweep value for log-x plot; got {vals!r}"
+        )
+
+    if not np.any(vals <= 0):
+        return vals.copy(), None, None
+
+    x_floor = float(np.min(positive) / 10.0)
+    x_plot = np.where(vals <= 0, x_floor, vals)
+    sorted_unique = np.sort(np.unique(vals))
+    tick_pos = np.array(
+        [x_floor if v <= 0 else float(v) for v in sorted_unique],
+        dtype=np.float64,
+    )
+    tick_labels = [_format_sweep_axis_tick(float(v)) for v in sorted_unique]
+    return x_plot, tick_pos, tick_labels
+
+
 def _add_active_latents_twin_beta_sweep(
     ax_left: plt.Axes,
-    betas: np.ndarray,
+    x_vals: np.ndarray,
     n_active: np.ndarray,
     latent_dims: np.ndarray,
 ) -> None:
@@ -122,7 +159,7 @@ def _add_active_latents_twin_beta_sweep(
     n_norm = n_active.astype(np.float64) / np.maximum(latent_dims.astype(np.float64), 1.0)
     ax_right = ax_left.twinx()
     ax_right.plot(
-        betas,
+        x_vals,
         n_norm,
         linestyle="--",
         color="black",
@@ -498,33 +535,35 @@ def main(args: SweepCLI) -> None:
     supt = f"InfoMEC vs {sweep_param_label} ({ckpt_display}), {ld_part}"
 
     beta_plot_path = outdir / "aggregate_infomec_vs_beta_log.png"
-    if np.any(betas <= 0):
-        print(f"Skip {beta_plot_path.name}: all β must be >0 for log x; got {betas!r}")
+    try:
+        x_plot, tick_pos, tick_labels = prepare_sweep_log_x_axis(betas)
+    except ValueError as exc:
+        print(f"Skip {beta_plot_path.name}: {exc}")
     else:
         fig_b, ax_b = plt.subplots(figsize=(8, 5))
         ax_b.plot(
-            betas,
+            x_plot,
             infoms,
             marker="o",
             label="InfoM",
             color=plt_infomec.InfoMECCurveColor.infom,
         )
         ax_b.plot(
-            betas,
+            x_plot,
             infoes,
             marker="o",
             label="InfoE",
             color=plt_infomec.InfoMECCurveColor.infoe,
         )
         ax_b.plot(
-            betas,
+            x_plot,
             infocs,
             marker="o",
             label="InfoC",
             color=plt_infomec.InfoMECCurveColor.infoc,
         )
         ax_b.plot(
-            betas,
+            x_plot,
             max_nmis,
             linestyle=":",
             color="gray",
@@ -532,13 +571,16 @@ def main(args: SweepCLI) -> None:
             label="max NMI",
         )
         ax_b.set_xscale("log")
+        if tick_pos is not None and tick_labels is not None:
+            ax_b.set_xticks(tick_pos)
+            ax_b.set_xticklabels(tick_labels)
         ax_b.set_xlabel(
             f"{runs_data[0]['sweep_param_label']} ({runs_data[0]['sweep_param_name']}) — log scale"
         )
         ax_b.grid(alpha=0.3, which="both")
         ax_b.set_ylabel("InfoM / InfoE / InfoC / max NMI ([0, 1])")
         ax_b.set_ylim(-0.02, 1.02)
-        _add_active_latents_twin_beta_sweep(ax_b, betas, n_act, Ls)
+        _add_active_latents_twin_beta_sweep(ax_b, x_plot, n_act, Ls)
         fig_b.suptitle(supt, fontsize=11)
         fig_b.tight_layout(rect=[0, 0.1, 1, 0.99])
         fig_b.canvas.draw()
@@ -711,9 +753,10 @@ def main(args: SweepCLI) -> None:
         if learned_rewards_dir.is_dir() and any(learned_rewards_dir.glob("*.png")):
             print(f"Wrote learned-reward copies under {learned_rewards_dir}/")
     print(f"Wrote {outdir / 'aggregate_nmi_heatmaps.png'}")
+    wrote_beta_plot = beta_plot_path.is_file()
     if plt_infomec.latent_cluster_enabled(method=args.latent_cluster_method):
         print(f"Wrote {projection_grid_path}")
-    if not np.any(betas <= 0):
+    if wrote_beta_plot:
         print(f"Wrote {beta_plot_path}")
     print(f"Wrote {outdir / 'aggregate_infomec_vs_epoch_grid.png'}")
     print(f"Wrote {csv_path}")
