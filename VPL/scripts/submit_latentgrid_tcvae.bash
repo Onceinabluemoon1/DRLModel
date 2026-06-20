@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=train_tcvae_grid
 #SBATCH --gres=shard:12
-#SBATCH --array=0-47
+#SBATCH --array=0-59
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=16G
 #SBATCH --output=/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/logs_slurm/train_tcvae_grid/train_tcvae_grid_%A_%a.out
@@ -27,13 +27,14 @@ conda activate drl
 TC_WEIGHTS=(
     0.001
     0.01
+    0.05
     0.1
+    0.2
     0.3
     1.0
     3.0
     6.0
     10.0
-    30.0
 )
 LATENT_DIMS=(
     4
@@ -45,20 +46,22 @@ LATENT_DIMS=(
 )
 model_type=TCVAE
 sweep_folder_tag=latentgrid
-batch_size=4096
+batch_size=512
 learned_prior=False
 loss_aggregation=mean  # sum | mean
 normalize_kl=True
 mi_weight=1.0
 dwkl_weight=1.0
-use_annealing=True   # ramp tc_weight 0 -> target over n_epochs / annealer_cycles
+use_annealing=False   # ramp tc_weight 0 -> target over n_epochs / annealer_cycles
 annealer_cycles=1
 annealer_type=cosine
 
-# pref_dataset="sort_2goals_T=1"
-# pref_dataset="sort_4goals_T=1"
-pref_dataset="sort_4goals_T=1_Q=20000"
-# pref_dataset="sort_4goals_T=10"
+# pref_dataset="sort_2goals_T=1_Q=5000"
+# pref_dataset="sort_2goals_T=10_Q=5000"
+# pref_dataset="sort_2goals_T=24_Q=5000"
+# pref_dataset="sort_4goals_T=1_Q=20000"
+# pref_dataset="sort_4goals_T=10_Q=20000"
+pref_dataset="sort_4goals_T=25_Q=20000"
 
 output_dir="/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/outputs"
 

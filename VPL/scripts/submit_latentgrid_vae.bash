@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=train_vae_grid
 #SBATCH --gres=shard:12
-#SBATCH --array=0-71
+#SBATCH --array=0-59
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=16G
 #SBATCH --output=/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/logs_slurm/train_vae_grid/train_vae_grid_%A_%a.out
@@ -35,8 +35,6 @@ BETAS=(
     6.0
     10.0
     30.0
-    100.0
-    300.0
 )
 LATENT_DIMS=(
     4

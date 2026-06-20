@@ -32,23 +32,54 @@ if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
 import plot_infomec as plt_infomec  # noqa: E402
-from pref_learn.utils.disentangle_sweep import discover_sweep_subruns  # noqa: E402
+from pref_learn.utils.disentangle_sweep import (  # noqa: E402
+    discover_sweep_subruns,
+    sweep_from_variant,
+)
 from pref_learn.utils.infomec import compute_infomec  # noqa: E402
 
-SWEEP_METRICS: list[tuple[str, str, bool]] = [
+BetaAxisMode = Literal["raw", "normalized"]
+WandbMetricSpec = tuple[str, str, bool] | None
+WandbMetricRow = list[WandbMetricSpec]
+
+VAE_WANDB_METRICS: list[tuple[str, str, bool]] = [
     ("frac_recon2total", "train/frac_recon2total", False),
     ("recon_loss", "train/recon_loss", False),
     ("kld_loss", "train/kld_loss", True),
     ("enc_mean_cross_std", "train/enc_mean_cross_std", True),
+]
+
+TCVAE_WANDB_METRICS: list[tuple[str, str, bool]] = [
+    ("vanilla_frac_recon2total", "train/vanilla_frac_recon2total", False),
+    ("recon_loss", "train/recon_loss", False),
+    ("vanilla_kld_loss", "train/vanilla_kld_loss", True),
+    ("enc_mean_cross_std", "train/enc_mean_cross_std", True),
+]
+
+QLAE_WANDB_METRICS: WandbMetricRow = [
+    ("recon_loss", "train/recon_loss", False),
+    ("enc_zc_cross_std", "train/enc_zc_cross_std", True),
+    ("enc_zq_cross_std", "train/enc_zq_cross_std", True),
+    ("enc_zq_unique_mean", "train/enc_zq_unique_mean", False),
+]
+
+INFOMEC_METRICS: list[tuple[str, str, bool]] = [
     ("infom", "InfoM", False),
     ("infoe", "InfoE", False),
     ("infoc", "InfoC", False),
 ]
 
-WANDEB_METRICS = SWEEP_METRICS[:4]
-INFOMEC_METRICS = SWEEP_METRICS[4:]
+MODEL_WANDB_METRICS: dict[str, WandbMetricRow] = {
+    "VAE": VAE_WANDB_METRICS,
+    "VAEClassifier": VAE_WANDB_METRICS,
+    "TCVAE": TCVAE_WANDB_METRICS,
+    "QLAE": QLAE_WANDB_METRICS,
+    "Tripod": QLAE_WANDB_METRICS,
+}
 
-BetaAxisMode = Literal["raw", "normalized"]
+SWEEP_METRICS: list[tuple[str, str, bool]] = VAE_WANDB_METRICS + INFOMEC_METRICS
+
+WANDEB_METRICS = VAE_WANDB_METRICS
 
 
 @dataclass
@@ -66,10 +97,7 @@ class LatentSweepHeatmapCLI:
 
     dpi: int = 200
 
-    skip_infomec: bool = False
-    """If True, only plot W&B train metrics (no checkpoint encode / InfoMEC)."""
-
-    model_selection: plt_infomec.ModelSelection = plt_infomec.ModelSelection.best
+    model_selection: plt_infomec.ModelSelection = plt_infomec.ModelSelection.final
     """Checkpoint for InfoMEC encode: ``best_model.pt`` or final epoch checkpoint."""
 
     split: Literal["all", "train", "eval"] = "all"
@@ -120,6 +148,14 @@ def annotation_size_from_rows(rows: list[dict]) -> int:
     return ann
 
 
+def resolve_wandb_metrics(model_type: str) -> WandbMetricRow:
+    return MODEL_WANDB_METRICS.get(model_type, VAE_WANDB_METRICS)
+
+
+def _active_wandb_metrics(wandb_metrics: WandbMetricRow) -> list[tuple[str, str, bool]]:
+    return [metric for metric in wandb_metrics if metric is not None]
+
+
 def load_sweep_rows(input_dir: Path) -> list[dict]:
     rows: list[dict] = []
     for run_dir in discover_subruns(input_dir):
@@ -130,30 +166,40 @@ def load_sweep_rows(input_dir: Path) -> list[dict]:
         variant = json.loads((run_dir / "variant.json").read_text(encoding="utf-8"))[
             "variant"
         ]
+        model_type = str(variant.get("model_type", ""))
+        wandb_metrics = resolve_wandb_metrics(model_type=model_type)
         annotation_size = int(
             variant.get("resolved_set_size", variant.get("set_size", -1))
         )
         if annotation_size <= 0:
             raise ValueError(
                 f"Missing resolved_set_size in {run_dir / 'variant.json'}; "
-                "needed for normalized beta = kl_weight * latent_dim / annotation_size."
+                "needed for sweep metadata."
             )
-        kl_weight = float(variant["kl_weight"])
+        sweep_param_name, sweep_param_value, sweep_param_label = sweep_from_variant(
+            variant=variant
+        )
         latent_dim = int(variant["latent_dim"])
         row = {
             "run_dir": str(run_dir),
             "comment": str(variant.get("comment", run_dir.name)),
+            "model_type": model_type,
             "latent_dim": latent_dim,
-            "kl_weight": kl_weight,
+            "sweep_param_name": sweep_param_name,
+            "sweep_param_value": float(sweep_param_value),
+            "sweep_param_label": sweep_param_label,
             "annotation_size": annotation_size,
-            "normalized_kl_weight": normalized_kl_weight(
+            "wandb_step": int(summary.get("_step", -1)),
+        }
+        if sweep_param_name == "kl_weight":
+            kl_weight = float(sweep_param_value)
+            row["kl_weight"] = kl_weight
+            row["normalized_kl_weight"] = normalized_kl_weight(
                 kl_weight=kl_weight,
                 latent_dim=latent_dim,
                 annotation_size=annotation_size,
-            ),
-            "wandb_step": int(summary.get("_step", -1)),
-        }
-        for field, wandb_key, _log_scale in WANDEB_METRICS:
+            )
+        for field, wandb_key, _log_scale in _active_wandb_metrics(wandb_metrics):
             if wandb_key not in summary:
                 raise KeyError(f"{wandb_key} not in {summary_path}")
             row[field] = float(summary[wandb_key])
@@ -290,9 +336,11 @@ def enrich_rows_with_infomec(
         metrics_payload = {
             "run_dir": str(run_dir),
             "comment": row["comment"],
-            "kl_weight": row["kl_weight"],
+            "model_type": row.get("model_type"),
+            "sweep_param_name": row.get("sweep_param_name"),
+            "sweep_param_value": row.get("sweep_param_value"),
+            "sweep_param_label": row.get("sweep_param_label"),
             "latent_dim": row["latent_dim"],
-            "normalized_kl_weight": row["normalized_kl_weight"],
             "infomec_split": split,
             "infomec_dataset": str(dataset_path),
             "checkpoint": ckpt_label,
@@ -300,6 +348,9 @@ def enrich_rows_with_infomec(
             "model_selection": model_selection_tag,
             **result.to_dict(),
         }
+        if "kl_weight" in row:
+            metrics_payload["kl_weight"] = row["kl_weight"]
+            metrics_payload["normalized_kl_weight"] = row["normalized_kl_weight"]
         (per_run_out / "infomec_metrics.json").write_text(
             json.dumps(metrics_payload, indent=2),
             encoding="utf-8",
@@ -363,16 +414,17 @@ def build_raw_grid(
     *,
     value_key: str,
 ) -> tuple[np.ndarray, list[float], list[int]]:
-    betas = sorted({float(r["kl_weight"]) for r in rows})
+    sweep_vals = sorted({float(r["sweep_param_value"]) for r in rows})
     lds = sorted({int(r["latent_dim"]) for r in rows})
-    grid = np.full((len(betas), len(lds)), np.nan, dtype=np.float64)
+    grid = np.full((len(sweep_vals), len(lds)), np.nan, dtype=np.float64)
     lookup = {
-        (float(r["kl_weight"]), int(r["latent_dim"])): float(r[value_key]) for r in rows
+        (float(r["sweep_param_value"]), int(r["latent_dim"])): float(r[value_key])
+        for r in rows
     }
-    for i, beta in enumerate(betas):
+    for i, sweep_val in enumerate(sweep_vals):
         for j, ld in enumerate(lds):
-            grid[i, j] = lookup.get((beta, ld), np.nan)
-    return grid, betas, lds
+            grid[i, j] = lookup.get((sweep_val, ld), np.nan)
+    return grid, sweep_vals, lds
 
 
 def build_normbeta_metric_grid(
@@ -524,10 +576,11 @@ def plot_heatmap_ax_raw(
     ax: plt.Axes,
     *,
     grid: np.ndarray,
-    betas: list[float],
+    sweep_vals: list[float],
     lds: list[int],
     field: str,
     title: str,
+    sweep_ylabel: str,
     log_scale: bool,
     show_xlabel: bool,
     show_ylabel: bool,
@@ -544,14 +597,14 @@ def plot_heatmap_ax_raw(
     )
     ax.set_xticks(np.arange(len(lds)))
     ax.set_xticklabels([str(ld) for ld in lds])
-    ax.set_yticks(np.arange(len(betas)))
-    ax.set_yticklabels([_format_beta(b) for b in betas])
+    ax.set_yticks(np.arange(len(sweep_vals)))
+    ax.set_yticklabels([_format_beta(b) for b in sweep_vals])
     if show_xlabel:
         ax.set_xlabel(r"Size of $z$")
     else:
         ax.set_xlabel("")
     if show_ylabel:
-        ax.set_ylabel(r"$\beta$")
+        ax.set_ylabel(sweep_ylabel)
     else:
         ax.set_ylabel("")
         ax.set_yticklabels([])
@@ -644,8 +697,10 @@ def save_metrics_figure(
     annotate: bool,
     dpi: int,
     beta_axis: BetaAxisMode,
+    wandb_metrics: WandbMetricRow,
+    sweep_ylabel: str,
 ) -> dict[str, dict]:
-    betas = sorted({float(r["kl_weight"]) for r in rows})
+    sweep_vals = sorted({float(r["sweep_param_value"]) for r in rows})
     lds = sorted({int(r["latent_dim"]) for r in rows})
     annotation_size = annotation_size_from_rows(rows=rows)
     nrows = 2
@@ -653,9 +708,9 @@ def save_metrics_figure(
 
     fig_w = max(14.0, 0.95 * len(lds) * ncols)
     if beta_axis == "raw":
-        fig_h = max(9.0, 0.45 * len(betas) * nrows)
+        fig_h = max(9.0, 0.45 * len(sweep_vals) * nrows)
     else:
-        fig_h = max(10.0, 0.55 * len(betas) * nrows)
+        fig_h = max(10.0, 0.55 * len(sweep_vals) * nrows)
     fig, axes = plt.subplots(nrows, ncols, figsize=(fig_w, fig_h), squeeze=False)
 
     def _plot_metric_ax(
@@ -687,10 +742,11 @@ def save_metrics_figure(
             im = plot_heatmap_ax_raw(
                 ax,
                 grid=grid,
-                betas=betas,
+                sweep_vals=sweep_vals,
                 lds=lds,
                 field=field,
                 title=title,
+                sweep_ylabel=sweep_ylabel,
                 log_scale=log_scale,
                 show_xlabel=show_xlabel,
                 show_ylabel=show_ylabel,
@@ -699,15 +755,23 @@ def save_metrics_figure(
         return im, finite
 
     metric_meta: dict[str, dict] = {}
-    for col_i, (field, title, log_scale) in enumerate(WANDEB_METRICS):
+    first_wandb_col = next(
+        (col_i for col_i, metric in enumerate(wandb_metrics) if metric is not None),
+        0,
+    )
+    for col_i, metric in enumerate(wandb_metrics):
         ax = axes[0, col_i]
+        if metric is None:
+            ax.set_visible(False)
+            continue
+        field, title, log_scale = metric
         im, finite = _plot_metric_ax(
             ax=ax,
             field=field,
             title=title,
             log_scale=log_scale,
             show_xlabel=False,
-            show_ylabel=col_i == 0,
+            show_ylabel=col_i == first_wandb_col,
         )
         fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
         metric_meta[field] = {
@@ -744,8 +808,13 @@ def save_metrics_figure(
     return metric_meta
 
 
-def _write_csv(*, rows: list[dict], csv_path: Path) -> None:
-    metric_fields = [field for field, _, _ in SWEEP_METRICS]
+def _write_csv(
+    *,
+    rows: list[dict],
+    csv_path: Path,
+    wandb_metrics: WandbMetricRow,
+) -> None:
+    metric_fields = [field for field, _, _ in _active_wandb_metrics(wandb_metrics) + INFOMEC_METRICS]
     extra_fields = [
         "infomec_max_nmi",
         "infomec_ckpt",
@@ -753,8 +822,9 @@ def _write_csv(*, rows: list[dict], csv_path: Path) -> None:
         "infomec_model_selection",
     ]
     header = [
-        "kl_weight",
-        "normalized_kl_weight",
+        "sweep_param_name",
+        "sweep_param_value",
+        "sweep_param_label",
         "latent_dim",
         "annotation_size",
         *metric_fields,
@@ -766,11 +836,12 @@ def _write_csv(*, rows: list[dict], csv_path: Path) -> None:
     with open(csv_path, "w", encoding="utf-8", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(header)
-        for r in sorted(rows, key=lambda x: (x["kl_weight"], x["latent_dim"])):
+        for r in sorted(rows, key=lambda x: (x["sweep_param_value"], x["latent_dim"])):
             writer.writerow(
                 [
-                    r["kl_weight"],
-                    r["normalized_kl_weight"],
+                    r.get("sweep_param_name", ""),
+                    r.get("sweep_param_value", ""),
+                    r.get("sweep_param_label", ""),
                     r["latent_dim"],
                     r["annotation_size"],
                     *[r.get(field, "") for field in metric_fields],
@@ -802,8 +873,7 @@ def main(args: LatentSweepHeatmapCLI) -> None:
             infomec_root=args.infomec_from_dir,
         )
         infomec_outdir = str(args.infomec_from_dir.expanduser().resolve())
-        infomec_evaluated = True
-    elif not args.skip_infomec:
+    else:
         rows = enrich_rows_with_infomec(
             rows,
             model_selection=args.model_selection,
@@ -815,22 +885,21 @@ def main(args: LatentSweepHeatmapCLI) -> None:
             outdir=outdir,
         )
         infomec_outdir = str(outdir / "infomec")
-        infomec_evaluated = True
-    else:
-        for row in rows:
-            for field, _, _ in INFOMEC_METRICS:
-                row[field] = float("nan")
-        infomec_outdir = None
-        infomec_evaluated = False
+    infomec_evaluated = True
 
-    betas = sorted({float(r["kl_weight"]) for r in rows})
+    betas = sorted({float(r["sweep_param_value"]) for r in rows})
     lds = sorted({int(r["latent_dim"]) for r in rows})
     annotation_size = annotation_size_from_rows(rows=rows)
+    model_type = str(rows[0].get("model_type", ""))
+    wandb_metrics = resolve_wandb_metrics(model_type=model_type)
+    sweep_ylabel = str(rows[0].get("sweep_param_label", "sweep"))
 
     figure_specs: list[tuple[str, BetaAxisMode]] = [
         ("latentgrid_metrics_train.png", "raw"),
-        ("latentgrid_metrics_train_normbeta.png", "normalized"),
     ]
+    if rows[0].get("sweep_param_name") == "kl_weight":
+        figure_specs.append(("latentgrid_metrics_train_normbeta.png", "normalized"))
+
     metrics_manifest: dict[str, dict] = {}
 
     for filename, beta_axis in figure_specs:
@@ -841,6 +910,8 @@ def main(args: LatentSweepHeatmapCLI) -> None:
             annotate=args.annotate,
             dpi=args.dpi,
             beta_axis=beta_axis,
+            wandb_metrics=wandb_metrics,
+            sweep_ylabel=sweep_ylabel,
         )
         metrics_manifest[filename] = {
             "beta_axis": beta_axis,
@@ -849,17 +920,24 @@ def main(args: LatentSweepHeatmapCLI) -> None:
         print(f"Wrote {png_path}")
 
     csv_path = outdir / "latentgrid_metrics_train.csv"
-    _write_csv(rows=rows, csv_path=csv_path)
+    _write_csv(rows=rows, csv_path=csv_path, wandb_metrics=wandb_metrics)
     print(f"Wrote {csv_path}")
 
     manifest = {
         "input_dir": str(input_dir),
         "grid_csv": str(csv_path),
         "n_runs": len(rows),
-        "betas": betas,
+        "model_type": model_type,
+        "sweep_param_name": rows[0].get("sweep_param_name"),
+        "sweep_param_label": sweep_ylabel,
+        "sweep_values": betas,
         "latent_dims": lds,
         "annotation_size": annotation_size,
-        "normalized_kl_weight_formula": "kl_weight * latent_dim / annotation_size",
+        "normalized_kl_weight_formula": (
+            "kl_weight * latent_dim / annotation_size"
+            if rows[0].get("sweep_param_name") == "kl_weight"
+            else None
+        ),
         "infomec_evaluated": infomec_evaluated,
         "infomec_model_selection": args.model_selection.value,
         "infomec_split": args.split,
