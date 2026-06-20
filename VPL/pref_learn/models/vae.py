@@ -13,7 +13,7 @@ class VAEModel(nn.Module):
 
     def __init__(
         self,
-        encoder_input,  # A *(2*T*O + 1)) for MLP, (O) for 1D-conv
+        encoder_input,  # legacy flat size A*(2*T*O+1); MLP path uses obs_dim*segment_len
         decoder_input,
         latent_dim,
         hidden_dim,
@@ -41,7 +41,7 @@ class VAEModel(nn.Module):
             )
         else:
             self.encoder = PairEncoderMLP(
-                input_dim=encoder_input,
+                input_dim=obs_dim * segment_len,
                 hidden_dim=hidden_dim,
                 latent_dim=latent_dim,
                 gaussian_latent=True,

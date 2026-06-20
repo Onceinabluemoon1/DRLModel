@@ -46,7 +46,7 @@ class QLAE(nn.Module):
             )
         else:
             self.encoder = PairEncoderMLP(
-                input_dim=encoder_input,
+                input_dim=obs_dim * segment_len,
                 hidden_dim=hidden_dim,
                 latent_dim=latent_dim,
                 gaussian_latent=False,
