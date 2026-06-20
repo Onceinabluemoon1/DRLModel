@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=plot_latentgrid_heatmap
 #SBATCH --gres=shard:24
-#SBATCH --array=0-1
+#SBATCH --array=0-2
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=16G
-#SBATCH --output=/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/logs_slurm/plot_latentgrid_heatmap/plot_latentgrid_heatmap_%A_%a.out
+#SBATCH --output=/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/logs_slurm/eval_latentgrid_heatmap/eval_latentgrid_heatmap_%A_%a.out
 #
 # Slurm array: one latentsweep root per task → scripts/plot_latentgrid_heatmap.py
 #   • Edit INPUT_DIRS below, then set #SBATCH --array=0-(N-1) for N dirs.
@@ -16,8 +16,10 @@ conda activate drl
 
 #* latentsweep roots (each must contain subruns/ with variant.json + checkpoint)
 INPUT_DIRS=(
-  "/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/outputs/sort_4goals_T=25_Q=20000_A=16/QLAE/20260619_224305_latentgrid_learned-prior=False_agg=mean_norm-kl=True"
-  "/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/outputs/sort_4goals_T=25_Q=20000_A=16/TCVAE/20260620_063046_latentgrid_learned-prior=False_agg=mean_norm-kl=True_anneal=True"
+  "/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/outputs/sort_4goals_T=1_Q=20000_A=16/VAE/20260620_182851_latentgrid_learned-prior=False_agg=mean_norm-kl=False_anneal=False"
+  "/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/outputs/sort_4goals_T=1_Q=20000_A=16/TCVAE/20260620_184427_latentgrid_learned-prior=False_agg=mean_norm-kl=True_anneal=False"
+  "/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/outputs/sort_4goals_T=1_Q=20000_A=16/QLAE/20260620_184429_latentgrid_learned-prior=False_agg=mean_norm-kl=True"
+
 )
 
 #* plot_latentgrid_heatmap CLI (shared across array tasks)
