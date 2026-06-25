@@ -9,7 +9,7 @@ import einops as ei
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from pref_learn.models.nets import Decoder, PairEncoder1DConv, PairEncoderMLP
+from pref_learn.models.nets import PairEncoder, make_reward_decoder, reward_decoder_column_orth_penalty
 from pref_learn.models.quantizer import FSQQuantizer
 
 
@@ -34,28 +34,37 @@ class QLAE(nn.Module):
         num_quantized_values: int = 10,
         reward_scaling: float = 1.0,
         loss_aggregation: str = "mean",
+        decoder_type: str = "mlp",
+        decoder_gate_temperature: float = 1.0,
+        encoder_use_labels: bool = True,
+        decoder_orth_weight: float = 0.0,
     ):
         super().__init__()
         assert loss_aggregation in ("sum", "mean")
-        if segment_len > 1:
-            self.encoder = PairEncoder1DConv(
-                obs_dim=obs_dim,
-                hidden_dim=hidden_dim,
-                latent_dim=latent_dim,
-                gaussian_latent=False,
-            )
-        else:
-            self.encoder = PairEncoderMLP(
-                input_dim=obs_dim * segment_len,
-                hidden_dim=hidden_dim,
-                latent_dim=latent_dim,
-                gaussian_latent=False,
-            )
+        self.encoder_use_labels = bool(encoder_use_labels)
+        self.encoder = PairEncoder(
+            obs_dim=obs_dim,
+            hidden_dim=hidden_dim,
+            latent_dim=latent_dim,
+            segment_len=segment_len,
+            gaussian_latent=False,
+            encoder_use_labels=encoder_use_labels,
+        )
         self.quantizer = FSQQuantizer(
             num_latents=latent_dim,
             num_values_per_latent=num_quantized_values,
         )
-        self.decoder = Decoder(decoder_input, hidden_dim, 1)
+        self.decoder = make_reward_decoder(
+            decoder_type=decoder_type,
+            obs_dim=obs_dim,
+            latent_dim=latent_dim,
+            hidden_dim=hidden_dim,
+            output_dim=1,
+            decoder_input=decoder_input,
+            gate_temperature=decoder_gate_temperature,
+        )
+        self.decoder_type = str(decoder_type).lower()
+        self.decoder_orth_weight = float(decoder_orth_weight)
         self.latent_dim = latent_dim
         self.annotation_size = annotation_size
         self.segment_len = segment_len
@@ -179,15 +188,22 @@ class QLAE(nn.Module):
 
     def forward(self, s1, s2, y):  # (B, A, T, O), (B, A, 1)
         recon_loss, _, labels, p_hat, z_c, z_q = self.forward_btl(s1=s1, s2=s2, y=y)
+        total_loss = recon_loss
+        orth_metrics: dict[str, float] = {}
+        if self.decoder_orth_weight > 0.0:
+            orth_loss = reward_decoder_column_orth_penalty(decoder=self.decoder)
+            total_loss = total_loss + self.decoder_orth_weight * orth_loss
+            orth_metrics["decoder_orth_loss"] = orth_loss.item()
         acc = self.accuracy(labels, p_hat)
         metrics = {
-            "total_loss": recon_loss.item(),
+            "total_loss": total_loss.item(),
             "recon_loss": recon_loss.item(),
             "accuracy": acc.item(),
             "num_quantized_values": self.num_quantized_values,
             **self.latent_metrics(z_c=z_c, z_q=z_q),
+            **orth_metrics,
         }
-        return recon_loss, metrics
+        return total_loss, metrics
 
     def sample_posterior(self, s1, s2, y):
         z_q, z_c = self.encode(s1, s2, y)

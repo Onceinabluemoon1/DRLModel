@@ -24,7 +24,6 @@ from pref_learn.models.mlp import (
 )
 from pref_learn.models.qlae import QLAE, build_qlae_optimizer
 from pref_learn.models.tcvae import TCVAEModel
-from pref_learn.models.tripod import TripodModel
 from pref_learn.models.utils import Annealer, EarlyStopper, get_datasets
 from pref_learn.models.vae import VAEClassifier, VAEModel
 from pref_learn.utils.disentangle_sweep import (
@@ -73,14 +72,8 @@ FLAGS_DEF = define_flags_with_default(
     annealer_baseline=0.0,
     annealer_type="cosine",
     annealer_cycles=4,
-    # QLAE / Tripod (discrete latents)
+    # QLAE (discrete latents)
     num_quantized_values=10,
-    use_mi_reg=False,
-    mi_reg_weight=1.0,
-    use_hessian_penalty=False,
-    hessian_penalty_weight=1.0,
-    hessian_num_perturbations=4,
-    hessian_epsilon=0.01,
     weight_decay=0.0,
     # Training
     n_epochs=500,
@@ -103,6 +96,11 @@ FLAGS_DEF = define_flags_with_default(
     run_timestamp="",
     # e.g. latentsweep: shared sweep dir / W&B group for beta×latent_dim grids (see submit_train_vae_grid.bash)
     sweep_folder_tag="",
+    # Decoder (VAE / TCVAE / QLAE); see make_reward_decoder in nets.py
+    encoder_use_labels=True,  # pair encoder: concat y into pair_mlp input (q(z|s1,s2,y))
+    decoder_type="mlp",  # mlp | linear | odinlinear | slotlinear
+    decoder_gate_temperature=1.0,  # linear / slotlinear: lower => sharper routing
+    decoder_orth_weight=0.0,  # >0: penalize off-diagonal W W^T on decoder readout layers
 )
 
 
@@ -132,6 +130,24 @@ def effective_set_size(*, flags_set_size: int, dataset_path: str) -> int:
         return int(pickle.load(f)["observations"].shape[1])
 
 
+def _sweep_folder_display_tag(tag: str) -> str:
+    tag = tag.strip()
+    if tag == "latentgrid":
+        return "lgrid"
+    return tag
+
+
+def _flag_bool(value: bool) -> str:
+    return "T" if value else "F"
+
+
+def _run_dir_timestamp(ts: str) -> str:
+    ts = ts.strip()
+    if ts.startswith("arrayjob_"):
+        return ""
+    return ts
+
+
 def main(_):
     FLAGS = absl.flags.FLAGS
     # timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -151,29 +167,36 @@ def main(_):
     run_label = FLAGS.pref_dataset.strip() or FLAGS.env
     run_label = f"{run_label}_A={effective_set_size(flags_set_size=FLAGS.set_size, dataset_path=FLAGS.dataset_path)}"
     ld_tag = f"z={FLAGS.latent_dim}"
-    norm_kl_tag = f"norm-kl={FLAGS.normalize_kl}"
-    learned_prior_tag = f"learned-prior={FLAGS.learned_prior}"
-    run_tags = [ld_tag, norm_kl_tag, learned_prior_tag]
+    learned_prior_tag = f"learnpz={_flag_bool(FLAGS.learned_prior)}"
+    run_tags = [ld_tag, learned_prior_tag]
     if "VAE" in FLAGS.model_type:
-        run_tags.append(f"anneal={FLAGS.use_annealing}")
-    if FLAGS.model_type == "Tripod":
-        run_tags.append(f"V={FLAGS.num_quantized_values}")
-        run_tags.append(f"mi_reg={FLAGS.use_mi_reg}")
-        run_tags.append(f"hessian={FLAGS.use_hessian_penalty}")
+        run_tags.append(f"anneal={_flag_bool(FLAGS.use_annealing)}")
     if FLAGS.model_type == "QLAE":
         run_tags.append(f"V={FLAGS.num_quantized_values}")
         run_tags.append(f"wd={FLAGS.weight_decay}")
+    dec_tag = f"dec={FLAGS.decoder_type}"
+    run_tags.append(dec_tag)
+    if str(FLAGS.decoder_type).lower() in ("linear", "odinlinear"):
+        run_tags.append(f"orthw={FLAGS.decoder_orth_weight}")
+    run_tags.append(f"encY={_flag_bool(FLAGS.encoder_use_labels)}")
     run_tag_str = "_".join(run_tags)
-    sweep_folder_tag = FLAGS.sweep_folder_tag.strip()
-    if sweep_folder_tag:
+    sweep_folder_tag_raw = FLAGS.sweep_folder_tag.strip()
+    sweep_folder_tag = (
+        _sweep_folder_display_tag(tag=sweep_folder_tag_raw)
+        if sweep_folder_tag_raw
+        else ""
+    )
+    if sweep_folder_tag_raw:
         sweep_scope_tags = [
             sweep_folder_tag,
             learned_prior_tag,
-            f"agg={FLAGS.loss_aggregation}",
-            norm_kl_tag,
         ]
         if "VAE" in FLAGS.model_type:
-            sweep_scope_tags.append(f"anneal={FLAGS.use_annealing}")
+            sweep_scope_tags.append(f"anneal={_flag_bool(FLAGS.use_annealing)}")
+        sweep_scope_tags.append(dec_tag)
+        if str(FLAGS.decoder_type).lower() in ("linear", "odinlinear"):
+            sweep_scope_tags.append(f"orthw={FLAGS.decoder_orth_weight}")
+        sweep_scope_tags.append(f"encY={_flag_bool(FLAGS.encoder_use_labels)}")
         sweep_scope_tag = "_".join(sweep_scope_tags)
     else:
         sweep_scope_tag = f"ld={FLAGS.latent_dim}"
@@ -194,11 +217,15 @@ def main(_):
         FLAGS.logging.group = FLAGS.logging.experiment_id
     anneal_tag = ""
     if "VAE" in FLAGS.model_type:
-        anneal_tag = f"_anneal={FLAGS.use_annealing}"
+        anneal_tag = f"_anneal={_flag_bool(FLAGS.use_annealing)}"
+    ts_for_dir = _run_dir_timestamp(ts=timestamp)
     if sweep_folder_tag:
-        run_subdir = f"{timestamp}_{sweep_scope_tag}"
+        run_subdir = f"{ts_for_dir}_{sweep_scope_tag}" if ts_for_dir else sweep_scope_tag
     else:
-        run_subdir = f"{timestamp}_ld={FLAGS.latent_dim}_learned-prior={FLAGS.learned_prior}_agg={FLAGS.loss_aggregation}_{norm_kl_tag}{anneal_tag}"
+        run_subdir = (
+            f"{ts_for_dir}_ld={FLAGS.latent_dim}_learnpz={_flag_bool(FLAGS.learned_prior)}_"
+            f"agg={FLAGS.loss_aggregation}{anneal_tag}"
+        )
     sweep_root = (
         Path(FLAGS.logging.output_dir) / run_label / str(FLAGS.model_type) / run_subdir
     )
@@ -284,6 +311,10 @@ def main(_):
             reward_scaling=FLAGS.reward_scaling,
             loss_aggregation=FLAGS.loss_aggregation,
             normalize_kl=FLAGS.normalize_kl,
+            decoder_type=FLAGS.decoder_type,
+            decoder_gate_temperature=FLAGS.decoder_gate_temperature,
+            encoder_use_labels=FLAGS.encoder_use_labels,
+            decoder_orth_weight=FLAGS.decoder_orth_weight,
         )
     elif FLAGS.model_type == "VAE" or FLAGS.model_type == "VAEClassifier":
         annealer = None
@@ -315,6 +346,10 @@ def main(_):
             reward_scaling=FLAGS.reward_scaling,
             loss_aggregation=FLAGS.loss_aggregation,
             normalize_kl=FLAGS.normalize_kl,
+            decoder_type=FLAGS.decoder_type,
+            decoder_gate_temperature=FLAGS.decoder_gate_temperature,
+            encoder_use_labels=FLAGS.encoder_use_labels,
+            decoder_orth_weight=FLAGS.decoder_orth_weight,
         )
     elif FLAGS.model_type == "MLPClassifier":
         reward_model = MLPClassifier(obs_dim, FLAGS.hidden_dim)
@@ -330,25 +365,10 @@ def main(_):
             num_quantized_values=FLAGS.num_quantized_values,
             reward_scaling=FLAGS.reward_scaling,
             loss_aggregation=FLAGS.loss_aggregation,
-        )
-    elif FLAGS.model_type == "Tripod":
-        reward_model = TripodModel(
-            encoder_input=set_size * (2 * obs_dim * segment_len + 1),
-            decoder_input=obs_dim + FLAGS.latent_dim,
-            latent_dim=FLAGS.latent_dim,
-            hidden_dim=FLAGS.hidden_dim,
-            annotation_size=set_size,
-            segment_len=segment_len,
-            obs_dim=obs_dim,
-            num_quantized_values=FLAGS.num_quantized_values,
-            use_mi_reg=FLAGS.use_mi_reg,
-            mi_reg_weight=FLAGS.mi_reg_weight,
-            use_hessian_penalty=FLAGS.use_hessian_penalty,
-            hessian_penalty_weight=FLAGS.hessian_penalty_weight,
-            hessian_num_perturbations=FLAGS.hessian_num_perturbations,
-            hessian_epsilon=FLAGS.hessian_epsilon,
-            reward_scaling=FLAGS.reward_scaling,
-            loss_aggregation=FLAGS.loss_aggregation,
+            decoder_type=FLAGS.decoder_type,
+            decoder_gate_temperature=FLAGS.decoder_gate_temperature,
+            encoder_use_labels=FLAGS.encoder_use_labels,
+            decoder_orth_weight=FLAGS.decoder_orth_weight,
         )
     else:
         raise NotImplementedError
@@ -424,7 +444,7 @@ def main(_):
                         classifier="Classifier" in FLAGS.model_type,
                     )
                 metrics.update(prefix_metrics(fig_dict, "debug_plots"))
-            elif "VAE" in FLAGS.model_type or FLAGS.model_type in ("Tripod", "QLAE"):
+            elif "VAE" in FLAGS.model_type or FLAGS.model_type == "QLAE":
                 putils.update_posterior(reward_env, reward_model, eval_dataset)
 
             criteria = np.mean(metrics["eval/total_loss"])

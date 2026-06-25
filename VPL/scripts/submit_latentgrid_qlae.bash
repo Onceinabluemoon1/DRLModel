@@ -33,12 +33,12 @@ WEIGHT_DECAYS=(
     3.0
 )
 LATENT_DIMS=(
+    2
     4
+    6
     8
+    10
     16
-    32
-    64
-    128
 )
 
 model_type=QLAE
@@ -49,12 +49,16 @@ num_quantized_values=6
 loss_aggregation=mean
 set_size=16  # -1 = use full S from dataset; else truncate preference sets to this A
 
+decoder_type=linear
+decoder_gate_temperature=1.0
+decoder_orth_weight=0.0
+
 # pref_dataset="sort_2goals_T=1_Q=5000"
 # pref_dataset="sort_2goals_T=10_Q=5000"
 # pref_dataset="sort_2goals_T=24_Q=5000"
-# pref_dataset="sort_4goals_T=1_Q=20000"
+pref_dataset="sort_4goals_T=1_Q=20000"
 # pref_dataset="sort_4goals_T=10_Q=20000"
-pref_dataset="sort_4goals_T=25_Q=20000"
+# pref_dataset="sort_4goals_T=25_Q=20000"
 
 output_dir="/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/outputs"
 
@@ -102,6 +106,9 @@ run_train_grid() {
     --seed=42 \
     --batch_size=${batch_size} \
     --set_size=${set_size} \
+    --decoder_type="${decoder_type}" \
+    --decoder_gate_temperature="${decoder_gate_temperature}" \
+    --decoder_orth_weight="${decoder_orth_weight}" \
     --n_epochs=500 \
     --eval_freq=50 \
     --save_freq=50 \

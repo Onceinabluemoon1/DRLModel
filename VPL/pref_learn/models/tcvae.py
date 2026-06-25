@@ -3,6 +3,7 @@ import math
 import einops as ei
 import torch
 import torch.distributions as D
+from pref_learn.models.nets import reward_decoder_column_orth_penalty
 from pref_learn.models.utils import logvar_to_std
 from pref_learn.models.vae import VAEModel
 from torch import logsumexp as lse
@@ -37,6 +38,10 @@ class TCVAEModel(VAEModel):
         discrete_latents: bool = False,
         loss_aggregation: str = "mean",
         normalize_kl: bool = True,
+        decoder_type: str = "mlp",
+        decoder_gate_temperature: float = 1.0,
+        encoder_use_labels: bool = True,
+        decoder_orth_weight: float = 0.0,
     ):
         if flow_prior:
             raise NotImplementedError("TCVAEModel does not support flow_prior.")
@@ -56,6 +61,10 @@ class TCVAEModel(VAEModel):
             discrete_latents=discrete_latents,
             loss_aggregation=loss_aggregation,
             normalize_kl=normalize_kl,
+            decoder_type=decoder_type,
+            decoder_gate_temperature=decoder_gate_temperature,
+            encoder_use_labels=encoder_use_labels,
+            decoder_orth_weight=decoder_orth_weight,
         )
         self.dataset_size = int(dataset_size)
         self.tc_weight = tc_weight
@@ -154,6 +163,11 @@ class TCVAEModel(VAEModel):
             self.mi_weight * mi_loss + tc_weight * tc_loss + self.dwkl_weight * dwkl_loss
         )
         total_loss = recon_loss + latent_loss
+        orth_metrics: dict[str, float] = {}
+        if self.decoder_orth_weight > 0.0:
+            orth_loss = reward_decoder_column_orth_penalty(decoder=self.decoder)
+            total_loss = total_loss + self.decoder_orth_weight * orth_loss
+            orth_metrics["decoder_orth_loss"] = orth_loss.item()
         # latent_loss mean-pools over D → VAEModel-style D/A scale, not β-TC 1/A
         vanilla_kld_loss = self.latent_loss(mean, logvar)  # KL(q(z|x) || p(z))
         vanilla_kl_norm = (
@@ -185,6 +199,7 @@ class TCVAEModel(VAEModel):
             "vanilla_kl_normalizer": vanilla_kl_norm,
             "vanilla_frac_recon2total": recon_loss.item() / vanilla_elbo_loss.item(),
             **self.encoder_cross_std_metrics(mean=mean, logvar=logvar),
+            **orth_metrics,
         }
 
         return total_loss, metrics

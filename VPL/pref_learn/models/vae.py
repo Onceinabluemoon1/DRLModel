@@ -4,7 +4,11 @@ import torch.distributions as D
 import torch.nn as nn
 import torch.nn.functional as F
 from pref_learn.models.flow import Flow
-from pref_learn.models.nets import Decoder, PairEncoder1DConv, PairEncoderMLP
+from pref_learn.models.nets import (
+    PairEncoder,
+    make_reward_decoder,
+    reward_decoder_column_orth_penalty,
+)
 from pref_learn.models.utils import Annealer, logvar_to_std
 
 
@@ -28,25 +32,34 @@ class VAEModel(nn.Module):
         discrete_latents: bool = False,
         loss_aggregation: str = "mean",
         normalize_kl: bool = True,
+        decoder_type: str = "mlp",
+        decoder_gate_temperature: float = 1.0,
+        encoder_use_labels: bool = True,
+        decoder_orth_weight: float = 0.0,
     ):
         super(VAEModel, self).__init__()
         assert loss_aggregation in ("sum", "mean")
         self.discrete_latents = bool(discrete_latents)
-        if segment_len > 1:
-            self.encoder = PairEncoder1DConv(
-                obs_dim=obs_dim,
-                hidden_dim=hidden_dim,
-                latent_dim=latent_dim,
-                gaussian_latent=True,
-            )
-        else:
-            self.encoder = PairEncoderMLP(
-                input_dim=obs_dim * segment_len,
-                hidden_dim=hidden_dim,
-                latent_dim=latent_dim,
-                gaussian_latent=True,
-            )
-        self.decoder = Decoder(decoder_input, hidden_dim, 1)
+        self.encoder_use_labels = bool(encoder_use_labels)
+        self.encoder = PairEncoder(
+            obs_dim=obs_dim,
+            hidden_dim=hidden_dim,
+            latent_dim=latent_dim,
+            segment_len=segment_len,
+            gaussian_latent=True,
+            encoder_use_labels=encoder_use_labels,
+        )
+        self.decoder = make_reward_decoder(
+            decoder_type=decoder_type,
+            obs_dim=obs_dim,
+            latent_dim=latent_dim,
+            hidden_dim=hidden_dim,
+            output_dim=1,
+            decoder_input=decoder_input,
+            gate_temperature=decoder_gate_temperature,
+        )
+        self.decoder_type = str(decoder_type).lower()
+        self.decoder_orth_weight = float(decoder_orth_weight)
         self.latent_dim = latent_dim
         self.prior_mean = torch.nn.Parameter(
             torch.zeros(latent_dim), requires_grad=learned_prior
@@ -263,11 +276,16 @@ class VAEModel(nn.Module):
         recon_loss = self.reconstruction_loss(label=labels, logits=logits)
         kl_loss = self.latent_loss(mean, logvar)
 
-        kl_weight = self.annealer.slope() if self.annealer else self.kl_weight
-        kl_weight = kl_weight * self.kl_normalizer
+        kl_scale = self.annealer.slope() if self.annealer else 1.0
+        kl_weight = kl_scale * self.kl_weight * self.kl_normalizer
         total_loss = recon_loss + kl_weight * kl_loss
         if self.flow_prior:
             total_loss = total_loss - ei.reduce(log_det, "b 1 ->", self.loss_agg)
+        orth_metrics: dict[str, float] = {}
+        if self.decoder_orth_weight > 0.0:
+            orth_loss = reward_decoder_column_orth_penalty(decoder=self.decoder)
+            total_loss = total_loss + self.decoder_orth_weight * orth_loss
+            orth_metrics["decoder_orth_loss"] = orth_loss.item()
 
         acc = self.accuracy(labels, p_hat)
         metrics = {
@@ -278,6 +296,7 @@ class VAEModel(nn.Module):
             "kl_weight": kl_weight,
             "frac_recon2total": recon_loss.item() / total_loss.item(),
             **self.encoder_cross_std_metrics(mean=mean, logvar=logvar),
+            **orth_metrics,
         }
 
         return total_loss, metrics

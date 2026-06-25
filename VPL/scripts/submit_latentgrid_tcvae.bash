@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=train_tcvae_grid
 #SBATCH --gres=shard:12
-#SBATCH --array=0-59
+#SBATCH --array=0-59%6
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=16G
 #SBATCH --output=/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/logs_slurm/train_tcvae_grid/train_tcvae_grid_%A_%a.out
@@ -59,9 +59,9 @@ annealer_type=cosine
 # pref_dataset="sort_2goals_T=1_Q=5000"
 # pref_dataset="sort_2goals_T=10_Q=5000"
 # pref_dataset="sort_2goals_T=24_Q=5000"
-# pref_dataset="sort_4goals_T=1_Q=20000"
+pref_dataset="sort_4goals_T=1_Q=20000"
 # pref_dataset="sort_4goals_T=10_Q=20000"
-pref_dataset="sort_4goals_T=25_Q=20000"
+# pref_dataset="sort_4goals_T=25_Q=20000"
 
 output_dir="/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/outputs"
 

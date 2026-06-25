@@ -21,7 +21,6 @@ import numpy as np
 import torch
 import tyro
 from matplotlib.colors import LogNorm, Normalize
-from matplotlib.patches import Rectangle
 from tqdm import tqdm
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
@@ -38,7 +37,6 @@ from pref_learn.utils.disentangle_sweep import (  # noqa: E402
 )
 from pref_learn.utils.infomec import compute_infomec  # noqa: E402
 
-BetaAxisMode = Literal["raw", "normalized"]
 WandbMetricSpec = tuple[str, str, bool] | None
 WandbMetricRow = list[WandbMetricSpec]
 
@@ -71,10 +69,8 @@ INFOMEC_METRICS: list[tuple[str, str, bool]] = [
 
 MODEL_WANDB_METRICS: dict[str, WandbMetricRow] = {
     "VAE": VAE_WANDB_METRICS,
-    "VAEClassifier": VAE_WANDB_METRICS,
     "TCVAE": TCVAE_WANDB_METRICS,
     "QLAE": QLAE_WANDB_METRICS,
-    "Tripod": QLAE_WANDB_METRICS,
 }
 
 SWEEP_METRICS: list[tuple[str, str, bool]] = VAE_WANDB_METRICS + INFOMEC_METRICS
@@ -191,6 +187,8 @@ def load_sweep_rows(input_dir: Path) -> list[dict]:
             "annotation_size": annotation_size,
             "wandb_step": int(summary.get("_step", -1)),
         }
+        if "weight_decay" in variant:
+            row["weight_decay"] = float(variant["weight_decay"])
         if sweep_param_name == "kl_weight":
             kl_weight = float(sweep_param_value)
             row["kl_weight"] = kl_weight
@@ -427,27 +425,6 @@ def build_raw_grid(
     return grid, sweep_vals, lds
 
 
-def build_normbeta_metric_grid(
-    rows: list[dict],
-    *,
-    value_key: str,
-) -> tuple[np.ndarray, list[float], list[int], np.ndarray, float, float]:
-    """Grid in ``(normalized_kl_weight, latent_dim)``; NaN where no run exists."""
-    lds = sorted({int(r["latent_dim"]) for r in rows})
-    norms = sorted({float(r["normalized_kl_weight"]) for r in rows})
-    norm_to_i = {n: i for i, n in enumerate(norms)}
-    ld_to_j = {ld: j for j, ld in enumerate(lds)}
-    grid = np.full((len(norms), len(lds)), np.nan, dtype=np.float64)
-    raw_beta_one = np.zeros((len(norms), len(lds)), dtype=bool)
-    for r in rows:
-        i = norm_to_i[float(r["normalized_kl_weight"])]
-        j = ld_to_j[int(r["latent_dim"])]
-        grid[i, j] = float(r[value_key])
-        if _is_raw_beta_one(beta=float(r["kl_weight"])):
-            raw_beta_one[i, j] = True
-    return grid, norms, lds, raw_beta_one, float(min(norms)), float(max(norms))
-
-
 def _format_beta(beta: float) -> str:
     if beta >= 1.0 and float(beta).is_integer():
         return str(int(beta))
@@ -465,6 +442,11 @@ def _norm_for_grid(
         return Normalize(vmin=0.0, vmax=1.0)
     if field == "frac_recon2total" or field in {"infom", "infoe", "infoc"}:
         return Normalize(vmin=0.0, vmax=1.0)
+    if field == "recon_loss":
+        vmax = float(np.max(finite))
+        if vmax <= 0.0:
+            vmax = 1.0
+        return Normalize(vmin=0.0, vmax=vmax)
     vmin = float(np.min(finite))
     vmax = float(np.max(finite))
     if log_scale:
@@ -475,71 +457,6 @@ def _norm_for_grid(
     if vmax <= vmin:
         vmax = vmin + 1.0
     return Normalize(vmin=vmin, vmax=vmax)
-
-
-def _is_raw_beta_one(beta: float) -> bool:
-    return abs(beta - 1.0) <= max(1e-6, 1e-3 * abs(beta))
-
-
-def _normbeta_y_edges(
-    *, norms: list[float], norm_min: float, norm_max: float
-) -> np.ndarray:
-    edges = np.empty(len(norms) + 1, dtype=np.float64)
-    edges[0] = norm_min
-    edges[-1] = norm_max
-    if len(norms) > 1:
-        edges[1:-1] = 0.5 * (np.array(norms[:-1]) + np.array(norms[1:]))
-    return edges
-
-
-def _draw_raw_beta_one_borders_norm_grid(
-    ax: plt.Axes,
-    *,
-    raw_beta_one: np.ndarray,
-    y_edges: np.ndarray,
-    n_ld: int,
-) -> None:
-    n_norm, _ = raw_beta_one.shape
-    for i in range(n_norm):
-        for j in range(n_ld):
-            if not raw_beta_one[i, j]:
-                continue
-            ax.add_patch(
-                Rectangle(
-                    (float(j) - 0.5, float(y_edges[i])),
-                    1.0,
-                    float(y_edges[i + 1] - y_edges[i]),
-                    fill=False,
-                    edgecolor="black",
-                    linewidth=1.8,
-                    clip_on=True,
-                )
-            )
-
-
-def _draw_beta_eff_one_line(
-    ax: plt.Axes, *, x_max: float, norm_min: float, norm_max: float
-) -> None:
-    if not (norm_min <= 1.0 <= norm_max):
-        return
-    ax.axhline(
-        1.0,
-        color="white",
-        linestyle="--",
-        linewidth=1.2,
-        alpha=0.85,
-        zorder=5,
-    )
-    ax.text(
-        x_max + 0.05,
-        1.0,
-        r"$\beta z/A=1$",
-        va="center",
-        ha="left",
-        fontsize=7,
-        color="white",
-        clip_on=False,
-    )
 
 
 def _maybe_annotate_cells(
@@ -585,6 +502,8 @@ def plot_heatmap_ax_raw(
     show_xlabel: bool,
     show_ylabel: bool,
     annotate: bool,
+    x_tick_labels: list[str] | None = None,
+    xlabel: str | None = None,
 ) -> plt.cm.ScalarMappable:
     norm = _norm_for_grid(grid, field=field, log_scale=log_scale)
     im = ax.imshow(
@@ -595,12 +514,13 @@ def plot_heatmap_ax_raw(
         norm=norm,
         interpolation="nearest",
     )
-    ax.set_xticks(np.arange(len(lds)))
-    ax.set_xticklabels([str(ld) for ld in lds])
+    n_x = grid.shape[1]
+    ax.set_xticks(np.arange(n_x))
+    ax.set_xticklabels(x_tick_labels if x_tick_labels is not None else [str(ld) for ld in lds])
     ax.set_yticks(np.arange(len(sweep_vals)))
     ax.set_yticklabels([_format_beta(b) for b in sweep_vals])
     if show_xlabel:
-        ax.set_xlabel(r"Size of $z$")
+        ax.set_xlabel(xlabel if xlabel is not None else r"Size of $z$")
     else:
         ax.set_xlabel("")
     if show_ylabel:
@@ -620,97 +540,22 @@ def plot_heatmap_ax_raw(
     return im
 
 
-def plot_heatmap_ax_normbeta(
-    ax: plt.Axes,
-    *,
-    rows: list[dict],
-    annotation_size: int,
-    field: str,
-    title: str,
-    log_scale: bool,
-    show_xlabel: bool,
-    show_ylabel: bool,
-    annotate: bool,
-) -> plt.cm.ScalarMappable:
-    grid, norms, lds, raw_beta_one, norm_min, norm_max = build_normbeta_metric_grid(
-        rows,
-        value_key=field,
-    )
-    y_edges = _normbeta_y_edges(norms=norms, norm_min=norm_min, norm_max=norm_max)
-    x_edges = np.arange(len(lds) + 1, dtype=np.float64) - 0.5
-
-    cmap = plt.cm.viridis.copy()
-    cmap.set_bad(color="#f0f0f0")
-    norm = _norm_for_grid(grid, field=field, log_scale=log_scale)
-    im = ax.pcolormesh(
-        x_edges,
-        y_edges,
-        np.ma.masked_invalid(grid),
-        cmap=cmap,
-        norm=norm,
-        shading="flat",
-        edgecolors="none",
-    )
-    ax.set_yscale("log")
-    ax.set_xlim(-0.5, len(lds) - 0.5)
-    ax.set_ylim(norm_min * 0.95, norm_max * 1.05)
-
-    ax.set_xticks(np.arange(len(lds)))
-    ax.set_xticklabels([str(ld) for ld in lds])
-    if show_xlabel:
-        ax.set_xlabel(r"Size of $z$")
-    else:
-        ax.set_xlabel("")
-    if show_ylabel:
-        ax.set_ylabel(rf"$\beta z / A$  ($A={annotation_size}$)")
-    else:
-        ax.set_ylabel("")
-
-    ax.set_title(title)
-    _draw_beta_eff_one_line(
-        ax=ax,
-        x_max=float(len(lds) - 0.5),
-        norm_min=norm_min,
-        norm_max=norm_max,
-    )
-    _draw_raw_beta_one_borders_norm_grid(
-        ax=ax,
-        raw_beta_one=raw_beta_one,
-        y_edges=y_edges,
-        n_ld=len(lds),
-    )
-    _maybe_annotate_cells(
-        ax=ax,
-        grid=grid,
-        norm=norm,
-        annotate=annotate,
-        x_of=lambda i, j: j,
-        y_of=lambda i, j: 0.5 * (y_edges[i] + y_edges[i + 1]),
-    )
-    return im
-
-
 def save_metrics_figure(
     *,
     rows: list[dict],
     out_png: Path,
     annotate: bool,
     dpi: int,
-    beta_axis: BetaAxisMode,
     wandb_metrics: WandbMetricRow,
     sweep_ylabel: str,
 ) -> dict[str, dict]:
     sweep_vals = sorted({float(r["sweep_param_value"]) for r in rows})
     lds = sorted({int(r["latent_dim"]) for r in rows})
-    annotation_size = annotation_size_from_rows(rows=rows)
     nrows = 2
     ncols = 4
 
     fig_w = max(14.0, 0.95 * len(lds) * ncols)
-    if beta_axis == "raw":
-        fig_h = max(9.0, 0.45 * len(sweep_vals) * nrows)
-    else:
-        fig_h = max(10.0, 0.55 * len(sweep_vals) * nrows)
+    fig_h = max(9.0, 0.45 * len(sweep_vals) * nrows)
     fig, axes = plt.subplots(nrows, ncols, figsize=(fig_w, fig_h), squeeze=False)
 
     def _plot_metric_ax(
@@ -722,36 +567,21 @@ def save_metrics_figure(
         show_xlabel: bool,
         show_ylabel: bool,
     ) -> tuple[plt.cm.ScalarMappable, np.ndarray]:
-        if beta_axis == "normalized":
-            im = plot_heatmap_ax_normbeta(
-                ax,
-                rows=rows,
-                annotation_size=annotation_size,
-                field=field,
-                title=title,
-                log_scale=log_scale,
-                show_xlabel=show_xlabel,
-                show_ylabel=show_ylabel,
-                annotate=annotate,
-            )
-            finite = build_normbeta_metric_grid(rows, value_key=field)[0]
-            finite = finite[np.isfinite(finite)]
-        else:
-            grid, _, _ = build_raw_grid(rows, value_key=field)
-            finite = grid[np.isfinite(grid)]
-            im = plot_heatmap_ax_raw(
-                ax,
-                grid=grid,
-                sweep_vals=sweep_vals,
-                lds=lds,
-                field=field,
-                title=title,
-                sweep_ylabel=sweep_ylabel,
-                log_scale=log_scale,
-                show_xlabel=show_xlabel,
-                show_ylabel=show_ylabel,
-                annotate=annotate,
-            )
+        grid, _, _ = build_raw_grid(rows, value_key=field)
+        finite = grid[np.isfinite(grid)]
+        im = plot_heatmap_ax_raw(
+            ax,
+            grid=grid,
+            sweep_vals=sweep_vals,
+            lds=lds,
+            field=field,
+            title=title,
+            sweep_ylabel=sweep_ylabel,
+            log_scale=log_scale,
+            show_xlabel=show_xlabel,
+            show_ylabel=show_ylabel,
+            annotate=annotate,
+        )
         return im, finite
 
     metric_meta: dict[str, dict] = {}
@@ -777,7 +607,7 @@ def save_metrics_figure(
         metric_meta[field] = {
             "wandb_key": title,
             "log_scale": log_scale,
-            "vmin": float(np.min(finite)) if finite.size else None,
+            "vmin": 0.0 if field == "recon_loss" else (float(np.min(finite)) if finite.size else None),
             "vmax": float(np.max(finite)) if finite.size else None,
         }
 
@@ -795,7 +625,7 @@ def save_metrics_figure(
         metric_meta[field] = {
             "wandb_key": title,
             "log_scale": log_scale,
-            "vmin": float(np.min(finite)) if finite.size else None,
+            "vmin": 0.0 if field == "recon_loss" else (float(np.min(finite)) if finite.size else None),
             "vmax": float(np.max(finite)) if finite.size else None,
         }
 
@@ -826,6 +656,7 @@ def _write_csv(
         "sweep_param_value",
         "sweep_param_label",
         "latent_dim",
+        "weight_decay",
         "annotation_size",
         *metric_fields,
         *extra_fields,
@@ -836,13 +667,17 @@ def _write_csv(
     with open(csv_path, "w", encoding="utf-8", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(header)
-        for r in sorted(rows, key=lambda x: (x["sweep_param_value"], x["latent_dim"])):
+        for r in sorted(
+            rows,
+            key=lambda x: (x.get("weight_decay", 0.0), x["sweep_param_value"], x["latent_dim"]),
+        ):
             writer.writerow(
                 [
                     r.get("sweep_param_name", ""),
                     r.get("sweep_param_value", ""),
                     r.get("sweep_param_label", ""),
                     r["latent_dim"],
+                    r.get("weight_decay", ""),
                     r["annotation_size"],
                     *[r.get(field, "") for field in metric_fields],
                     *[r.get(field, "") for field in extra_fields],
@@ -894,30 +729,16 @@ def main(args: LatentSweepHeatmapCLI) -> None:
     wandb_metrics = resolve_wandb_metrics(model_type=model_type)
     sweep_ylabel = str(rows[0].get("sweep_param_label", "sweep"))
 
-    figure_specs: list[tuple[str, BetaAxisMode]] = [
-        ("latentgrid_metrics_train.png", "raw"),
-    ]
-    if rows[0].get("sweep_param_name") == "kl_weight":
-        figure_specs.append(("latentgrid_metrics_train_normbeta.png", "normalized"))
-
-    metrics_manifest: dict[str, dict] = {}
-
-    for filename, beta_axis in figure_specs:
-        png_path = outdir / filename
-        metric_meta = save_metrics_figure(
-            rows=rows,
-            out_png=png_path,
-            annotate=args.annotate,
-            dpi=args.dpi,
-            beta_axis=beta_axis,
-            wandb_metrics=wandb_metrics,
-            sweep_ylabel=sweep_ylabel,
-        )
-        metrics_manifest[filename] = {
-            "beta_axis": beta_axis,
-            "metrics": metric_meta,
-        }
-        print(f"Wrote {png_path}")
+    png_path = outdir / "latentgrid_metrics_train.png"
+    metric_meta = save_metrics_figure(
+        rows=rows,
+        out_png=png_path,
+        annotate=args.annotate,
+        dpi=args.dpi,
+        wandb_metrics=wandb_metrics,
+        sweep_ylabel=sweep_ylabel,
+    )
+    print(f"Wrote {png_path}")
 
     csv_path = outdir / "latentgrid_metrics_train.csv"
     _write_csv(rows=rows, csv_path=csv_path, wandb_metrics=wandb_metrics)
@@ -933,16 +754,12 @@ def main(args: LatentSweepHeatmapCLI) -> None:
         "sweep_values": betas,
         "latent_dims": lds,
         "annotation_size": annotation_size,
-        "normalized_kl_weight_formula": (
-            "kl_weight * latent_dim / annotation_size"
-            if rows[0].get("sweep_param_name") == "kl_weight"
-            else None
-        ),
         "infomec_evaluated": infomec_evaluated,
         "infomec_model_selection": args.model_selection.value,
         "infomec_split": args.split,
         "infomec_outdir": infomec_outdir,
-        "figures": metrics_manifest,
+        "figure": str(png_path),
+        "metrics": metric_meta,
     }
     manifest_path = outdir / "latentgrid_metrics_manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")

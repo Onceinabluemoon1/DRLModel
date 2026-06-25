@@ -30,6 +30,10 @@ batch_size=256
 loss_aggregation=mean
 set_size=16  # -1 = use full S from dataset; else truncate preference sets to this A
 
+decoder_type=linear
+decoder_gate_temperature=1.0
+decoder_orth_weight=1.0
+
 # pref_dataset="sort_2goals_T=1_Q=5000"
 # pref_dataset="sort_2goals_T=10_Q=5000"
 # pref_dataset="sort_2goals_T=24_Q=5000"
@@ -68,6 +72,9 @@ run_train_qlae() {
     --seed=42 \
     --batch_size=${batch_size} \
     --set_size=${set_size} \
+    --decoder_type="${decoder_type}" \
+    --decoder_gate_temperature="${decoder_gate_temperature}" \
+    --decoder_orth_weight="${decoder_orth_weight}" \
     --n_epochs=500 \
     --eval_freq=50 \
     --save_freq=50 \

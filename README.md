@@ -329,7 +329,7 @@ python VPL/pref_learn/train.py \
   --comment=sort_final_reward_results \
   --env=sort-easy-v0 \
   --dataset_path=./VPL/pref_datasets/sort-easy-v0/relabelled_queries_num5000_q1_s16 \
-  --model_type=VAEClassifier \
+  --model_type=VAE \
   --logging.output_dir=./VPL/logs3 \
   --seed=42 \
   --learned_prior=True \

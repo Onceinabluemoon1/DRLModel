@@ -27,7 +27,7 @@ from matplotlib.lines import Line2D
 from pref_learn.configs.data_configs import infomec_dataset_path_for_variant
 from pref_learn.models.qlae import QLAE
 from pref_learn.models.utils import PreferenceDataset
-from pref_learn.models.vae import VAEClassifier, VAEModel
+from pref_learn.models.vae import VAEModel
 from pref_learn.utils.infomec import InfoMECResult, compute_infomec
 from pref_learn.utils.plot_utils import plot_observation_rewards_by_annotator_mode
 from sklearn.manifold import TSNE
@@ -122,9 +122,7 @@ def format_sort_learned_reward_map_suptitle(
 
 
 def model_supports_obs_latent_reward_decode(model: Any) -> bool:
-    """``decode(obs, z)`` reward maps: ``VAEModel``, ``QLAE`` (incl. Tripod); not ``VAEClassifier``."""
-    if isinstance(model, VAEClassifier):
-        return False
+    """``decode(obs, z)`` reward maps: ``VAEModel``, ``QLAE``."""
     return isinstance(model, (VAEModel, QLAE))
 
 

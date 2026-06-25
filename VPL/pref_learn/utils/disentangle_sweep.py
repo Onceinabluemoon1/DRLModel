@@ -5,10 +5,8 @@ from pathlib import Path
 # model_type -> (flag name, plot label)
 MODEL_SWEEP_PARAMS: dict[str, tuple[str, str]] = {
     "VAE": ("kl_weight", "β_KL"),
-    "VAEClassifier": ("kl_weight", "β_KL"),
     "TCVAE": ("tc_weight", "β_TC"),
     "QLAE": ("weight_decay", "λ_wd"),
-    "Tripod": ("mi_reg_weight", "λ_MI"),
 }
 
 SWEEP_SUBRUNS_DIRNAME = "subruns"

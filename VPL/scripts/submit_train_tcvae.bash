@@ -45,7 +45,7 @@ TC_WEIGHTS=(
     # 3000.0
 )
 model_type=TCVAE
-latent_dim=4
+latent_dim=32
 hidden_dim=128
 batch_size=512
 learned_prior=False
@@ -60,9 +60,9 @@ annealer_type=cosine
 # pref_dataset="sort_2goals_T=1_Q=5000"
 # pref_dataset="sort_2goals_T=10_Q=5000"
 # pref_dataset="sort_2goals_T=24_Q=5000"
-# pref_dataset="sort_4goals_T=1_Q=20000"
+pref_dataset="sort_4goals_T=1_Q=20000"
 # pref_dataset="sort_4goals_T=10_Q=20000"
-pref_dataset="sort_4goals_T=25_Q=20000"
+# pref_dataset="sort_4goals_T=25_Q=20000"
 
 output_dir="/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/outputs"
 last_tc_idx=$((${#TC_WEIGHTS[@]} - 1))

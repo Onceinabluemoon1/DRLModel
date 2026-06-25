@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=train_vae_grid
 #SBATCH --gres=shard:12
-#SBATCH --array=0-59
+#SBATCH --array=0-47%8
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=16G
 #SBATCH --output=/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/logs_slurm/train_vae_grid/train_vae_grid_%A_%a.out
@@ -33,16 +33,14 @@ BETAS=(
     1.0
     3.0
     6.0
-    10.0
-    30.0
 )
 LATENT_DIMS=(
+    2
     4
+    6
     8
+    10
     16
-    32
-    64
-    128
 )
 model_type=VAE
 sweep_folder_tag=latentgrid
@@ -51,12 +49,17 @@ use_annealing=False
 loss_aggregation=mean  # sum | mean
 normalize_kl=False
 
+# ── Reward decoder (→ train.py / make_reward_decoder in nets.py) ───────────
+decoder_type=linear
+decoder_gate_temperature=1.0
+decoder_orth_weight=0.0  # linear / odinlinear only; no-op for slotlinear
+
 # pref_dataset="sort_2goals_T=1_Q=5000"
 # pref_dataset="sort_2goals_T=10_Q=5000"
 # pref_dataset="sort_2goals_T=24_Q=5000"
-# pref_dataset="sort_4goals_T=1_Q=20000"
+pref_dataset="sort_4goals_T=1_Q=20000"
 # pref_dataset="sort_4goals_T=10_Q=20000"
-pref_dataset="sort_4goals_T=25_Q=20000"
+# pref_dataset="sort_4goals_T=25_Q=20000"
 
 output_dir="/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/outputs"
 
@@ -106,6 +109,9 @@ run_train_grid() {
     --use_annealing=${use_annealing} \
     --seed=42 \
     --batch_size=256 \
+    --decoder_type="${decoder_type}" \
+    --decoder_gate_temperature="${decoder_gate_temperature}" \
+    --decoder_orth_weight="${decoder_orth_weight}" \
     --n_epochs=500 \
     --eval_freq=50 \
     --save_freq=50 \
@@ -136,7 +142,7 @@ fi
 
 : <<'EOF'
 # Slurm array (parallel; one (ld, beta) pair per task; shared RUN_TIMESTAMP):
-# Update #SBATCH --array=0-N to N=(num_betas * num_latent_dims - 1); default 10×3=30 → 0-29.
+# Update #SBATCH --array=0-N to N=(num_betas * num_latent_dims - 1); default 8×6=48 → 0-47.
 sbatch --export=ALL,RUN_TIMESTAMP=$(date +%Y%m%d_%H%M%S) scripts/submit_train_vae_grid.bash
 
 # Serial loop (one GPU; full grid in order; shared W&B group):

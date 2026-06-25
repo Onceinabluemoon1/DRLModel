@@ -46,6 +46,22 @@ loss_aggregation=mean  # sum | mean
 normalize_kl=True
 set_size=16  # -1 = use full S from dataset; else truncate preference sets to this A
 
+# ── Reward decoder (→ train.py / make_reward_decoder in nets.py) ───────────
+# decoder_type — which r(s,z) head to use:
+#   mlp        concat [obs,z] MLP
+#   linear     obs routing + w_j(s)*z_j
+#   odinlinear per-dim [h,z_j] heads, direct sum
+#   slotlinear weight-tied [h,z_j] -> (reward, mix logit)
+#
+# Which hyperparams matter:
+#   (all)    hidden_dim above — trunk / expert width
+#   mlp        (none below; only decoder_type)
+#   linear / odinlinear / slotlinear   decoder_gate_temperature, decoder_orth_weight
+#
+decoder_type=linear
+decoder_gate_temperature=1.0  # linear / slotlinear: lower ⇒ peakier α_j(s)
+decoder_orth_weight=0.0       # >0: ||W W^T - diag||_F^2 on decoder readout Linear layers
+
 # pref_dataset="sort_2goals_T=1_Q=5000"
 # pref_dataset="sort_2goals_T=10_Q=5000"
 # pref_dataset="sort_2goals_T=24_Q=5000"
@@ -87,6 +103,9 @@ run_train_beta() {
     --seed=42 \
     --batch_size=${batch_size} \
     --set_size=${set_size} \
+    --decoder_type="${decoder_type}" \
+    --decoder_gate_temperature="${decoder_gate_temperature}" \
+    --decoder_orth_weight="${decoder_orth_weight}" \
     --n_epochs=500 \
     --eval_freq=50 \
     --save_freq=50 \
