@@ -40,6 +40,7 @@ class TCVAEModel(VAEModel):
         normalize_kl: bool = True,
         decoder_type: str = "mlp",
         decoder_gate_temperature: float = 1.0,
+        decoder_slot_routing: str = "softmax",
         encoder_use_labels: bool = True,
         decoder_orth_weight: float = 0.0,
     ):
@@ -63,6 +64,7 @@ class TCVAEModel(VAEModel):
             normalize_kl=normalize_kl,
             decoder_type=decoder_type,
             decoder_gate_temperature=decoder_gate_temperature,
+            decoder_slot_routing=decoder_slot_routing,
             encoder_use_labels=encoder_use_labels,
             decoder_orth_weight=decoder_orth_weight,
         )

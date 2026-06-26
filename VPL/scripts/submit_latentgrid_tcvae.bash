@@ -10,13 +10,13 @@
 # All array tasks share one sweep folder under outputs/<env>/TCVAE/:
 #   <RUN_TIMESTAMP>_latentgrid_learned-prior=..._agg=..._norm-kl=..._anneal=.../
 #     subruns/
-#       <task>_ld=<L>_tc=.../
+#       <task>_nz=<L>_tc=.../
 #     evals_latentgrid/
 #   • Wall-clock (set once at submit on the login node):
 #       sbatch --export=ALL,RUN_TIMESTAMP=$(date +%Y%m%d_%H%M%S) scripts/submit_train_tcvae_grid.bash
 #   • If RUN_TIMESTAMP is unset but this is a Slurm array job, we default to arrayjob_<SLURM_ARRAY_JOB_ID>.
 #   • All tasks with the same RUN_TIMESTAMP share one W&B group (same tag as sweep folder).
-# Each task writes to .../<sweep_folder>/subruns/<array_task_id>_ld=<L>_tc=.../
+# Each task writes to .../<sweep_folder>/subruns/<array_task_id>_nz=<L>_tc=.../
 # variant.json records sweep_param_name=tc_weight, sweep_param_value=<tc> (latent_dim in variant).
 
 source ~/miniconda3/etc/profile.d/conda.sh
@@ -46,19 +46,24 @@ LATENT_DIMS=(
 )
 model_type=TCVAE
 sweep_folder_tag=latentgrid
+hidden_dim=128
 batch_size=512
-learned_prior=False
+set_size=16  # -1 = use full S from dataset; else truncate preference sets to this A
+
 loss_aggregation=mean  # sum | mean
 normalize_kl=True
-mi_weight=1.0
-dwkl_weight=1.0
+learned_prior=False
 use_annealing=False   # ramp tc_weight 0 -> target over n_epochs / annealer_cycles
 annealer_cycles=1
 annealer_type=cosine
+mi_weight=1.0
+dwkl_weight=1.0
 
+# * 2 goals
 # pref_dataset="sort_2goals_T=1_Q=5000"
 # pref_dataset="sort_2goals_T=10_Q=5000"
 # pref_dataset="sort_2goals_T=24_Q=5000"
+# * 4 goals
 pref_dataset="sort_4goals_T=1_Q=20000"
 # pref_dataset="sort_4goals_T=10_Q=20000"
 # pref_dataset="sort_4goals_T=25_Q=20000"
@@ -88,7 +93,7 @@ run_train_grid() {
   local subrun comment TS_ARGS=()
 
   subrun=$(printf "%0${subrun_pad}d" "${idx}")
-  comment="${subrun}_ld=${latent_dim}_tc=${tc_weight}"
+  comment="${subrun}_nz=${latent_dim}_tc=${tc_weight}"
 
   if [ -z "${RUN_TIMESTAMP:-}" ] && [ -n "${SLURM_ARRAY_JOB_ID:-}" ]; then
     RUN_TIMESTAMP="arrayjob_${SLURM_ARRAY_JOB_ID}"
@@ -104,6 +109,7 @@ run_train_grid() {
     --sweep_folder_tag="${sweep_folder_tag}" \
     --comment=${comment} \
     --latent_dim=${latent_dim} \
+    --hidden_dim=${hidden_dim} \
     --tc_weight=${tc_weight} \
     --mi_weight=${mi_weight} \
     --dwkl_weight=${dwkl_weight} \
@@ -115,6 +121,7 @@ run_train_grid() {
     --annealer_type=${annealer_type} \
     --seed=42 \
     --batch_size=${batch_size} \
+    --set_size=${set_size} \
     --n_epochs=500 \
     --eval_freq=50 \
     --save_freq=50 \
@@ -129,7 +136,7 @@ if [ "${1:-}" = "serial" ] || [ -n "${SERIAL_SWEEP:-}" ]; then
   export RUN_TIMESTAMP
   for idx in $(seq 0 $((grid_size - 1))); do
     read -r latent_dim tc_weight < <(grid_idx_to_ld_tc "${idx}")
-    echo "=== serial grid $((idx + 1))/${grid_size}: ld=${latent_dim} tc=${tc_weight} ==="
+    echo "=== serial grid $((idx + 1))/${grid_size}: nz=${latent_dim} tc=${tc_weight} ==="
     run_train_grid "${idx}" "${latent_dim}" "${tc_weight}"
   done
 else

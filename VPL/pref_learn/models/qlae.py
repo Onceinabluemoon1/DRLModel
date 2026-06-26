@@ -9,7 +9,11 @@ import einops as ei
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from pref_learn.models.nets import PairEncoder, make_reward_decoder, reward_decoder_column_orth_penalty
+from pref_learn.models.nets import (
+    PairEncoder,
+    make_reward_decoder,
+    reward_decoder_column_orth_penalty,
+)
 from pref_learn.models.quantizer import FSQQuantizer
 
 
@@ -36,6 +40,7 @@ class QLAE(nn.Module):
         loss_aggregation: str = "mean",
         decoder_type: str = "mlp",
         decoder_gate_temperature: float = 1.0,
+        decoder_slot_routing: str = "softmax",
         encoder_use_labels: bool = True,
         decoder_orth_weight: float = 0.0,
     ):
@@ -62,6 +67,7 @@ class QLAE(nn.Module):
             output_dim=1,
             decoder_input=decoder_input,
             gate_temperature=decoder_gate_temperature,
+            slot_routing=decoder_slot_routing,
         )
         self.decoder_type = str(decoder_type).lower()
         self.decoder_orth_weight = float(decoder_orth_weight)
@@ -214,6 +220,16 @@ class QLAE(nn.Module):
         self.biased_latents = biased_latents
 
 
+def _qlae_uses_weight_decay(*, name: str, model: nn.Module) -> bool:
+    if name.startswith("quantizer.") or name.endswith(".bias"):
+        return False
+    # if getattr(model, "decoder_type", None) == "slotlinear" and name.startswith(
+    #     "decoder.obs_trunk."
+    # ):
+    #     return False
+    return True
+
+
 def build_qlae_optimizer(
     model: nn.Module,
     *,
@@ -229,10 +245,10 @@ def build_qlae_optimizer(
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
-        if name.startswith("quantizer.") or name.endswith(".bias"):
-            no_decay_params.append(param)
-        else:
+        if _qlae_uses_weight_decay(name=name, model=model):
             decay_params.append(param)
+        else:
+            no_decay_params.append(param)
     return torch.optim.AdamW(
         [
             {"params": decay_params, "weight_decay": float(weight_decay)},

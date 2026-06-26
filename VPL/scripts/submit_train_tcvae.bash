@@ -6,7 +6,7 @@
 #SBATCH --mem=16G
 #SBATCH --output=/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/logs_slurm/train_tcvae/train_tcvae_%A_%a.out
 #
-# All array tasks share one parent folder under outputs/<env>/TCVAE/<RUN_TIMESTAMP>_ld=.../:
+# All array tasks share one parent folder under outputs/<env>/TCVAE/<RUN_TIMESTAMP>_nz=.../:
 #   subruns/
 #     <task>_tc=.../
 #   evals_sweep/
@@ -48,18 +48,22 @@ model_type=TCVAE
 latent_dim=32
 hidden_dim=128
 batch_size=512
-learned_prior=False
+set_size=16  # -1 = use full S from dataset; else truncate preference sets to this A
+
 loss_aggregation=mean  # sum | mean
 normalize_kl=True
-mi_weight=1.0
-dwkl_weight=1.0
-use_annealing=false   # ramp tc_weight 0 -> target over n_epochs / annealer_cycles
+learned_prior=False
+use_annealing=False   # ramp tc_weight 0 -> target over n_epochs / annealer_cycles
 annealer_cycles=1
 annealer_type=cosine
+mi_weight=1.0
+dwkl_weight=1.0
 
+# * 2 goals
 # pref_dataset="sort_2goals_T=1_Q=5000"
 # pref_dataset="sort_2goals_T=10_Q=5000"
 # pref_dataset="sort_2goals_T=24_Q=5000"
+# * 4 goals
 pref_dataset="sort_4goals_T=1_Q=20000"
 # pref_dataset="sort_4goals_T=10_Q=20000"
 # pref_dataset="sort_4goals_T=25_Q=20000"
@@ -101,6 +105,7 @@ run_train_tc() {
     --annealer_type=${annealer_type} \
     --seed=42 \
     --batch_size=${batch_size} \
+    --set_size=${set_size} \
     --n_epochs=500 \
     --eval_freq=50 \
     --save_freq=50 \

@@ -24,19 +24,23 @@ WEIGHT_DECAYS=(
 
 model_type=QLAE
 latent_dim=4
-num_quantized_values=6
 hidden_dim=128
 batch_size=256
-loss_aggregation=mean
 set_size=16  # -1 = use full S from dataset; else truncate preference sets to this A
 
-decoder_type=linear
-decoder_gate_temperature=1.0
-decoder_orth_weight=1.0
+loss_aggregation=mean
+num_quantized_values=6
 
+decoder_type=slotlinear
+decoder_gate_temperature=1.0  # linear / slotlinear softmax: lower ⇒ peakier α_j
+decoder_slot_routing=sum   # slotlinear only: softmax | sum (direct Σ r_j)
+decoder_orth_weight=0.0  # odinlinear only; no-op for linear / slotlinear
+
+# * 2 goals
 # pref_dataset="sort_2goals_T=1_Q=5000"
 # pref_dataset="sort_2goals_T=10_Q=5000"
 # pref_dataset="sort_2goals_T=24_Q=5000"
+# * 4 goals
 # pref_dataset="sort_4goals_T=1_Q=20000"
 # pref_dataset="sort_4goals_T=10_Q=20000"
 pref_dataset="sort_4goals_T=25_Q=20000"
@@ -74,6 +78,7 @@ run_train_qlae() {
     --set_size=${set_size} \
     --decoder_type="${decoder_type}" \
     --decoder_gate_temperature="${decoder_gate_temperature}" \
+    --decoder_slot_routing="${decoder_slot_routing}" \
     --decoder_orth_weight="${decoder_orth_weight}" \
     --n_epochs=500 \
     --eval_freq=50 \

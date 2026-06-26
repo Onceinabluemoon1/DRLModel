@@ -99,8 +99,9 @@ FLAGS_DEF = define_flags_with_default(
     # Decoder (VAE / TCVAE / QLAE); see make_reward_decoder in nets.py
     encoder_use_labels=True,  # pair encoder: concat y into pair_mlp input (q(z|s1,s2,y))
     decoder_type="mlp",  # mlp | linear | odinlinear | slotlinear
-    decoder_gate_temperature=1.0,  # linear / slotlinear: lower => sharper routing
-    decoder_orth_weight=0.0,  # >0: penalize off-diagonal W W^T on decoder readout layers
+    decoder_gate_temperature=1.0,  # linear / slotlinear softmax: lower => sharper routing
+    decoder_slot_routing="softmax",  # slotlinear only: softmax | sum
+    decoder_orth_weight=0.0,  # odinlinear only: ODIN row orth on z_head.weight
 )
 
 
@@ -166,9 +167,11 @@ def main(_):
     assert FLAGS.comment, "You must leave your comment for logging experiment."
     run_label = FLAGS.pref_dataset.strip() or FLAGS.env
     run_label = f"{run_label}_A={effective_set_size(flags_set_size=FLAGS.set_size, dataset_path=FLAGS.dataset_path)}"
-    ld_tag = f"z={FLAGS.latent_dim}"
+    nz_tag = f"nz={FLAGS.latent_dim}"
     learned_prior_tag = f"learnpz={_flag_bool(FLAGS.learned_prior)}"
-    run_tags = [ld_tag, learned_prior_tag]
+    run_tags = [nz_tag]
+    if FLAGS.model_type != "QLAE":
+        run_tags.append(learned_prior_tag)
     if "VAE" in FLAGS.model_type:
         run_tags.append(f"anneal={_flag_bool(FLAGS.use_annealing)}")
     if FLAGS.model_type == "QLAE":
@@ -176,7 +179,9 @@ def main(_):
         run_tags.append(f"wd={FLAGS.weight_decay}")
     dec_tag = f"dec={FLAGS.decoder_type}"
     run_tags.append(dec_tag)
-    if str(FLAGS.decoder_type).lower() in ("linear", "odinlinear"):
+    if str(FLAGS.decoder_type).lower() == "slotlinear":
+        run_tags.append(f"slotr={FLAGS.decoder_slot_routing}")
+    if str(FLAGS.decoder_type).lower() == "odinlinear":
         run_tags.append(f"orthw={FLAGS.decoder_orth_weight}")
     run_tags.append(f"encY={_flag_bool(FLAGS.encoder_use_labels)}")
     run_tag_str = "_".join(run_tags)
@@ -187,19 +192,22 @@ def main(_):
         else ""
     )
     if sweep_folder_tag_raw:
-        sweep_scope_tags = [
-            sweep_folder_tag,
-            learned_prior_tag,
-        ]
+        sweep_scope_tags = [sweep_folder_tag]
+        if FLAGS.model_type != "QLAE":
+            sweep_scope_tags.append(learned_prior_tag)
         if "VAE" in FLAGS.model_type:
             sweep_scope_tags.append(f"anneal={_flag_bool(FLAGS.use_annealing)}")
+        if FLAGS.model_type == "QLAE":
+            sweep_scope_tags.append(f"nv={FLAGS.num_quantized_values}")
         sweep_scope_tags.append(dec_tag)
-        if str(FLAGS.decoder_type).lower() in ("linear", "odinlinear"):
+        if str(FLAGS.decoder_type).lower() == "slotlinear":
+            sweep_scope_tags.append(f"slotr={FLAGS.decoder_slot_routing}")
+        if str(FLAGS.decoder_type).lower() == "odinlinear":
             sweep_scope_tags.append(f"orthw={FLAGS.decoder_orth_weight}")
         sweep_scope_tags.append(f"encY={_flag_bool(FLAGS.encoder_use_labels)}")
         sweep_scope_tag = "_".join(sweep_scope_tags)
     else:
-        sweep_scope_tag = f"ld={FLAGS.latent_dim}"
+        sweep_scope_tag = f"nz={FLAGS.latent_dim}"
     FLAGS.logging.experiment_id = (
         f"{run_label}_{FLAGS.model_type}_{run_tag_str}_{FLAGS.comment}"
     )
@@ -223,7 +231,7 @@ def main(_):
         run_subdir = f"{ts_for_dir}_{sweep_scope_tag}" if ts_for_dir else sweep_scope_tag
     else:
         run_subdir = (
-            f"{ts_for_dir}_ld={FLAGS.latent_dim}_learnpz={_flag_bool(FLAGS.learned_prior)}_"
+            f"{ts_for_dir}_nz={FLAGS.latent_dim}_learnpz={_flag_bool(FLAGS.learned_prior)}_"
             f"agg={FLAGS.loss_aggregation}{anneal_tag}"
         )
     sweep_root = (
@@ -313,6 +321,7 @@ def main(_):
             normalize_kl=FLAGS.normalize_kl,
             decoder_type=FLAGS.decoder_type,
             decoder_gate_temperature=FLAGS.decoder_gate_temperature,
+            decoder_slot_routing=FLAGS.decoder_slot_routing,
             encoder_use_labels=FLAGS.encoder_use_labels,
             decoder_orth_weight=FLAGS.decoder_orth_weight,
         )
@@ -348,6 +357,7 @@ def main(_):
             normalize_kl=FLAGS.normalize_kl,
             decoder_type=FLAGS.decoder_type,
             decoder_gate_temperature=FLAGS.decoder_gate_temperature,
+            decoder_slot_routing=FLAGS.decoder_slot_routing,
             encoder_use_labels=FLAGS.encoder_use_labels,
             decoder_orth_weight=FLAGS.decoder_orth_weight,
         )
@@ -367,6 +377,7 @@ def main(_):
             loss_aggregation=FLAGS.loss_aggregation,
             decoder_type=FLAGS.decoder_type,
             decoder_gate_temperature=FLAGS.decoder_gate_temperature,
+            decoder_slot_routing=FLAGS.decoder_slot_routing,
             encoder_use_labels=FLAGS.encoder_use_labels,
             decoder_orth_weight=FLAGS.decoder_orth_weight,
         )

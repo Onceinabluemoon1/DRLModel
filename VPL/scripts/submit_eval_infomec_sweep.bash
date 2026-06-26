@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=plot_infomec_sweep
 #SBATCH --gres=shard:12
-#SBATCH --array=0-1
+#SBATCH --array=0
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=16G
 #SBATCH --output=/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/logs_slurm/plot_infomec_sweep/plot_infomec_sweep_%A_%a.out
@@ -19,13 +19,7 @@ conda activate drl
 
 #* sweep roots (each must contain subruns/ with variant.json + checkpoint)
 SWEEP_DIRS=(
-  # "/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/outputs/sort_4goals_T=1_Q=20000_A=8/VAE/20260615_221512_ld=4_learned-prior=False_agg=mean_norm-kl=True_anneal=False"
-  # "/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/outputs/sort_4goals_T=1_Q=20000_A=4/VAE/20260615_221605_ld=4_learned-prior=False_agg=mean_norm-kl=True_anneal=False"
-  # "/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/outputs/sort_4goals_T=1_Q=20000_A=2/VAE/20260615_221610_ld=4_learned-prior=False_agg=mean_norm-kl=True_anneal=False"
-  # "/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/outputs/sort_4goals_T=10_Q=20000_A=16/VAE/20260618_234900_ld=4_learned-prior=False_agg=mean_norm-kl=True_anneal=False"
-  # "/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/outputs/sort_4goals_T=25_Q=20000_A=16/VAE/20260618_235512_ld=4_learned-prior=False_agg=mean_norm-kl=True_anneal=False"
-  "/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/outputs/sort_4goals_T=25_Q=20000_A=16/TCVAE/20260619_060855_ld=4_learned-prior=False_agg=mean_norm-kl=True_anneal=False"
-  "/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/outputs/sort_4goals_T=10_Q=20000_A=16/TCVAE/20260619_060851_ld=4_learned-prior=False_agg=mean_norm-kl=True_anneal=False"
+  "/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/outputs/sort_4goals_T=25_Q=20000_A=16/QLAE/20260619_214727_ld=4_learned-prior=False_agg=mean_norm-kl=True"
 )
 
 #* plot_infomec_sweep CLI (shared across array tasks)

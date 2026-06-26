@@ -1,22 +1,22 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=train_qlae_grid
 #SBATCH --gres=shard:12
-#SBATCH --array=0-41%7
+#SBATCH --array=0-47%8
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=16G
 #SBATCH --output=/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/logs_slurm/train_qlae_grid/train_qlae_grid_%A_%a.out
 #
 # Grid search over weight_decay × latent_dim.
 # All array tasks share one sweep folder under outputs/<env>/QLAE/:
-#   <RUN_TIMESTAMP>_latentgrid_learned-prior=..._agg=..._norm-kl=.../
+#   <RUN_TIMESTAMP>_lgrid_nv=..._dec=..._slotr=..._encY=.../
 #     subruns/
-#       <task>_ld=<L>_wd=.../
+#       <task>_nz=<L>_wd=.../
 #     evals_latentgrid/
 #   • Wall-clock (set once at submit on the login node):
 #       sbatch --export=ALL,RUN_TIMESTAMP=$(date +%Y%m%d_%H%M%S) scripts/submit_latentgrid_qlae.bash
 #   • If RUN_TIMESTAMP is unset but this is a Slurm array job, we default to arrayjob_<SLURM_ARRAY_JOB_ID>.
 #   • All tasks with the same RUN_TIMESTAMP share one W&B group (same tag as sweep folder).
-# Each task writes to .../<sweep_folder>/subruns/<array_task_id>_ld=<L>_wd=.../
+# Each task writes to .../<sweep_folder>/subruns/<array_task_id>_nz=<L>_wd=.../
 # variant.json records sweep_param_name=weight_decay, sweep_param_value=<wd> (latent_dim in variant).
 
 source ~/miniconda3/etc/profile.d/conda.sh
@@ -31,6 +31,7 @@ WEIGHT_DECAYS=(
     0.1
     1.0
     3.0
+    6.0
 )
 LATENT_DIMS=(
     2
@@ -45,20 +46,24 @@ model_type=QLAE
 sweep_folder_tag=latentgrid
 hidden_dim=128
 batch_size=256
-num_quantized_values=6
-loss_aggregation=mean
 set_size=16  # -1 = use full S from dataset; else truncate preference sets to this A
 
-decoder_type=linear
-decoder_gate_temperature=1.0
-decoder_orth_weight=0.0
+loss_aggregation=mean
+num_quantized_values=6
 
+decoder_type=slotlinear
+decoder_gate_temperature=1.0  # linear / slotlinear softmax: lower ⇒ peakier α_j
+decoder_slot_routing=sum   # slotlinear only: softmax | sum (direct Σ r_j)
+decoder_orth_weight=0.0  # odinlinear only; no-op for linear / slotlinear
+
+# * 2 goals
 # pref_dataset="sort_2goals_T=1_Q=5000"
 # pref_dataset="sort_2goals_T=10_Q=5000"
 # pref_dataset="sort_2goals_T=24_Q=5000"
-pref_dataset="sort_4goals_T=1_Q=20000"
+# * 4 goals
+# pref_dataset="sort_4goals_T=1_Q=20000"
 # pref_dataset="sort_4goals_T=10_Q=20000"
-# pref_dataset="sort_4goals_T=25_Q=20000"
+pref_dataset="sort_4goals_T=25_Q=20000"
 
 output_dir="/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/outputs"
 
@@ -84,7 +89,7 @@ run_train_grid() {
   local subrun comment TS_ARGS=()
 
   subrun=$(printf "%0${subrun_pad}d" "${idx}")
-  comment="${subrun}_ld=${latent_dim}_wd=${weight_decay}"
+  comment="${subrun}_nz=${latent_dim}_wd=${weight_decay}"
 
   if [ -z "${RUN_TIMESTAMP:-}" ] && [ -n "${SLURM_ARRAY_JOB_ID:-}" ]; then
     RUN_TIMESTAMP="arrayjob_${SLURM_ARRAY_JOB_ID}"
@@ -108,6 +113,7 @@ run_train_grid() {
     --set_size=${set_size} \
     --decoder_type="${decoder_type}" \
     --decoder_gate_temperature="${decoder_gate_temperature}" \
+    --decoder_slot_routing="${decoder_slot_routing}" \
     --decoder_orth_weight="${decoder_orth_weight}" \
     --n_epochs=500 \
     --eval_freq=50 \
@@ -123,7 +129,7 @@ if [ "${1:-}" = "serial" ] || [ -n "${SERIAL_SWEEP:-}" ]; then
   export RUN_TIMESTAMP
   for idx in $(seq 0 $((grid_size - 1))); do
     read -r latent_dim weight_decay < <(grid_idx_to_ld_wd "${idx}")
-    echo "=== serial grid $((idx + 1))/${grid_size}: ld=${latent_dim} wd=${weight_decay} ==="
+    echo "=== serial grid $((idx + 1))/${grid_size}: nz=${latent_dim} wd=${weight_decay} ==="
     run_train_grid "${idx}" "${latent_dim}" "${weight_decay}"
   done
 else
