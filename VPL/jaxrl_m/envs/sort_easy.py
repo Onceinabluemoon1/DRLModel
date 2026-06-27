@@ -3,6 +3,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import gym
+import h5py
 import numpy as np
 import pybullet as p
 import timeout_decorator
@@ -33,6 +34,70 @@ def _multimodal_goal_layout(*, n_possible_goals: int) -> list:
             ((0.68, 0.18, 0.0), quat),  # top right goal
         ]
     raise ValueError(f"n_possible_goals must be 1, 2, or 4; got {n_possible_goals!r}")
+
+
+# * SortEnv observation layout (PyBullet world frame: meters, table z≈0).
+N_ZONE_SLOTS = 4
+OBS_DIM = 7 + N_ZONE_SLOTS * 2  # ee(3) + obj(3) + grasp(1) + zone_xy(4,2)
+OBS_GRASP_IDX = 6
+OBS_ZONE_XY_SLICE = slice(7, OBS_DIM)
+
+
+def goal_zone_xy_world(
+    goal_poses: Sequence,
+    *,
+    n_slots: int = N_ZONE_SLOTS,
+) -> np.ndarray:
+    """
+    World-table XY of possible goal zones, shape ``(n_slots, 2)``.
+
+    Rows ``0..len(goal_poses)-1`` follow ``goal_poses`` order—the same ``((x,y,z), quat)``
+    tuples passed to Ravens ``add_object(..., zone_pose, "fixed")``. EE and object xyz in
+    :meth:`SortEnv.get_obs` come from the same PyBullet world frame
+    (``getLinkState`` / ``getBasePositionAndOrientation``). Unused rows are zero.
+    """
+    zone_xy = np.zeros((int(n_slots), 2), dtype=np.float64)
+    for i, gp in enumerate(goal_poses[:n_slots]):
+        pos = gp[0]
+        zone_xy[i, 0] = float(pos[0])
+        zone_xy[i, 1] = float(pos[1])
+    return zone_xy
+
+
+def goal_zone_xy_from_sim(
+    *,
+    goal_poses: Sequence,
+    fixed_obj_ids: Sequence[int],
+    n_slots: int = N_ZONE_SLOTS,
+    match_tol: float = 0.05,
+) -> np.ndarray:
+    """
+    World XY from PyBullet zone bodies, rows aligned to ``goal_poses`` order.
+
+    Falls back to :func:`goal_zone_xy_world` when no fixed bodies exist (offline-only).
+    """
+    sim_xys: list[np.ndarray] = []
+    for obj_id in fixed_obj_ids:
+        pos, _ = p.getBasePositionAndOrientation(int(obj_id))
+        sim_xys.append(np.asarray(pos[:2], dtype=np.float64))
+    if not sim_xys:
+        return goal_zone_xy_world(goal_poses=goal_poses, n_slots=n_slots)
+    sim_xy = np.stack(sim_xys, axis=0)  # (F, 2)
+    zone_xy = np.zeros((int(n_slots), 2), dtype=np.float64)
+    used = np.zeros(sim_xy.shape[0], dtype=bool)
+    for i, gp in enumerate(goal_poses[:n_slots]):
+        target = np.asarray(gp[0][:2], dtype=np.float64)
+        dists = np.linalg.norm(sim_xy - target[None, :], axis=-1)
+        dists[used] = np.inf
+        j = int(np.argmin(dists))
+        if float(dists[j]) > match_tol:
+            raise RuntimeError(
+                f"No sim zone within {match_tol} of goal_poses[{i}] xy {target}; "
+                f"nearest dist={float(np.min(dists)):.4f}, sim_xys={sim_xy}"
+            )
+        zone_xy[i] = sim_xy[j]
+        used[j] = True
+    return zone_xy
 
 
 class SortEnv(OfflineEnv, gym.Env):
@@ -103,8 +168,8 @@ class SortEnv(OfflineEnv, gym.Env):
         self.observation_space = gym.spaces.Box(
             low=-np.inf,
             high=np.inf,
-            shape=(7,),  # 15,)
-        )  # TODO: setup observation space self.env.observation_space
+            shape=(OBS_DIM,),
+        )
 
         self._max_episode_steps = 25  # kwargs.get("max_episode_steps", 300)
         self.relabel_offline_reward = True
@@ -112,11 +177,11 @@ class SortEnv(OfflineEnv, gym.Env):
 
         # * Offline stats: prefer dataset keys if ``sort.hdf5`` exists (else oracle bounds below).
         if dataset_fp.exists():
-            dataset = self.get_dataset()
-            self.action_stats = {
-                "min": dataset["action_min"],
-                "max": dataset["action_max"],
-            }
+            with h5py.File(dataset_fp, "r") as dataset_file:
+                self.action_stats = {
+                    "min": np.asarray(dataset_file["action_min"][:], dtype=np.float32),
+                    "max": np.asarray(dataset_file["action_max"][:], dtype=np.float32),
+                }
         else:
             # Needed for collecting trajectories before sort.hdf5 exists.
             # These are workspace/action bounds used to normalize oracle actions.
@@ -147,6 +212,28 @@ class SortEnv(OfflineEnv, gym.Env):
             )
         return self.goal_poses[mode]
 
+    def goal_zone_xy(self) -> np.ndarray:
+        """World XY of all possible goal zones, shape ``(N_ZONE_SLOTS, 2)``."""
+        return goal_zone_xy_from_sim(
+            goal_poses=self.goal_poses,
+            fixed_obj_ids=self.env.obj_ids.get("fixed", []),
+            n_slots=N_ZONE_SLOTS,
+        )
+
+    def _verify_zone_xy_matches_sim(self, *, tol: float = 0.02) -> None:
+        """Assert sim zone bodies align with ``goal_poses`` XY (URDF origin may offset ~1cm)."""
+        expected = goal_zone_xy_world(goal_poses=self.goal_poses, n_slots=N_ZONE_SLOTS)[
+            : len(self.goal_poses)
+        ]
+        got = self.goal_zone_xy()[: len(self.goal_poses)]
+        dists = np.linalg.norm(got - expected, axis=-1)
+        if np.any(dists > tol):
+            bad = int(np.argmax(dists))
+            raise AssertionError(
+                f"goal_poses[{bad}] xy {expected[bad]} vs sim-matched zone {got[bad]} "
+                f"dist={float(dists[bad]):.4f} > tol={tol}"
+            )
+
     def get_dataset(self, h5path=None, path=None):
         """
         Load a D4RL-style HDF5 dict (see ``d4rl.offline_env.OfflineEnv.get_dataset``).
@@ -160,17 +247,19 @@ class SortEnv(OfflineEnv, gym.Env):
 
     def get_obs(self):
         ee_pose = self.env.get_ee_pose()  # ((x, y, z), (qx, qy, qz, qw))
-        ee_xyz = np.array(ee_pose[0])  # (x, y, z)
+        ee_xyz = np.asarray(ee_pose[0], dtype=np.float64)  # world xyz
 
         block_id = getattr(self.task, "block_id", None)
         assert block_id is not None, "task did not expose a block_id after reset()."
         block_xyz, _ = p.getBasePositionAndOrientation(block_id)
-        block_xyz = np.array(block_xyz)  # (x, y, z)
+        block_xyz = np.asarray(block_xyz, dtype=np.float64)  # world xyz
 
-        grasp = np.array([self.env.ee.check_grasp()])  # (1,) bool
+        grasp = np.asarray([self.env.ee.check_grasp()], dtype=np.float64)  # (1,)
+        zone_xy_flat = self.goal_zone_xy().reshape(-1)  # (8,) world xy, goal_poses order
 
-        obs = np.concatenate([ee_xyz, block_xyz, grasp]).flatten()
-        return obs  # (7,), (ee x,y,z, obj x,y,z, grasp)
+        obs = np.concatenate([ee_xyz, block_xyz, grasp, zone_xy_flat]).astype(np.float64).flatten()
+        assert obs.shape == (OBS_DIM,), obs.shape
+        return obs  # ee xyz, obj xyz, grasp, zone0_xy..zone3_xy (world frame)
 
     def array2dict(self, action):
         """
@@ -206,7 +295,7 @@ class SortEnv(OfflineEnv, gym.Env):
     def compute_reward(self, state, mode: int):
         """
         args:
-            state: (A, T, O), where O = [ee_x, ee_y, ee_z, obj_x, obj_y, obj_z, grasp]
+            state: (A, T, O), O = ee(3)+obj(3)+grasp(1)+zone_xy(8) world frame
             mode: int, decides which goal pose to use
         returns:
             reward: (A, T)
@@ -219,7 +308,7 @@ class SortEnv(OfflineEnv, gym.Env):
         eef_dist = np.linalg.norm(eef_xyz - obj_xyz, axis=-1)  # (A, T)
         goal_dist = np.linalg.norm(obj_xyz[:, :, :2] - goal_xyz[:2], axis=-1)  # (A, T)
         within = goal_dist < 0.05  # (A, T)
-        grasped = state[:, :, -1]  # (A, T)
+        grasped = state[:, :, OBS_GRASP_IDX]  # (A, T)
 
         # Piecewise dense shaping (scaled by ./100 below):
         #   within_goal & ~grasped: strong bonus at goal XY
@@ -237,7 +326,7 @@ class SortEnv(OfflineEnv, gym.Env):
     def compute_sparse_reward(self, obs):
         """
         args:
-            obs: (7,), where obs = [ee_x, ee_y, ee_z, obj_x, obj_y, obj_z, grasp]
+            obs: (OBS_DIM,), ee/obj/grasp/zone_xy in PyBullet world frame
         returns:
             reward: float
         """
@@ -252,6 +341,8 @@ class SortEnv(OfflineEnv, gym.Env):
     def reset(self):
         self.env.reset()
         self.elasped_steps = 0
+        if self.debug:
+            self._verify_zone_xy_matches_sim()
         return self.get_obs()
 
     @timeout_decorator.timeout(2)
@@ -268,7 +359,9 @@ class SortEnv(OfflineEnv, gym.Env):
         info = {}
         goal_pos = self.curr_goal_pose[0][:2]
         dist = np.linalg.norm(goal_pos - obs[3:5])
-        info["debug_string"] = f"{dist:.3f}, {action[-1]:.3f}, is grasped: {obs[-1]}"
+        info["debug_string"] = (
+            f"{dist:.3f}, {action[-1]:.3f}, is grasped: {obs[OBS_GRASP_IDX]}"
+        )
         info["dense_reward"] = dense_reward
         info["sparse_reward"] = sparse_reward
         if done:
@@ -414,7 +507,10 @@ class SortPreferenceFourGoals:
     Table view (``collect_trajs`` plot — rgb front camera: bottom ≈ larger world x, right = +y):
         * ``pref_vertical`` (world x, table bottom↔top): 0 = ignore; 1 = top (high x); 2 = bottom (low x).
         * ``pref_horizontal`` (world y, table left↔right): 0 = ignore; 1 = left (low y); 2 = right (high y).
-    Uses 4-corner workspace span for anchors (covers 2-stripe layouts too).
+
+    ``goal_poses`` order matches :func:`_multimodal_goal_layout`: 0=BL, 1=BR, 2=TL, 3=TR.
+    Axis prefs target **both** corners on that side (e.g. ``left`` → BL or TL); corner prefs target one corner.
+    ``pref_dist`` is min Euclidean XY distance from the object to any target corner.
     """
 
     SOURCES_NAMES = ["pref_vertical", "pref_horizontal"]
@@ -449,20 +545,65 @@ class SortPreferenceFourGoals:
         self.goal_poses = gp
         self.env_reward_fn = env_reward_fn
 
+    # @staticmethod
+    # def _annot_pref_edge(
+    #     *, pref: int, low: float, high: float, vertical_axis: bool
+    # ) -> float | None:
+    #     """
+    #     pref ``1``/``2`` → ``low``/``high`` on horizontal world ``y``;
+    #     XOR swap for world ``x`` (``vertical_axis=True``: ``1`` = top/high ``x``, ``2`` = bottom/low ``x``).
+    #     """
+    #     if pref == 0:
+    #         return None
+    #     if pref not in (1, 2):
+    #         raise ValueError(f"preference code must be 0, 1, or 2; got {pref!r}")
+    #     use_high = (pref == 2) ^ vertical_axis
+    #     return float(high if use_high else low)
+
     @staticmethod
-    def _annot_pref_edge(
-        *, pref: int, low: float, high: float, vertical_axis: bool
-    ) -> float | None:
-        """
-        pref ``1``/``2`` → ``low``/``high`` on horizontal world ``y``;
-        XOR swap for world ``x`` (``vertical_axis=True``: ``1`` = top/high ``x``, ``2`` = bottom/low ``x``).
-        """
-        if pref == 0:
-            return None
-        if pref not in (1, 2):
-            raise ValueError(f"preference code must be 0, 1, or 2; got {pref!r}")
-        use_high = (pref == 2) ^ vertical_axis
-        return float(high if use_high else low)
+    def _target_corner_indices(*, spec: dict) -> list[int]:
+        """Indices into ``goal_poses`` (0=BL, 1=BR, 2=TL, 3=TR) for this annotator."""
+        pv = int(spec["pref_vertical"])
+        ph = int(spec["pref_horizontal"])
+        key = (pv, ph)
+        corner_map: dict[tuple[int, int], list[int]] = {
+            (0, 1): [0, 2],  # left: BL, TL
+            (0, 2): [1, 3],  # right: BR, TR
+            (1, 0): [2, 3],  # top: TL, TR
+            (2, 0): [0, 1],  # bottom: BL, BR
+            (1, 1): [2],  # top_left
+            (1, 2): [3],  # top_right
+            (2, 1): [0],  # bottom_left
+            (2, 2): [1],  # bottom_right
+        }
+        if key not in corner_map:
+            raise RuntimeError(
+                f"Annotator {spec.get('name', key)!r} has "
+                f"pref_vertical=pref_horizontal=0 (no target corners)."
+            )
+        return corner_map[key]
+
+    def _target_corner_xy(self, *, spec: dict) -> np.ndarray:
+        """World XY of target corners, shape ``(K, 2)``."""
+        indices = self._target_corner_indices(spec=spec)
+        return np.array(
+            [[float(self.goal_poses[i][0][0]), float(self.goal_poses[i][0][1])] for i in indices],
+            dtype=np.float64,
+        )
+
+    def _pref_dist_obj_xy(
+        self,
+        *,
+        obj_x: np.ndarray,
+        obj_y: np.ndarray,
+        spec: dict,
+    ) -> np.ndarray:
+        """Min Euclidean XY distance from object to any target corner; shape matches ``obj_x``."""
+        corner_xy = self._target_corner_xy(spec=spec)  # (K, 2)
+        obj_xy = np.stack([obj_x, obj_y], axis=-1)  # (..., 2)
+        diff = obj_xy[..., None, :] - corner_xy.reshape((1,) * (obj_xy.ndim - 1) + (corner_xy.shape[0], 2))
+        dist = np.linalg.norm(diff, axis=-1)  # (..., K)
+        return dist.min(axis=-1)
 
     @property
     def n_sources(self) -> int:
@@ -519,11 +660,11 @@ class SortPreferenceFourGoals:
         """
         Preference-only dense surrogate for relabeling (not the task MDP reward).
 
-        Mirrors :meth:`SortEnv.compute_reward` piecewise shaping; ``pref_dist`` replaces goal distance—
-        Euclidean distance in world XY from the object to the annotator anchor (vertical and/or horizontal targets).
+        Mirrors :meth:`SortEnv.compute_reward` piecewise shaping; ``pref_dist`` is min XY distance
+        from the object to any target corner for this annotator.
 
         args:
-            state: (A, T, O), where O = [ee_x, ee_y, ee_z, obj_x, obj_y, obj_z, grasp]
+            state: (A, T, O), O = ee(3)+obj(3)+grasp(1)+zone_xy(8) world frame
             annotator_id: index into ``ANNOTATOR_SPECS``
         returns:
             reward: (A, T)
@@ -531,32 +672,11 @@ class SortPreferenceFourGoals:
         spec = self.pref_spec_for_mode(annotator_id=annotator_id, as_array=False)
         eef_xyz = state[:, :, 0:3]  # (A, T, 3)
         obj_xyz = state[:, :, 3:6]  # (A, T, 3)
-        grasped = state[:, :, -1]  # (A, T)
+        grasped = state[:, :, OBS_GRASP_IDX]  # (A, T)
         obj_x = obj_xyz[:, :, 0]
         obj_y = obj_xyz[:, :, 1]
 
-        x_lo, x_hi = self.ANNOT_X_LIM
-        y_lo, y_hi = self.ANNOT_Y_LIM
-
-        t_vert = self._annot_pref_edge(
-            pref=int(spec["pref_vertical"]), low=x_lo, high=x_hi, vertical_axis=True
-        )
-        t_horiz = self._annot_pref_edge(
-            pref=int(spec["pref_horizontal"]), low=y_lo, high=y_hi, vertical_axis=False
-        )
-
-        sq_terms: list[np.ndarray] = []
-        if t_vert is not None:
-            sq_terms.append((obj_x - float(t_vert)) ** 2)
-        if t_horiz is not None:
-            sq_terms.append((obj_y - float(t_horiz)) ** 2)
-        if not sq_terms:
-            raise RuntimeError(
-                f"Annotator {annotator_id} ({spec['name']}) has "
-                f"pref_vertical=pref_horizontal=0 (no active axis)."
-            )
-
-        pref_dist = np.sqrt(sum(sq_terms))  # (A, T), meters on active axes only
+        pref_dist = self._pref_dist_obj_xy(obj_x=obj_x, obj_y=obj_y, spec=spec)  # (A, T)
 
         eef_dist = np.linalg.norm(eef_xyz - obj_xyz, axis=-1)  # (A, T)
         within = pref_dist < 0.05  # (A, T), same band as ``compute_reward`` goal_xy
@@ -580,14 +700,14 @@ class SortPreferenceFourGoals:
         """
         Preference sparse surrogate for relabeling (not the task MDP reward).
 
-        Uses observation grasp channel ``obs[-1]`` (released iff zero), unlike :meth:`SortEnv.compute_sparse_reward`
+        Uses observation grasp channel ``obs[OBS_GRASP_IDX]`` (released iff zero), unlike :meth:`SortEnv.compute_sparse_reward`
         which queries the simulator—so offline HDF5 segments stay consistent without a live ``env``.
 
         args:
-            obs: (7,), where obs = [ee_x, ee_y, ee_z, obj_x, obj_y, obj_z, grasp]
+            obs: (OBS_DIM,), ee/obj/grasp/zone_xy in PyBullet world frame
             annotator_id: index into ``ANNOTATOR_SPECS``
         returns:
-            reward: float, 1.0 iff preferred XY band, low object height, and released.
+            reward: float, 1.0 iff near a target corner, low object height, and released.
         """
         spec = self.pref_spec_for_mode(annotator_id=annotator_id, as_array=False)
         obj_xyz = obs[3:6]  # (3,)
@@ -595,29 +715,16 @@ class SortPreferenceFourGoals:
         obj_y = float(obj_xyz[1])
         obj_z = float(obj_xyz[2])
 
-        x_lo, x_hi = self.ANNOT_X_LIM
-        y_lo, y_hi = self.ANNOT_Y_LIM
-
-        t_vert = self._annot_pref_edge(
-            pref=int(spec["pref_vertical"]), low=x_lo, high=x_hi, vertical_axis=True
-        )
-        t_horiz = self._annot_pref_edge(
-            pref=int(spec["pref_horizontal"]), low=y_lo, high=y_hi, vertical_axis=False
-        )
-
-        sq_terms: list[float] = []
-        if t_vert is not None:
-            sq_terms.append((obj_x - float(t_vert)) ** 2)
-        if t_horiz is not None:
-            sq_terms.append((obj_y - float(t_horiz)) ** 2)
-        if not sq_terms:
-            raise RuntimeError(
-                f"Annotator {annotator_id} ({spec['name']}) has "
-                f"pref_vertical=pref_horizontal=0 (no active axis)."
+        pref_dist = float(
+            np.min(
+                np.linalg.norm(
+                    np.array([obj_x, obj_y], dtype=np.float64)[None, :]
+                    - self._target_corner_xy(spec=spec),
+                    axis=-1,
+                )
             )
-
-        pref_dist = float(np.sqrt(sum(sq_terms)))
-        grasped = float(obs[-1]) != 0.0
+        )
+        grasped = float(obs[OBS_GRASP_IDX]) != 0.0
         return float(pref_dist < 0.05 and obj_z < 0.03 and not grasped)
 
 

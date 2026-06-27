@@ -18,6 +18,7 @@ from tqdm import tqdm
 
 from pref_learn.utils.data_utils import get_labels, sample_pref_from_dataset
 from pref_learn.utils.plot_utils import (
+    observation_xy_limits,
     plot_observation_rewards,
     plot_observation_rewards_by_annotator_mode,
 )
@@ -198,55 +199,96 @@ def main(_):
         print(f"  pref mode {int(m):>4}: count {int(c):>6} ({pct:5.1f}%)")
     print(f"  total:       {n_tot:>6}")
 
-    # * Observation–reward scatter: EE (x,y) axes match SortEnv observations only.
+    # * Observation–reward scatter: EE and object (x,y) for SortEnv obs layout.
     if isinstance(raw_env, SortEnv):
-        # plot all modes pooled
         qst_line = f"(Q={FLAGS.num_query}, S={FLAGS.set_size}, T={FLAGS.segment_len})"
         obs_plot = rearrange(np.stack(obs, axis=0), "Q S T O -> (Q S T) O")
         reward_plot = rearrange(np.stack(rewards, axis=0), "Q S T -> (Q S T) 1")
-        fig = plot_observation_rewards(
-            obs_plot,
-            reward_plot,
-            suptitle=("Annotator reward vs EE (x,y), all modes pooled\n" + qst_line),
-        )
         png_path = f"{relabelled_path.replace('pkl', 'png')}"
-        fig.savefig(png_path)
+        p_png = Path(png_path)
+        ee_xlim, ee_ylim = observation_xy_limits(obs=obs_plot, x_idx=0, y_idx=1)
 
-        # plot by annotator mode
-        if n_modes > 0 and hasattr(annot, "ANNOTATOR_SPECS"):
-            O_dim = int(obs[0].shape[-1])
-            mode_titles = [str(spec["name"]) for spec in annot.ANNOTATOR_SPECS]
-            assert len(mode_titles) == n_modes, (
-                f"ANNOTATOR_SPECS length {len(mode_titles)} vs n_pref_modes {n_modes}"
-            )
-            per_mode_obs_arr: list[np.ndarray] = []
-            per_mode_r_arr: list[np.ndarray] = []
-            for m in range(n_modes):
-                if not per_mode_obs[m]:
-                    per_mode_obs_arr.append(np.empty((0, O_dim), dtype=np.float64))
-                    per_mode_r_arr.append(np.empty((0, 1), dtype=np.float64))
-                else:
-                    per_mode_obs_arr.append(
-                        rearrange(
-                            np.stack(per_mode_obs[m], axis=0), "q s t o -> (q s t) o"
-                        )
-                    )
-                    per_mode_r_arr.append(
-                        rearrange(np.stack(per_mode_rew[m], axis=0), "q s t -> (q s t) 1")
-                    )
-            fig_modes = plot_observation_rewards_by_annotator_mode(
-                per_mode_obs_arr,
-                per_mode_r_arr,
-                mode_titles=mode_titles,
-                suptitle=(
+        reward_planes = (
+            dict(
+                suffix="_ee",
+                x_idx=0,
+                y_idx=1,
+                axis_xlabel="EE x",
+                axis_ylabel="EE y",
+                pooled_title="Annotator reward vs EE (x,y), all modes pooled",
+                mode_title=(
                     "Annotator reward vs EE (x,y): one subplot per sampled "
-                    "(observation,reward) by annotator mode\n" + qst_line
+                    "(observation,reward) by annotator mode"
                 ),
+            ),
+            dict(
+                suffix="_obj",
+                x_idx=3,
+                y_idx=4,
+                axis_xlabel="obj x",
+                axis_ylabel="obj y",
+                pooled_title="Annotator reward vs object (x,y), all modes pooled",
+                mode_title=(
+                    "Annotator reward vs object (x,y): one subplot per sampled "
+                    "(observation,reward) by annotator mode"
+                ),
+            ),
+        )
+
+        for plane in reward_planes:
+            fig = plot_observation_rewards(
+                obs_plot,
+                reward_plot,
+                suptitle=(plane["pooled_title"] + "\n" + qst_line),
+                x_idx=int(plane["x_idx"]),
+                y_idx=int(plane["y_idx"]),
+                axis_xlabel=str(plane["axis_xlabel"]),
+                axis_ylabel=str(plane["axis_ylabel"]),
+                xlim=ee_xlim,
+                ylim=ee_ylim,
             )
-            p_png = Path(png_path)
-            fig_modes.savefig(
-                p_png.with_name(f"{p_png.stem}_by_annot_mode{p_png.suffix}")
-            )
+            fig.savefig(p_png.with_name(f"{p_png.stem}{plane['suffix']}{p_png.suffix}"))
+
+            if n_modes > 0 and hasattr(annot, "ANNOTATOR_SPECS"):
+                O_dim = int(obs[0].shape[-1])
+                mode_titles = [str(spec["name"]) for spec in annot.ANNOTATOR_SPECS]
+                assert len(mode_titles) == n_modes, (
+                    f"ANNOTATOR_SPECS length {len(mode_titles)} vs n_pref_modes {n_modes}"
+                )
+                per_mode_obs_arr: list[np.ndarray] = []
+                per_mode_r_arr: list[np.ndarray] = []
+                for m in range(n_modes):
+                    if not per_mode_obs[m]:
+                        per_mode_obs_arr.append(np.empty((0, O_dim), dtype=np.float64))
+                        per_mode_r_arr.append(np.empty((0, 1), dtype=np.float64))
+                    else:
+                        per_mode_obs_arr.append(
+                            rearrange(
+                                np.stack(per_mode_obs[m], axis=0), "q s t o -> (q s t) o"
+                            )
+                        )
+                        per_mode_r_arr.append(
+                            rearrange(
+                                np.stack(per_mode_rew[m], axis=0), "q s t -> (q s t) 1"
+                            )
+                        )
+                fig_modes = plot_observation_rewards_by_annotator_mode(
+                    per_mode_obs_arr,
+                    per_mode_r_arr,
+                    mode_titles=mode_titles,
+                    suptitle=(plane["mode_title"] + "\n" + qst_line),
+                    x_idx=int(plane["x_idx"]),
+                    y_idx=int(plane["y_idx"]),
+                    axis_xlabel=str(plane["axis_xlabel"]),
+                    axis_ylabel=str(plane["axis_ylabel"]),
+                    xlim=ee_xlim,
+                    ylim=ee_ylim,
+                )
+                fig_modes.savefig(
+                    p_png.with_name(
+                        f"{p_png.stem}_by_annot_mode{plane['suffix']}{p_png.suffix}"
+                    )
+                )
 
 
 if __name__ == "__main__":

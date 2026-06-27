@@ -29,6 +29,8 @@ def plot_reward(
     colorbar: bool = True,
     xlabel: str | None = None,
     ylabel: str | None = None,
+    xlim: tuple[float, float] | None = None,
+    ylim: tuple[float, float] | None = None,
 ):
     # if not no_norm:
     #     r = (r - r.min()) / (r.max() - r.min())
@@ -52,10 +54,34 @@ def plot_reward(
         ax.set_xlabel(xlabel)
     if ylabel is not None:
         ax.set_ylabel(ylabel)
+    if xlim is not None:
+        ax.set_xlim(xlim)
+    if ylim is not None:
+        ax.set_ylim(ylim)
     if colorbar:
         cb = plt.colorbar(sc, ax=ax)
         cb.set_label("r(s)")
     return sc
+
+
+def observation_xy_limits(
+    obs: np.ndarray,
+    *,
+    x_idx: int,
+    y_idx: int,
+    margin_frac: float = 0.02,
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    """Axis limits for scatter planes; ``margin_frac`` is relative padding per span."""
+    ob = np.asarray(obs, dtype=np.float64)
+    if ob.size == 0:
+        return (0.0, 1.0), (0.0, 1.0)
+    x = ob[:, int(x_idx)]
+    y = ob[:, int(y_idx)]
+    x_min, x_max = float(np.min(x)), float(np.max(x))
+    y_min, y_max = float(np.min(y)), float(np.max(y))
+    x_pad = margin_frac * max(x_max - x_min, 1e-6)
+    y_pad = margin_frac * max(y_max - y_min, 1e-6)
+    return (x_min - x_pad, x_max + x_pad), (y_min - y_pad, y_max + y_pad)
 
 
 def plot_observation_rewards_by_annotator_mode(
@@ -76,6 +102,8 @@ def plot_observation_rewards_by_annotator_mode(
     y_idx: int = 1,
     axis_xlabel: str = "EE x",
     axis_ylabel: str = "EE y",
+    xlim: tuple[float, float] | None = None,
+    ylim: tuple[float, float] | None = None,
     title_fontsize: int = 10,
 ):
     """
@@ -161,6 +189,10 @@ def plot_observation_rewards_by_annotator_mode(
             )
             ax.set_xticks([])
             ax.set_yticks([])
+            if xlim is not None:
+                ax.set_xlim(xlim)
+            if ylim is not None:
+                ax.set_ylim(ylim)
             continue
         plot_reward(
             ax,
@@ -179,6 +211,8 @@ def plot_observation_rewards_by_annotator_mode(
             colorbar=False,
             xlabel=axis_xlabel,
             ylabel=axis_ylabel,
+            xlim=xlim,
+            ylim=ylim,
         )
 
     for k in range(n_modes, len(flat_axes)):
@@ -220,9 +254,27 @@ def plot_observation_rewards(
     no_norm=False,
     *,
     suptitle: str | None = None,
+    x_idx: int = 0,
+    y_idx: int = 1,
+    axis_xlabel: str = "EE x",
+    axis_ylabel: str = "EE y",
+    xlim: tuple[float, float] | None = None,
+    ylim: tuple[float, float] | None = None,
 ):
     fig, ax = plt.subplots()
-    plot_reward(ax, obs, r, no_norm=no_norm, reward_size_threshold=0.5)
+    plot_reward(
+        ax,
+        obs,
+        r,
+        no_norm=no_norm,
+        reward_size_threshold=0.5,
+        x_idx=x_idx,
+        y_idx=y_idx,
+        xlabel=axis_xlabel,
+        ylabel=axis_ylabel,
+        xlim=xlim,
+        ylim=ylim,
+    )
     if suptitle:
         fig.subplots_adjust(top=0.78)
         fig.suptitle(suptitle, fontsize=11, y=0.94)
