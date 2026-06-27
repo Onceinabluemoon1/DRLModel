@@ -234,16 +234,58 @@ class SortEnv(OfflineEnv, gym.Env):
                 f"dist={float(dists[bad]):.4f} > tol={tol}"
             )
 
+    def append_zone_xy_to_obs(self, obs: np.ndarray) -> np.ndarray:
+        """Pad legacy ``(..., 7)`` trajectories with static zone xy from ``goal_poses``."""
+        ob = np.asarray(obs, dtype=np.float64)
+        if ob.shape[-1] == OBS_DIM:
+            return ob
+        if ob.shape[-1] != 7:
+            raise ValueError(
+                f"Expected obs last dim 7 or {OBS_DIM}; got {ob.shape[-1]} with shape {ob.shape}"
+            )
+        zone_flat = goal_zone_xy_world(
+            goal_poses=self.goal_poses,
+            n_slots=N_ZONE_SLOTS,
+        ).reshape(-1)  # (8,)
+        pad = np.broadcast_to(zone_flat, ob.shape[:-1] + (zone_flat.shape[0],))
+        return np.concatenate([ob, np.asarray(pad, dtype=np.float64)], axis=-1)
+
     def get_dataset(self, h5path=None, path=None):
         """
         Load a D4RL-style HDF5 dict (see ``d4rl.offline_env.OfflineEnv.get_dataset``).
+
+        Legacy rollouts stored ``(..., 7)`` observations are padded with static zone xy
+        from ``goal_poses`` so they match :data:`OBS_DIM`.
 
         ``d4rl.qlearning_dataset(env, h5path=...)`` forwards ``h5path`` here; ``path`` is
         an alias. Default is ``self.dataset_path`` (bundled ``sort.hdf5`` unless overridden
         via env kw ``dataset_path=`` in :meth:`__init__`).
         """
         p = h5path or path or self.dataset_path
-        return super().get_dataset(h5path=p)
+        with h5py.File(p, "r") as dataset_file:
+            obs_shape = tuple(dataset_file["observations"].shape[1:])
+        if obs_shape == (OBS_DIM,):
+            return super().get_dataset(h5path=p)
+        if obs_shape != (7,):
+            raise AssertionError(
+                f"Observation shape does not match env: {obs_shape} vs (7,) or ({OBS_DIM},)"
+            )
+        old_obs_space = self.observation_space
+        self.observation_space = gym.spaces.Box(
+            low=-np.inf,
+            high=np.inf,
+            shape=(7,),
+        )
+        try:
+            data_dict = super().get_dataset(h5path=p)
+        finally:
+            self.observation_space = old_obs_space
+        data_dict["observations"] = self.append_zone_xy_to_obs(data_dict["observations"])
+        if "next_observations" in data_dict:
+            data_dict["next_observations"] = self.append_zone_xy_to_obs(
+                data_dict["next_observations"]
+            )
+        return data_dict
 
     def get_obs(self):
         ee_pose = self.env.get_ee_pose()  # ((x, y, z), (qx, qy, qz, qw))
