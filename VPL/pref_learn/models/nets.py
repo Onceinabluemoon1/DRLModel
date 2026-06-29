@@ -379,6 +379,76 @@ class EllenLinearDecoder(nn.Module):
         return r_j.sum(dim=-1, keepdim=True)  # (B,A,T,1)
 
 
+class OffsetLinearDecoder(nn.Module):
+    """
+    Shared obs trunk, ``nz`` untied offset + scale readouts per latent dim.
+
+    ``h = obs_trunk(obs)`` once; head ``i``: ``r_i = b_i(h) + a_i(h) * z_i``;
+    ``r(s, z) = sum_i r_i``. ``a_i``, ``b_i`` are small MLPs on ``h`` only.
+
+    Input: ``(B, A, T, O+Z)``; output: ``(B, A, T, 1)``.
+    """
+
+    def __init__(
+        self,
+        obs_dim: int,
+        latent_dim: int,
+        hidden_dim: int,
+        output_dim: int = 1,
+        *,
+        gate_temperature: float = 1.0,
+        slot_routing: str = "softmax",
+    ):
+        del gate_temperature, slot_routing, output_dim  # API parity with other decoders
+        super().__init__()
+        self.obs_dim = int(obs_dim)
+        self.latent_dim = int(latent_dim)
+        H = int(hidden_dim)
+
+        self.obs_trunk = nn.Sequential(
+            nn.Linear(obs_dim, H),
+            nn.LeakyReLU(0.2),
+            nn.Linear(H, H),
+            nn.LeakyReLU(0.2),
+        )
+        self.a_head = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.Linear(H, H),
+                    nn.LeakyReLU(0.2),
+                    nn.Linear(H, 1),
+                )
+                for _ in range(self.latent_dim)
+            ]
+        )
+        self.b_head = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.Linear(H, H),
+                    nn.LeakyReLU(0.2),
+                    nn.Linear(H, 1),
+                )
+                for _ in range(self.latent_dim)
+            ]
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        obs, z = split_obs_z(x=x, obs_dim=self.obs_dim)  # (B,A,T,O), (B,A,T,Z)
+
+        # * obs trunk (once)
+        h = self.obs_trunk(obs)  # (B,A,T,H)
+
+        r_heads: list[torch.Tensor] = []
+        for i in range(self.latent_dim):
+            a_i = self.a_head[i](h).squeeze(-1)  # (B,A,T)
+            b_i = self.b_head[i](h).squeeze(-1)  # (B,A,T)
+            r_i = b_i + a_i * z[..., i]  # (B,A,T)
+            r_heads.append(r_i)  # (B,A,T)
+
+        r_j = torch.stack(r_heads, dim=-1)  # (B,A,T,Z)
+        return r_j.sum(dim=-1, keepdim=True)  # (B,A,T,1)
+
+
 def reward_decoder_column_orth_penalty(*, decoder: nn.Module) -> torch.Tensor:
     """ODIN orth penalty on ``OdinLinearDecoder`` only (no-op for other decoders)."""
     if isinstance(decoder, OdinLinearDecoder):
@@ -387,13 +457,16 @@ def reward_decoder_column_orth_penalty(*, decoder: nn.Module) -> torch.Tensor:
     return torch.zeros((), device=p.device, dtype=p.dtype)
 
 
-DecoderType = Literal["mlp", "linear", "odinlinear", "slotlinear", "ellenlinear"]
+DecoderType = Literal[
+    "mlp", "linear", "odinlinear", "slotlinear", "ellenlinear", "offsetlinear"
+]
 DECODER_TYPES: tuple[str, ...] = (
     "mlp",
     "linear",
     "odinlinear",
     "slotlinear",
     "ellenlinear",
+    "offsetlinear",
 )
 
 
@@ -417,6 +490,7 @@ def make_reward_decoder(
     ``slotlinear``: weight-tied MLP experts on ``[h, z_j]``; ``slot_routing`` is
       ``softmax`` (mix logits) or ``sum`` (direct ``sum_j r_j``).
     ``ellenlinear``: shared obs trunk, untied per-latent readouts on ``[h, z_i]``; ``r = sum_i r_i``.
+    ``offsetlinear``: shared obs trunk; untied ``r_i = b_i(h) + a_i(h) z_i``; ``r = sum_i r_i``.
     """
     kind = str(decoder_type).lower()
     if kind not in DECODER_TYPES:
@@ -448,4 +522,6 @@ def make_reward_decoder(
         return SlotLinearDecoder(**decoder_kwargs, slot_routing=slot_routing)
     if kind == "ellenlinear":
         return EllenLinearDecoder(**decoder_kwargs)
+    if kind == "offsetlinear":
+        return OffsetLinearDecoder(**decoder_kwargs)
     raise RuntimeError(f"Unhandled decoder_type={kind!r}")

@@ -98,7 +98,7 @@ FLAGS_DEF = define_flags_with_default(
     sweep_folder_tag="",
     # Decoder (VAE / TCVAE / QLAE); see make_reward_decoder in nets.py
     encoder_use_labels=True,  # pair encoder: concat y into pair_mlp input (q(z|s1,s2,y))
-    decoder_type="mlp",  # mlp | linear | odinlinear | slotlinear | ellenlinear
+    decoder_type="mlp",  # mlp | linear | odinlinear | slotlinear | ellenlinear | offsetlinear
     decoder_gate_temperature=1.0,  # linear / slotlinear softmax: lower => sharper routing
     decoder_slot_routing="softmax",  # slotlinear only: softmax | sum
     decoder_orth_weight=0.0,  # odinlinear only: ODIN row orth on z_head.weight
