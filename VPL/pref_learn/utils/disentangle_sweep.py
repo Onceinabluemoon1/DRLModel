@@ -15,6 +15,7 @@ SWEEP_NON_SUBRUN_DIRNAMES = frozenset(
         SWEEP_SUBRUNS_DIRNAME,
         "evals_sweep",
         "evals_latentgrid",
+        "evals_rewardmap",
         "evals_individual",
         "evals_subsweep",
     }

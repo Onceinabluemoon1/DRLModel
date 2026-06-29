@@ -41,15 +41,15 @@ WandbMetricSpec = tuple[str, str, bool] | None
 WandbMetricRow = list[WandbMetricSpec]
 
 VAE_WANDB_METRICS: list[tuple[str, str, bool]] = [
-    ("frac_recon2total", "train/frac_recon2total", False),
     ("recon_loss", "train/recon_loss", False),
+    ("frac_recon2total", "train/frac_recon2total", False),
     ("kld_loss", "train/kld_loss", True),
     ("enc_mean_cross_std", "train/enc_mean_cross_std", True),
 ]
 
 TCVAE_WANDB_METRICS: list[tuple[str, str, bool]] = [
-    ("vanilla_frac_recon2total", "train/vanilla_frac_recon2total", False),
     ("recon_loss", "train/recon_loss", False),
+    ("vanilla_frac_recon2total", "train/vanilla_frac_recon2total", False),
     ("vanilla_kld_loss", "train/vanilla_kld_loss", True),
     ("enc_mean_cross_std", "train/enc_mean_cross_std", True),
 ]
@@ -516,7 +516,9 @@ def plot_heatmap_ax_raw(
     )
     n_x = grid.shape[1]
     ax.set_xticks(np.arange(n_x))
-    ax.set_xticklabels(x_tick_labels if x_tick_labels is not None else [str(ld) for ld in lds])
+    ax.set_xticklabels(
+        x_tick_labels if x_tick_labels is not None else [str(ld) for ld in lds]
+    )
     ax.set_yticks(np.arange(len(sweep_vals)))
     ax.set_yticklabels([_format_beta(b) for b in sweep_vals])
     if show_xlabel:
@@ -607,7 +609,9 @@ def save_metrics_figure(
         metric_meta[field] = {
             "wandb_key": title,
             "log_scale": log_scale,
-            "vmin": 0.0 if field == "recon_loss" else (float(np.min(finite)) if finite.size else None),
+            "vmin": 0.0
+            if field == "recon_loss"
+            else (float(np.min(finite)) if finite.size else None),
             "vmax": float(np.max(finite)) if finite.size else None,
         }
 
@@ -625,7 +629,9 @@ def save_metrics_figure(
         metric_meta[field] = {
             "wandb_key": title,
             "log_scale": log_scale,
-            "vmin": 0.0 if field == "recon_loss" else (float(np.min(finite)) if finite.size else None),
+            "vmin": 0.0
+            if field == "recon_loss"
+            else (float(np.min(finite)) if finite.size else None),
             "vmax": float(np.max(finite)) if finite.size else None,
         }
 
@@ -644,7 +650,9 @@ def _write_csv(
     csv_path: Path,
     wandb_metrics: WandbMetricRow,
 ) -> None:
-    metric_fields = [field for field, _, _ in _active_wandb_metrics(wandb_metrics) + INFOMEC_METRICS]
+    metric_fields = [
+        field for field, _, _ in _active_wandb_metrics(wandb_metrics) + INFOMEC_METRICS
+    ]
     extra_fields = [
         "infomec_max_nmi",
         "infomec_ckpt",
@@ -669,7 +677,11 @@ def _write_csv(
         writer.writerow(header)
         for r in sorted(
             rows,
-            key=lambda x: (x.get("weight_decay", 0.0), x["sweep_param_value"], x["latent_dim"]),
+            key=lambda x: (
+                x.get("weight_decay", 0.0),
+                x["sweep_param_value"],
+                x["latent_dim"],
+            ),
         ):
             writer.writerow(
                 [

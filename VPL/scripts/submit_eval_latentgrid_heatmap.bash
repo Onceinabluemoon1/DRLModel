@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=plot_latentgrid_heatmap
 #SBATCH --gres=shard:12
-#SBATCH --array=0-1
+#SBATCH --array=0-14
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=16G
 #SBATCH --output=/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/logs_slurm/eval_latentgrid_heatmap/eval_latentgrid_heatmap_%A_%a.out
@@ -24,8 +24,7 @@ conda activate drl
 
 #* latentsweep roots (each must contain subruns/ with variant.json + checkpoint)
 INPUT_DIRS=(
-/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/outputs/sort_4goals_T=1_Q=20000_A=16/VAE/20260626_012314_lgrid_learnpz=F_anneal=F_dec=slotlinear_slotr=sum_encY=T
-/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/outputs/sort_4goals_T=1_Q=20000_A=16/VAE/20260626_012320_lgrid_learnpz=F_anneal=T_dec=slotlinear_slotr=sum_encY=T
+  "/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/outputs/sort_4goals_obs=15_T=1_Q=20000_A=16/QLAE/20260629_003701_lgrid_nv=6_dec=offsetlinear_encY=T"
 )
 
 #* plot_latentgrid_heatmap CLI (shared across array tasks)

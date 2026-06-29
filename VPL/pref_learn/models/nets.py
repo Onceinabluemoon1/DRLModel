@@ -124,8 +124,14 @@ class Decoder(nn.Module):
             nn.Linear(hidden_dim, output_dim),
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.model(x)
+    def forward(self, x: torch.Tensor, *, vector_rewards: bool = False) -> torch.Tensor:
+        rewards = self.model(x)  # (B,A,T,1)
+        if vector_rewards:
+            raise ValueError(
+                "Decoder (mlp) has no per-latent head decomposition; "
+                "use a sum-head decoder (linear / odinlinear / slotlinear / ellenlinear / offsetlinear)."
+            )
+        return rewards
 
 
 class LinearDecoder(nn.Module):
@@ -136,7 +142,8 @@ class LinearDecoder(nn.Module):
 
     ``alpha`` from ``softmax`` over gate logits. Each expert is linear in ``z_j``
     given obs features ``h(s)``; no cross-dim ``z`` mixing.
-    Input: ``(B, A, T, O+Z)``; output: ``(B, A, T, 1)``.
+    Input: ``(B, A, T, O+Z)``; output: ``(B, A, T, 1)`` or ``(B, A, T, Z)`` if
+    ``vector_rewards=True`` (returns ``alpha_j * r_j``, not pre-routing ``r_j``).
     """
 
     def __init__(
@@ -164,20 +171,24 @@ class LinearDecoder(nn.Module):
         self.gate_head = nn.Linear(hidden_dim, latent_dim)
         self.z_weight = nn.Linear(hidden_dim, latent_dim)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, *, vector_rewards: bool = False) -> torch.Tensor:
         obs, z = split_obs_z(x=x, obs_dim=self.obs_dim)  # (B,A,T,O), (B,A,T,Z)
 
         # * obs trunk (once)
         h = self.obs_trunk(obs)  # (B,A,T,O) -> (B,A,T,H)
 
-        # * routing weights from obs features only
-        gate_logits = self.gate_head(h)  # (B,A,T,H) -> (B,A,T,Z)
-        a_j = torch.softmax(gate_logits / self.gate_temperature, dim=-1)  # (B,A,T,Z)
-
         # * per-dim linear experts: r_j = w_j(h) z_j
         w = self.z_weight(h)  # (B,A,T,H) -> (B,A,T,Z)
         r_j = w * z  # (B,A,T,Z)
-        rewards = torch.einsum("batz,batz->bat", a_j, r_j).unsqueeze(-1)  # (B,A,T,1)
+
+        # * routing weights from obs features only
+        gate_logits = self.gate_head(h)  # (B,A,T,H) -> (B,A,T,Z)
+        a_j = torch.softmax(gate_logits / self.gate_temperature, dim=-1)  # (B,A,T,Z)
+        weighted_r_j = a_j * r_j  # (B,A,T,Z)
+        if vector_rewards:
+            return weighted_r_j
+
+        rewards = torch.einsum("batz->bat", weighted_r_j).unsqueeze(-1)  # (B,A,T,1)
         return rewards
 
 
@@ -189,7 +200,8 @@ class OdinLinearDecoder(nn.Module):
 
     ``z_head`` is ``Linear(H+1, Z, bias=False)`` with ODIN row WN in forward.
     ``decoder_orth_weight`` applies ODIN orth on row-normalized ``z_head.weight``.
-    Input: ``(B, A, T, O+Z)``; output: ``(B, A, T, 1)``.
+    Input: ``(B, A, T, O+Z)``; output: ``(B, A, T, 1)`` or ``(B, A, T, Z)`` if
+    ``vector_rewards=True``.
     """
 
     def __init__(
@@ -234,7 +246,7 @@ class OdinLinearDecoder(nn.Module):
         pair_count = z * (z - 1) / 2
         return torch.abs(torch.triu(gram, diagonal=1)).sum() / pair_count
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, *, vector_rewards: bool = False) -> torch.Tensor:
         obs, z = split_obs_z(x=x, obs_dim=self.obs_dim)  # (B,A,T,O), (B,A,T,Z)
 
         # * obs trunk (once)
@@ -246,6 +258,8 @@ class OdinLinearDecoder(nn.Module):
         x_j = torch.cat([hinput, zinput], dim=-1)  # (B,A,T,Z,H+1)
         w_norm = self.normalized_z_weight()  # (Z, H+1)
         r_j = torch.einsum("batzd,zd->batz", x_j, w_norm)  # (B,A,T,Z)
+        if vector_rewards:
+            return r_j
 
         rewards = r_j.sum(dim=-1).unsqueeze(-1)  # (B,A,T,1)
         return rewards
@@ -298,7 +312,7 @@ class SlotLinearDecoder(nn.Module):
             nn.Linear(hidden_dim, 2 if self.slot_routing == "softmax" else 1),
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, *, vector_rewards: bool = False) -> torch.Tensor:
         obs, z = split_obs_z(x=x, obs_dim=self.obs_dim)  # (B,A,T,O), (B,A,T,Z)
 
         # * obs trunk (once)
@@ -310,6 +324,8 @@ class SlotLinearDecoder(nn.Module):
         expert_in = torch.cat([hinput, zinput], dim=-1)  # (B,A,T,Z,H+1)
         expert_out = self.expert_head(expert_in)  # (B,A,T,Z,1) or (B,A,T,Z,2)
         r_j = expert_out[..., 0]  # (B,A,T,Z)
+        if vector_rewards:
+            return r_j
 
         if self.slot_routing == "sum":
             rewards = torch.einsum("batz->bat", r_j).unsqueeze(-1)  # (B,A,T,1)
@@ -328,7 +344,8 @@ class EllenLinearDecoder(nn.Module):
     ``h = obs_trunk(obs)`` once; head ``i``: mix ``[h, z_i]`` (1 hidden) → ``r_i``;
     ``r(s, z) = sum_i r_i``.
 
-    Input: ``(B, A, T, O+Z)``; output: ``(B, A, T, 1)``.
+    Input: ``(B, A, T, O+Z)``; output: ``(B, A, T, 1)`` or ``(B, A, T, Z)`` if
+    ``vector_rewards=True``.
     """
 
     def __init__(
@@ -363,7 +380,7 @@ class EllenLinearDecoder(nn.Module):
             ]
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, *, vector_rewards: bool = False) -> torch.Tensor:
         obs, z = split_obs_z(x=x, obs_dim=self.obs_dim)  # (B,A,T,O), (B,A,T,Z)
 
         # * obs trunk (once)
@@ -376,6 +393,9 @@ class EllenLinearDecoder(nn.Module):
             r_heads.append(r_i)  # (B,A,T)
 
         r_j = torch.stack(r_heads, dim=-1)  # (B,A,T,Z)
+        if vector_rewards:
+            return r_j
+
         return r_j.sum(dim=-1, keepdim=True)  # (B,A,T,1)
 
 
@@ -386,7 +406,8 @@ class OffsetLinearDecoder(nn.Module):
     ``h = obs_trunk(obs)`` once; head ``i``: ``r_i = b_i(h) + a_i(h) * z_i``;
     ``r(s, z) = sum_i r_i``. ``a_i``, ``b_i`` are small MLPs on ``h`` only.
 
-    Input: ``(B, A, T, O+Z)``; output: ``(B, A, T, 1)``.
+    Input: ``(B, A, T, O+Z)``; output: ``(B, A, T, 1)`` or ``(B, A, T, Z)`` if
+    ``vector_rewards=True``.
     """
 
     def __init__(
@@ -432,7 +453,7 @@ class OffsetLinearDecoder(nn.Module):
             ]
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, *, vector_rewards: bool = False) -> torch.Tensor:
         obs, z = split_obs_z(x=x, obs_dim=self.obs_dim)  # (B,A,T,O), (B,A,T,Z)
 
         # * obs trunk (once)
@@ -446,7 +467,26 @@ class OffsetLinearDecoder(nn.Module):
             r_heads.append(r_i)  # (B,A,T)
 
         r_j = torch.stack(r_heads, dim=-1)  # (B,A,T,Z)
+        if vector_rewards:
+            return r_j
+
         return r_j.sum(dim=-1, keepdim=True)  # (B,A,T,1)
+
+
+SUM_HEAD_DECODER_TYPES: frozenset[str] = frozenset(
+    {
+        "linear",
+        "odinlinear",
+        "slotlinear",
+        "ellenlinear",
+        "offsetlinear",
+    }
+)
+
+
+def decoder_sums_latent_heads(*, decoder_type: str) -> bool:
+    """Decoders with ``r = sum_j r_j`` (or routed sum) over per-latent heads."""
+    return str(decoder_type).lower() in SUM_HEAD_DECODER_TYPES
 
 
 def reward_decoder_column_orth_penalty(*, decoder: nn.Module) -> torch.Tensor:
@@ -482,7 +522,8 @@ def make_reward_decoder(
     slot_routing: str = "softmax",
 ) -> nn.Module:
     """
-    Factory for per-step reward decoders ``(B, A, T, O+Z) -> (B, A, T, 1)``.
+    Factory for per-step reward decoders ``(B, A, T, O+Z) -> (B, A, T, 1)`` or
+    ``(B, A, T, Z)`` when ``vector_rewards=True`` (sum-head decoders only).
 
     ``mlp``: concat ``[obs, z]`` MLP (legacy ``Decoder``).
     ``linear``: shared obs trunk, linear ``alpha_j(s)`` routing, ``r_j = w_j(s) z_j``.
