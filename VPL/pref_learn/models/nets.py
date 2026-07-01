@@ -267,15 +267,20 @@ class OdinLinearDecoder(nn.Module):
 
 class SlotLinearDecoder(nn.Module):
     """
-    Obs trunk once, then weight-tied per-dim experts on ``[h(s), z_j]``.
+    Obs trunk once, then weight-tied per-dim experts on ``[h(s), z_j, onehot(j)]``.
+
+    ``onehot(j)`` is a fixed slot index (no learned embedding) so each latent dim
+    keeps a fixed role even when ``z_i = z_j``.
 
     ``routing="softmax"``: ``r = sum_j alpha_j r_j`` with ``alpha`` from softmax
     over per-slot mix logits (expert outputs reward + logit).
 
     ``routing="sum"``: ``r = sum_j r_j`` (no softmax routing; like ``odinlinear``).
 
-    Each shared weight-tied expert is an MLP on ``[h, z_j]``. No cross-dim ``z``
-    mixing. Input: ``(B, A, T, O+Z)``; output: ``(B, A, T, 1)``.
+    Each shared weight-tied expert is an MLP on ``[h, z_j, onehot(j)]``. No cross-dim
+    ``z`` mixing. Input: ``(B, A, T, O+Z)``; output: ``(B, A, T, 1)`` or
+    ``(B, A, T, Z)`` if ``vector_rewards=True``. With ``routing="softmax"``, vector
+    output is ``alpha_j * r_j`` (post-routing), not pre-routing ``r_j``.
 
     ``decoder_orth_weight`` is ignored for this decoder (no orth penalty yet).
     """
@@ -297,52 +302,63 @@ class SlotLinearDecoder(nn.Module):
         self.latent_dim = int(latent_dim)
         self.gate_temperature = float(gate_temperature)
         self.slot_routing = routing
+        H, Z = int(hidden_dim), int(latent_dim)
 
         self.obs_trunk = nn.Sequential(
-            nn.Linear(obs_dim, hidden_dim),
+            nn.Linear(obs_dim, H),
             nn.LeakyReLU(0.2),
-            nn.Linear(hidden_dim, hidden_dim),
+            nn.Linear(H, H),
             nn.LeakyReLU(0.2),
             # nn.Linear(hidden_dim, hidden_dim),
             # nn.LeakyReLU(0.2),
         )
-        self.expert_head = nn.Sequential(
-            nn.Linear(hidden_dim + 1, hidden_dim),
+        self.register_buffer(
+            name="zindex_onehot", tensor=torch.eye(Z).to(dtype=torch.float32)
+        )
+        self.r_head = nn.Sequential(
+            nn.Linear(H + 1 + Z, H),
             nn.LeakyReLU(0.2),
-            nn.Linear(hidden_dim, 2 if self.slot_routing == "softmax" else 1),
+            nn.Linear(H, 2 if self.slot_routing == "softmax" else 1),
         )
 
     def forward(self, x: torch.Tensor, *, vector_rewards: bool = False) -> torch.Tensor:
         obs, z = split_obs_z(x=x, obs_dim=self.obs_dim)  # (B,A,T,O), (B,A,T,Z)
+        B, A, T, Z = z.shape
 
         # * obs trunk (once)
         h = self.obs_trunk(obs)  # (B,A,T,O) -> (B,A,T,H)
 
-        # * weight-tied experts on [h, z_j]
-        hinput = ei.repeat(h, "B A T H -> B A T Z H", Z=self.latent_dim)
+        # * weight-tied experts on [h, z_j, onehot(j)]
+        hinput = ei.repeat(h, "B A T H -> B A T Z H", Z=Z)
         zinput = ei.rearrange(z, "B A T Z -> B A T Z 1")
-        expert_in = torch.cat([hinput, zinput], dim=-1)  # (B,A,T,Z,H+1)
-        expert_out = self.expert_head(expert_in)  # (B,A,T,Z,1) or (B,A,T,Z,2)
-        r_j = expert_out[..., 0]  # (B,A,T,Z)
-        if vector_rewards:
-            return r_j
+        jinput = ei.repeat(self.zindex_onehot, "Z C -> B A T Z C", B=B, A=A, T=T)
+        head_in = torch.cat([hinput, zinput, jinput], dim=-1)  # (B,A,T,Z,H+1+Z)
+        head_out = self.r_head(head_in)  # (B,A,T,Z,1) or (B,A,T,Z,2)
+        r_j = head_out[..., 0]  # (B,A,T,Z)
 
         if self.slot_routing == "sum":
+            if vector_rewards:
+                return r_j
             rewards = torch.einsum("batz->bat", r_j).unsqueeze(-1)  # (B,A,T,1)
             return rewards
 
-        mix_logits = expert_out[..., 1]  # (B,A,T,Z)
+        mix_logits = head_out[..., 1]  # (B,A,T,Z)
         a_j = torch.softmax(mix_logits / self.gate_temperature, dim=-1)  # (B,A,T,Z)
-        rewards = torch.einsum("batz,batz->bat", a_j, r_j).unsqueeze(-1)  # (B,A,T,1)
+        weighted_r_j = a_j * r_j  # (B,A,T,Z)
+        if vector_rewards:
+            return weighted_r_j
+
+        rewards = torch.einsum("batz->bat", weighted_r_j).unsqueeze(-1)  # (B,A,T,1)
         return rewards
 
 
 class EllenLinearDecoder(nn.Module):
     """
-    Shared obs trunk, ``nz`` untied per-latent reward readouts.
+    Shared obs trunk, weight-tied readouts on ``[h(s), z_j, onehot(j)]``.
 
-    ``h = obs_trunk(obs)`` once; head ``i``: mix ``[h, z_i]`` (1 hidden) → ``r_i``;
-    ``r(s, z) = sum_i r_i``.
+    ``h = obs_trunk(obs)`` once; ``r_j = MLP([h, z_j, onehot(j)])``;
+    ``r(s, z) = sum_j r_j``. ``onehot(j)`` fixes slot identity even when
+    ``z_i = z_j``.
 
     Input: ``(B, A, T, O+Z)``; output: ``(B, A, T, 1)`` or ``(B, A, T, Z)`` if
     ``vector_rewards=True``.
@@ -362,37 +378,37 @@ class EllenLinearDecoder(nn.Module):
         super().__init__()
         self.obs_dim = int(obs_dim)
         self.latent_dim = int(latent_dim)
+        H, Z = int(hidden_dim), int(latent_dim)
 
         self.obs_trunk = nn.Sequential(
-            nn.Linear(obs_dim, hidden_dim),
+            nn.Linear(obs_dim, H),
             nn.LeakyReLU(0.2),
-            nn.Linear(hidden_dim, hidden_dim),
+            nn.Linear(H, H),
             nn.LeakyReLU(0.2),
         )
-        self.r_head = nn.ModuleList(
-            [
-                nn.Sequential(
-                    nn.Linear(hidden_dim + 1, hidden_dim),
-                    nn.LeakyReLU(0.2),
-                    nn.Linear(hidden_dim, 1),
-                )
-                for _ in range(self.latent_dim)
-            ]
+        self.register_buffer(
+            name="zindex_onehot",
+            tensor=torch.eye(Z).to(dtype=torch.float32),
+        )
+        self.r_head = nn.Sequential(
+            nn.Linear(H + 1 + Z, H),
+            nn.LeakyReLU(0.2),
+            nn.Linear(H, 1),
         )
 
     def forward(self, x: torch.Tensor, *, vector_rewards: bool = False) -> torch.Tensor:
         obs, z = split_obs_z(x=x, obs_dim=self.obs_dim)  # (B,A,T,O), (B,A,T,Z)
+        B, A, T, Z = z.shape
 
         # * obs trunk (once)
         h = self.obs_trunk(obs)  # (B,A,T,H)
 
-        r_heads: list[torch.Tensor] = []
-        for i in range(self.latent_dim):
-            h_and_z = torch.cat([h, z[..., i : i + 1]], dim=-1)  # (B,A,T,H+1)
-            r_i = self.r_head[i](h_and_z).squeeze(-1)  # (B,A,T,1) -> (B,A,T)
-            r_heads.append(r_i)  # (B,A,T)
-
-        r_j = torch.stack(r_heads, dim=-1)  # (B,A,T,Z)
+        # * weight-tied readouts on [h, z_j, onehot(j)]
+        hinput = ei.repeat(h, "B A T H -> B A T Z H", Z=Z)
+        zinput = ei.rearrange(z, "B A T Z -> B A T Z 1")
+        jinput = ei.repeat(self.zindex_onehot, "Z C -> B A T Z C", B=B, A=A, T=T)
+        head_in = torch.cat([hinput, zinput, jinput], dim=-1)  # (B,A,T,Z,H+1+C)
+        r_j = self.r_head(head_in).squeeze(-1)  # (B,A,T,Z)
         if vector_rewards:
             return r_j
 
@@ -401,10 +417,10 @@ class EllenLinearDecoder(nn.Module):
 
 class OffsetLinearDecoder(nn.Module):
     """
-    Shared obs trunk, ``nz`` untied offset + scale readouts per latent dim.
+    Shared obs trunk, weight-tied ``(a_j, b_j)`` from ``[h(s), onehot(j)]``.
 
-    ``h = obs_trunk(obs)`` once; head ``i``: ``r_i = b_i(h) + a_i(h) * z_i``;
-    ``r(s, z) = sum_i r_i``. ``a_i``, ``b_i`` are small MLPs on ``h`` only.
+    ``r_j = b_j(h) + a_j(h) * z_j``; ``r(s, z) = sum_j r_j``. ``onehot(j)`` fixes
+    slot identity even when ``z_i = z_j``.
 
     Input: ``(B, A, T, O+Z)``; output: ``(B, A, T, 1)`` or ``(B, A, T, Z)`` if
     ``vector_rewards=True``.
@@ -424,7 +440,7 @@ class OffsetLinearDecoder(nn.Module):
         super().__init__()
         self.obs_dim = int(obs_dim)
         self.latent_dim = int(latent_dim)
-        H = int(hidden_dim)
+        H, Z = int(hidden_dim), int(latent_dim)
 
         self.obs_trunk = nn.Sequential(
             nn.Linear(obs_dim, H),
@@ -432,41 +448,30 @@ class OffsetLinearDecoder(nn.Module):
             nn.Linear(H, H),
             nn.LeakyReLU(0.2),
         )
-        self.a_head = nn.ModuleList(
-            [
-                nn.Sequential(
-                    nn.Linear(H, H),
-                    nn.LeakyReLU(0.2),
-                    nn.Linear(H, 1),
-                )
-                for _ in range(self.latent_dim)
-            ]
+        self.register_buffer(
+            name="zindex_onehot",
+            tensor=torch.eye(Z).to(dtype=torch.float32),
         )
-        self.b_head = nn.ModuleList(
-            [
-                nn.Sequential(
-                    nn.Linear(H, H),
-                    nn.LeakyReLU(0.2),
-                    nn.Linear(H, 1),
-                )
-                for _ in range(self.latent_dim)
-            ]
+        self.affine_head = nn.Sequential(
+            nn.Linear(H + Z, H),
+            nn.LeakyReLU(0.2),
+            nn.Linear(H, 2),
         )
 
     def forward(self, x: torch.Tensor, *, vector_rewards: bool = False) -> torch.Tensor:
         obs, z = split_obs_z(x=x, obs_dim=self.obs_dim)  # (B,A,T,O), (B,A,T,Z)
+        B, A, T, Z = z.shape
 
         # * obs trunk (once)
         h = self.obs_trunk(obs)  # (B,A,T,H)
 
-        r_heads: list[torch.Tensor] = []
-        for i in range(self.latent_dim):
-            a_i = self.a_head[i](h).squeeze(-1)  # (B,A,T)
-            b_i = self.b_head[i](h).squeeze(-1)  # (B,A,T)
-            r_i = b_i + a_i * z[..., i]  # (B,A,T)
-            r_heads.append(r_i)  # (B,A,T)
-
-        r_j = torch.stack(r_heads, dim=-1)  # (B,A,T,Z)
+        # * weight-tied (a_j, b_j) on [h, onehot(j)]
+        hinput = ei.repeat(h, "B A T H -> B A T Z H", Z=Z)
+        jinput = ei.repeat(self.zindex_onehot, "Z C -> B A T Z C", B=B, A=A, T=T)
+        head_in = torch.cat([hinput, jinput], dim=-1)  # (B,A,T,Z,H+C)
+        out = self.affine_head(head_in)  # (B,A,T,Z,2)
+        a_j, b_j = out[..., 0], out[..., 1]  # (B,A,T,Z)
+        r_j = b_j + a_j * z  # (B,A,T,Z)
         if vector_rewards:
             return r_j
 
@@ -528,10 +533,11 @@ def make_reward_decoder(
     ``mlp``: concat ``[obs, z]`` MLP (legacy ``Decoder``).
     ``linear``: shared obs trunk, linear ``alpha_j(s)`` routing, ``r_j = w_j(s) z_j``.
     ``odinlinear``: per-dim ``[h, z_j]`` via ``z_head`` + ODIN row WN; direct sum.
-    ``slotlinear``: weight-tied MLP experts on ``[h, z_j]``; ``slot_routing`` is
+    ``slotlinear``: weight-tied MLP experts on ``[h, z_j, onehot(j)]``; ``slot_routing`` is
       ``softmax`` (mix logits) or ``sum`` (direct ``sum_j r_j``).
-    ``ellenlinear``: shared obs trunk, untied per-latent readouts on ``[h, z_i]``; ``r = sum_i r_i``.
-    ``offsetlinear``: shared obs trunk; untied ``r_i = b_i(h) + a_i(h) z_i``; ``r = sum_i r_i``.
+    ``ellenlinear``: weight-tied MLP readouts on ``[h, z_j, onehot(j)]``; ``r = sum_j r_j``.
+    ``offsetlinear``: weight-tied ``(a_j, b_j)`` from ``[h, onehot(j)]``;
+      ``r_j = b_j(h) + a_j(h) z_j``; ``r = sum_j r_j``.
     """
     kind = str(decoder_type).lower()
     if kind not in DECODER_TYPES:

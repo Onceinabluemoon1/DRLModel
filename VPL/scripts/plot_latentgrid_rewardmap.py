@@ -72,13 +72,16 @@ def rewardmap_out_png(
     latent_dim: int,
     reward_mode: Literal["raw", "prob"],
     infom: Optional[float] = None,
+    infoc: Optional[float] = None,
 ) -> Path:
-    """``evals_rewardmap/<ts>/<raw|prob>_rewards/{mode}_{prefix}={val}_nz={nz}[_infom=…].png``."""
+    """``evals_rewardmap/<ts>/<raw|prob>_rewards/{mode}_{prefix}={val}_nz={nz}[_infom=…][_infoc=…].png``."""
     mode_dir = outdir / REWARD_MODE_OUTDIR[reward_mode]
     prefix = sweep_param_filename_prefix(sweep_param_name=sweep_param_name)
     fname = f"{reward_mode}_{prefix}={sweep_param_value:g}_nz={latent_dim}"
     if infom is not None:
         fname += f"_infom={infom:.3g}"
+    if infoc is not None:
+        fname += f"_infoc={infoc:.3g}"
     fname += ".png"
     return mode_dir / fname
 
@@ -817,6 +820,7 @@ def main() -> None:
                 latent_dim=nz,
                 reward_mode=mode,
                 infom=float(infomec["infom"]),
+                infoc=float(infomec["infoc"]),
             )
             save_per_head_reward_figure(
                 obs1=obs1,
