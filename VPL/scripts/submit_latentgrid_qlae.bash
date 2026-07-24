@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=train_qlae_grid
 #SBATCH --gres=shard:12
-#SBATCH --array=0-47%8
+#SBATCH --array=0-41%7
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=16G
 #SBATCH --output=/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/logs_slurm/train_qlae_grid/train_qlae_grid_%A_%a.out
 #
 # Grid search over weight_decay × latent_dim.
 # All array tasks share one sweep folder under outputs/<env>/QLAE/:
-#   <RUN_TIMESTAMP>_lgrid_nv=..._dec=..._slotr=..._encY=.../
+#   <RUN_TIMESTAMP>_lgrid_nv=..._dec=..._slotr=..._encLabels=..._encSources=.../
 #     subruns/
 #       <task>_nz=<L>_wd=.../
 #     evals_latentgrid/
 #   • Wall-clock (set once at submit on the login node):
 #       sbatch --export=ALL,RUN_TIMESTAMP=$(date +%Y%m%d_%H%M%S) scripts/submit_latentgrid_qlae.bash
-#   • If RUN_TIMESTAMP is unset but this is a Slurm array job, we default to arrayjob_<SLURM_ARRAY_JOB_ID>.
+#   • If RUN_TIMESTAMP is unset but this is a Slurm array job, we default to job=<SLURM_ARRAY_JOB_ID>.
 #   • All tasks with the same RUN_TIMESTAMP share one W&B group (same tag as sweep folder).
 # Each task writes to .../<sweep_folder>/subruns/<array_task_id>_nz=<L>_wd=.../
 # variant.json records sweep_param_name=weight_decay, sweep_param_value=<wd> (latent_dim in variant).
@@ -31,7 +31,6 @@ WEIGHT_DECAYS=(
     0.1
     1.0
     3.0
-    6.0
 )
 LATENT_DIMS=(
     2
@@ -49,12 +48,17 @@ batch_size=256
 set_size=16  # -1 = use full S from dataset; else truncate preference sets to this A
 
 loss_aggregation=mean
-num_quantized_values=6
+num_quantized_values=9
 
-decoder_type=ellenlinear
-decoder_gate_temperature=1.0  # linear / slotlinear softmax: lower ⇒ peakier α_j
+decoder_type=poslinear
+decoder_gate_temperature=1.0  # slotlinear softmax: lower ⇒ peakier α_j
 decoder_slot_routing=sum   # slotlinear only: softmax | sum (direct Σ r_j)
-decoder_orth_weight=0.0  # odinlinear only; no-op for linear / slotlinear
+decoder_orth_weight=0.0  # odinlinear only; no-op for other decoders
+decoder_sparsity_weight=0.01  # poslinear only: L1 on theta(s); no-op for other decoders
+decoder_sparsity_mode=elementwise  # poslinear only: elementwise (L1, parts-biased) | group (lasso over heads, axes-biased)
+
+encode_labels=True  # pair encoder: concat y into pair_mlp (q(z|s1,s2,y))
+encode_sources=False  # pair encoder: one-hot GT source_variable (InfoMEC; relabelled dataset)
 
 # * 2 goals
 # pref_dataset="sort_2goals_T=1_Q=5000"
@@ -66,8 +70,8 @@ decoder_orth_weight=0.0  # odinlinear only; no-op for linear / slotlinear
 # pref_dataset="sort_4goals_T=1_Q=20000"
 # pref_dataset="sort_4goals_T=10_Q=20000"
 # pref_dataset="sort_4goals_T=25_Q=20000"
-pref_dataset="sort_4goals_obs=15_T=1_Q=20000"
-# pref_dataset="sort_4goals_obs=15_T=25_Q=20000"
+# pref_dataset="sort_4goals_obs=15_T=1_Q=20000"
+pref_dataset="sort_4goals_obs=15_T=25_Q=20000"
 
 output_dir="/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/outputs"
 
@@ -96,7 +100,7 @@ run_train_grid() {
   comment="${subrun}_nz=${latent_dim}_wd=${weight_decay}"
 
   if [ -z "${RUN_TIMESTAMP:-}" ] && [ -n "${SLURM_ARRAY_JOB_ID:-}" ]; then
-    RUN_TIMESTAMP="arrayjob_${SLURM_ARRAY_JOB_ID}"
+    RUN_TIMESTAMP="job=${SLURM_ARRAY_JOB_ID}"
   fi
   if [ -n "${RUN_TIMESTAMP:-}" ]; then
     TS_ARGS+=(--run_timestamp="${RUN_TIMESTAMP}")
@@ -119,6 +123,10 @@ run_train_grid() {
     --decoder_gate_temperature="${decoder_gate_temperature}" \
     --decoder_slot_routing="${decoder_slot_routing}" \
     --decoder_orth_weight="${decoder_orth_weight}" \
+    --decoder_sparsity_weight="${decoder_sparsity_weight}" \
+    --decoder_sparsity_mode="${decoder_sparsity_mode}" \
+    --encode_labels="${encode_labels}" \
+    --encode_sources="${encode_sources}" \
     --n_epochs=500 \
     --eval_freq=50 \
     --save_freq=50 \

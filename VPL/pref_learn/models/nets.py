@@ -3,6 +3,7 @@ from typing import Literal, Tuple, Union
 import einops as ei
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 PairEncoderOutput = Union[
     torch.Tensor,  # deterministic latents
@@ -22,14 +23,24 @@ class PairEncoder(nn.Module):
         *,
         conv_channels: int = 64,
         gaussian_latent: bool = True,
-        encoder_use_labels: bool = True,
+        encode_labels: bool = True,
+        encode_sources: bool = False,
+        source_dims: list[int] | None = None,
     ):
         super().__init__()
         self.obs_dim = int(obs_dim)
         self.segment_len = int(segment_len)
         self.use_conv_traj = self.segment_len > 1
         self.gaussian_latent = bool(gaussian_latent)
-        self.encoder_use_labels = bool(encoder_use_labels)
+        self.encode_labels = bool(encode_labels)
+        self.encode_sources = bool(encode_sources)
+        if self.encode_sources:
+            assert source_dims is not None and len(source_dims) > 0
+            self.source_dims = [int(d) for d in source_dims]
+            self.source_feat_dim = int(sum(self.source_dims))  # onehot encoding
+        else:
+            self.source_dims = []
+            self.source_feat_dim = 0
 
         if self.use_conv_traj:
             self.traj_encoder = nn.Sequential(
@@ -51,13 +62,14 @@ class PairEncoder(nn.Module):
                 nn.LeakyReLU(0.2),
             )
 
-        pair_feat_dim = 3 * hidden_dim + int(self.encoder_use_labels)
+        pair_feat_dim = 3 * hidden_dim + int(self.encode_labels)
         self.pair_mlp = nn.Sequential(
             nn.Linear(pair_feat_dim, hidden_dim),
             nn.LeakyReLU(0.2),
         )
+        set_in_dim = hidden_dim + self.source_feat_dim
         self.model = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
+            nn.Linear(set_in_dim, hidden_dim),
             nn.LeakyReLU(0.2),
             nn.Linear(hidden_dim, hidden_dim),
             nn.LeakyReLU(0.2),
@@ -80,21 +92,39 @@ class PairEncoder(nn.Module):
         h = h.mean(dim=-1)  # (B*A, H)
         return ei.rearrange(h, "(B A) H -> B A H", A=A)
 
+    def _encode_sources(
+        self,
+        *,
+        source: torch.Tensor,  # (B, n_sources)
+    ) -> torch.Tensor:
+        """One-hot per discrete source dim: (B, n_sources) -> (B, sum(source_dims))."""
+        feats = []
+        for i, src_dim in enumerate(self.source_dims):
+            src_oh = F.one_hot(source[:, i].long(), src_dim).float()
+            feats.append(src_oh)
+        return torch.cat(feats, dim=-1)  # (B, sum(source_dims))
+
     def forward(
         self,
         s1: torch.Tensor,
         s2: torch.Tensor,
         y: torch.Tensor,
+        *,
+        source: torch.Tensor | None = None,
     ) -> PairEncoderOutput:
         # * siamese encode each traj, fuse labels, pool over A, set MLP
         h1 = self._encode_traj(s=s1)  # (B,A,T,O) -> (B, A, H)
         h2 = self._encode_traj(s=s2)  # (B,A,T,O) -> (B, A, H)
         pair_feats = [h1, h2, h1 - h2]
-        if self.encoder_use_labels:
+        if self.encode_labels:
             pair_feats.append(y)
         h_annot = torch.cat(pair_feats, dim=-1)  # (B, A, 3H) or (B, A, 3H+1)
         h_annot = self.pair_mlp(h_annot)  # (B, A, H)
         h_set = h_annot.mean(dim=1)  # (B, H)
+        if self.encode_sources:
+            assert source is not None, "encode_sources=True but `source` is None"
+            src = self._encode_sources(source=source)  # (B, ns) -> (B, sum(src_dims))
+            h_set = torch.cat([h_set, src], dim=-1)  # (B, H + sum(source_dims))
         h_ = self.model(h_set)  # (B, H)
 
         if self.gaussian_latent:
@@ -136,14 +166,13 @@ class Decoder(nn.Module):
 
 class LinearDecoder(nn.Module):
     """
-    Obs trunk once, then linear routing + linear per-dim heads.
+    Obs trunk once, then linear per-dim heads; direct sum.
 
-    ``r(s, z) = sum_j alpha_j(s) * w_j(s) z_j``
+    ``r(s, z) = sum_j w_j(s) z_j``
 
-    ``alpha`` from ``softmax`` over gate logits. Each expert is linear in ``z_j``
-    given obs features ``h(s)``; no cross-dim ``z`` mixing.
-    Input: ``(B, A, T, O+Z)``; output: ``(B, A, T, 1)`` or ``(B, A, T, Z)`` if
-    ``vector_rewards=True`` (returns ``alpha_j * r_j``, not pre-routing ``r_j``).
+    Each expert is linear in ``z_j`` given obs features ``h(s)``; no cross-dim
+    ``z`` mixing. Input: ``(B, A, T, O+Z)``; output: ``(B, A, T, 1)`` or
+    ``(B, A, T, Z)`` if ``vector_rewards=True``.
     """
 
     def __init__(
@@ -155,21 +184,21 @@ class LinearDecoder(nn.Module):
         *,
         gate_temperature: float = 1.0,
     ):
+        del gate_temperature, output_dim  # API parity with other decoders
         super().__init__()
         self.obs_dim = int(obs_dim)
         self.latent_dim = int(latent_dim)
-        self.gate_temperature = float(gate_temperature)
+        H, Z = int(hidden_dim), int(latent_dim)
 
         self.obs_trunk = nn.Sequential(
-            nn.Linear(obs_dim, hidden_dim),
+            nn.Linear(obs_dim, H),
             nn.LeakyReLU(0.2),
-            nn.Linear(hidden_dim, hidden_dim),
+            nn.Linear(H, H),
             nn.LeakyReLU(0.2),
-            nn.Linear(hidden_dim, hidden_dim),
+            nn.Linear(H, H),
             nn.LeakyReLU(0.2),
         )
-        self.gate_head = nn.Linear(hidden_dim, latent_dim)
-        self.z_weight = nn.Linear(hidden_dim, latent_dim)
+        self.w_head = nn.Linear(H, Z)
 
     def forward(self, x: torch.Tensor, *, vector_rewards: bool = False) -> torch.Tensor:
         obs, z = split_obs_z(x=x, obs_dim=self.obs_dim)  # (B,A,T,O), (B,A,T,Z)
@@ -178,17 +207,84 @@ class LinearDecoder(nn.Module):
         h = self.obs_trunk(obs)  # (B,A,T,O) -> (B,A,T,H)
 
         # * per-dim linear experts: r_j = w_j(h) z_j
-        w = self.z_weight(h)  # (B,A,T,H) -> (B,A,T,Z)
+        w = self.w_head(h)  # (B,A,T,H) -> (B,A,T,Z)
         r_j = w * z  # (B,A,T,Z)
-
-        # * routing weights from obs features only
-        gate_logits = self.gate_head(h)  # (B,A,T,H) -> (B,A,T,Z)
-        a_j = torch.softmax(gate_logits / self.gate_temperature, dim=-1)  # (B,A,T,Z)
-        weighted_r_j = a_j * r_j  # (B,A,T,Z)
         if vector_rewards:
-            return weighted_r_j
+            return r_j
 
-        rewards = torch.einsum("batz->bat", weighted_r_j).unsqueeze(-1)  # (B,A,T,1)
+        rewards = torch.einsum("batz->bat", r_j).unsqueeze(-1)  # (B,A,T,1)
+        return rewards
+
+
+class PosLinearDecoder(nn.Module):
+    """
+    Shared obs trunk, non-negative per-step features; reward is ``theta(s) . z``.
+
+    ``theta_j(s) = softplus(w_j(h(s))) >= 0`` reads as "amount of feature j
+    present in state s"; ``z`` (annotator latent) is real-valued, so annotators
+    can weight features either way. ``r(s, z) = sum_j theta_j(s) z_j``.
+
+    Each forward stashes ``last_w_sparsity`` for the ``decoder_sparsity_weight``
+    penalty (BNRM-style sparsity on local features, deterministic version):
+
+    ``sparsity_mode="elementwise"``: mean theta (== L1 since theta >= 0);
+      charges total feature mass -> favors localized, parts-like features.
+    ``sparsity_mode="group"``: mean_j sqrt(E_{BAT}[theta_j^2]) (group lasso
+      over heads); charges per active head -> favors few dense heads.
+
+    Input: ``(B, A, T, O+Z)``; output: ``(B, A, T, 1)`` or ``(B, A, T, Z)`` if
+    ``vector_rewards=True``.
+    """
+
+    def __init__(
+        self,
+        obs_dim: int,
+        latent_dim: int,
+        hidden_dim: int,
+        output_dim: int = 1,
+        *,
+        gate_temperature: float = 1.0,
+        sparsity_mode: str = "elementwise",
+    ):
+        del gate_temperature, output_dim  # API parity with other decoders
+        super().__init__()
+        mode = str(sparsity_mode).lower()
+        assert mode in ("elementwise", "group")
+        self.sparsity_mode = mode
+        self.obs_dim = int(obs_dim)
+        self.latent_dim = int(latent_dim)
+        H, Z = int(hidden_dim), int(latent_dim)
+
+        self.obs_trunk = nn.Sequential(
+            nn.Linear(obs_dim, H),
+            nn.LeakyReLU(0.2),
+            nn.Linear(H, H),
+            nn.LeakyReLU(0.2),
+            nn.Linear(H, H),
+            nn.LeakyReLU(0.2),
+        )
+        self.w_head = nn.Linear(H, Z)
+        self.last_w_sparsity: torch.Tensor | None = None
+
+    def forward(self, x: torch.Tensor, *, vector_rewards: bool = False) -> torch.Tensor:
+        obs, z = split_obs_z(x=x, obs_dim=self.obs_dim)  # (B,A,T,O), (B,A,T,Z)
+
+        # * non-negative per-step features theta(s)
+        h = self.obs_trunk(obs)  # (B,A,T,O) -> (B,A,T,H)
+        theta = F.softplus(self.w_head(h))  # (B,A,T,Z), >= 0
+        if self.sparsity_mode == "group":
+            # group lasso over heads: per-head RMS energy, L1 across heads
+            head_energy = (theta**2).mean(dim=(0, 1, 2))  # (Z,)
+            self.last_w_sparsity = torch.sqrt(head_energy + 1e-12).mean()
+        else:
+            self.last_w_sparsity = theta.mean()  # == L1 since theta >= 0
+
+        # * bilinear reward: r_j = theta_j(s) z_j
+        r_j = theta * z  # (B,A,T,Z)
+        if vector_rewards:
+            return r_j
+
+        rewards = torch.einsum("batz->bat", r_j).unsqueeze(-1)  # (B,A,T,1)
         return rewards
 
 
@@ -481,6 +577,7 @@ class OffsetLinearDecoder(nn.Module):
 SUM_HEAD_DECODER_TYPES: frozenset[str] = frozenset(
     {
         "linear",
+        "poslinear",
         "odinlinear",
         "slotlinear",
         "ellenlinear",
@@ -502,12 +599,34 @@ def reward_decoder_column_orth_penalty(*, decoder: nn.Module) -> torch.Tensor:
     return torch.zeros((), device=p.device, dtype=p.dtype)
 
 
+def reward_decoder_theta_sparsity(*, decoder: nn.Module) -> torch.Tensor:
+    """
+    Sparsity penalty on ``PosLinearDecoder`` theta from its last forward
+    (no-op otherwise). Elementwise L1 or group lasso per ``sparsity_mode``.
+
+    Note: reads the stash from the most recent ``decoder(...)`` call, so call
+    after decoding; with paired decodes (s1 then s2) this covers the s2 batch,
+    which has the same distribution as s1.
+    """
+    if isinstance(decoder, PosLinearDecoder) and decoder.last_w_sparsity is not None:
+        return decoder.last_w_sparsity
+    p = next(decoder.parameters())
+    return torch.zeros((), device=p.device, dtype=p.dtype)
+
+
 DecoderType = Literal[
-    "mlp", "linear", "odinlinear", "slotlinear", "ellenlinear", "offsetlinear"
+    "mlp",
+    "linear",
+    "poslinear",
+    "odinlinear",
+    "slotlinear",
+    "ellenlinear",
+    "offsetlinear",
 ]
 DECODER_TYPES: tuple[str, ...] = (
     "mlp",
     "linear",
+    "poslinear",
     "odinlinear",
     "slotlinear",
     "ellenlinear",
@@ -525,13 +644,17 @@ def make_reward_decoder(
     decoder_input: int | None = None,
     gate_temperature: float = 1.0,
     slot_routing: str = "softmax",
+    sparsity_mode: str = "elementwise",
 ) -> nn.Module:
     """
     Factory for per-step reward decoders ``(B, A, T, O+Z) -> (B, A, T, 1)`` or
     ``(B, A, T, Z)`` when ``vector_rewards=True`` (sum-head decoders only).
 
     ``mlp``: concat ``[obs, z]`` MLP (legacy ``Decoder``).
-    ``linear``: shared obs trunk, linear ``alpha_j(s)`` routing, ``r_j = w_j(s) z_j``.
+    ``linear``: shared obs trunk, ``r_j = w_j(s) z_j``; direct sum.
+    ``poslinear``: shared obs trunk, non-negative ``theta_j(s) = softplus(w_j(h))``;
+      ``r = sum_j theta_j(s) z_j`` (stage-1 BNRM-style bilinear head).
+      ``sparsity_mode`` picks the stashed penalty: ``elementwise`` L1 | ``group`` lasso.
     ``odinlinear``: per-dim ``[h, z_j]`` via ``z_head`` + ODIN row WN; direct sum.
     ``slotlinear``: weight-tied MLP experts on ``[h, z_j, onehot(j)]``; ``slot_routing`` is
       ``softmax`` (mix logits) or ``sum`` (direct ``sum_j r_j``).
@@ -563,6 +686,8 @@ def make_reward_decoder(
     )
     if kind == "linear":
         return LinearDecoder(**decoder_kwargs)
+    if kind == "poslinear":
+        return PosLinearDecoder(**decoder_kwargs, sparsity_mode=sparsity_mode)
     if kind == "odinlinear":
         return OdinLinearDecoder(**decoder_kwargs)
     if kind == "slotlinear":

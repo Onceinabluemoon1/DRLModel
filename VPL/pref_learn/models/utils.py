@@ -13,12 +13,63 @@ def logvar_to_std(logvar: torch.Tensor) -> torch.Tensor:
     return torch.exp(0.5 * logvar)
 
 
+def _merge_infomec_fields(
+    *,
+    batch: dict,
+    infomec_path: str | Path | None,
+) -> tuple[np.ndarray, list[int]]:
+    """
+    Ensure ``batch`` has InfoMEC annotator metadata (merge from ``infomec_path`` if needed).
+
+    Returns:
+        source_variable: ``(Q, n_sources)`` int array — discrete GT source index per query
+            set (one row per preference query, shared across all A pairs in that set).
+            Example (Sort 4-goals): ``n_sources=2``, entries in ``{0,1,2}`` per axis
+            (no pref / top-or-left / bottom-or-right).
+        source_dims: ``[n_classes_0, n_classes_1, ...]`` — one-hot width per source axis.
+            Example: ``[3, 3]`` for two 3-way discrete prefs.
+    """
+    infomec_keys = (
+        "source_variable",
+        "source_dims",
+        "source_names",
+        "source_types",
+        "source_mode",
+        "source_mode_names",
+    )
+    if "source_variable" not in batch:
+        if infomec_path is None or not str(infomec_path).strip():
+            raise ValueError(
+                "encode_sources=True but dataset has no 'source_variable'. "
+                "Create with store_source_mode=True or pass --infomec_dataset_path."
+            )
+        with open(infomec_path, "rb") as fp:
+            infomec_batch = pickle.load(fp)
+        for key in infomec_keys:
+            if key in infomec_batch:
+                batch[key] = infomec_batch[key]
+    if "source_variable" not in batch:
+        raise ValueError(
+            "encode_sources=True but no 'source_variable' in dataset or infomec path."
+        )
+    source_dims_raw = batch.get("source_dims")
+    if source_dims_raw is None:
+        n_sources = int(batch["source_variable"].shape[-1])
+        source_dims = [int(np.max(batch["source_variable"])) + 1] * n_sources
+    else:
+        source_dims = [int(d) for d in source_dims_raw]
+    return np.asarray(batch["source_variable"]), source_dims
+
+
 def get_datasets(
     query_path: str | Path,
     observation_dim: int,
     action_dim: int,
     batch_size: int,
     set_size: int = -1,  # -1 means use all queries in the query set
+    *,
+    encode_sources: bool = False,
+    infomec_path: str | Path | None = None,
 ):
     with open(query_path, "rb") as fp:
         batch = pickle.load(fp)
@@ -28,6 +79,14 @@ def get_datasets(
     assert batch["actions"].shape[-1] == action_dim
     if set_size < 0:
         set_size = batch["observations"].shape[1]
+
+    source_variable = None
+    source_dims: list[int] | None = None
+    if encode_sources:
+        source_variable, source_dims = _merge_infomec_fields(
+            batch=batch,
+            infomec_path=infomec_path,
+        )
 
     eval_data_size = int(0.1 * len(batch["observations"]))
     train_data_size = len(batch["observations"]) - eval_data_size
@@ -39,7 +98,6 @@ def get_datasets(
         "actions_2": batch["actions_2"][:train_data_size, :set_size],
         "labels": batch["labels"][:train_data_size, :set_size],
     }
-
     eval_batch = {
         "observations": batch["observations"][train_data_size:, :set_size],
         "actions": batch["actions"][train_data_size:, :set_size],
@@ -47,9 +105,17 @@ def get_datasets(
         "actions_2": batch["actions_2"][train_data_size:, :set_size],
         "labels": batch["labels"][train_data_size:, :set_size],
     }
+    if encode_sources:
+        assert source_variable is not None
+        train_batch["source_variable"] = source_variable[:train_data_size]
+        eval_batch["source_variable"] = source_variable[train_data_size:]
 
-    train_dataset = PreferenceDataset(train_batch)
-    eval_dataset = PreferenceDataset(eval_batch)
+    train_dataset = PreferenceDataset(
+        train_batch, encode_sources=encode_sources, source_dims=source_dims
+    )
+    eval_dataset = PreferenceDataset(
+        eval_batch, encode_sources=encode_sources, source_dims=source_dims
+    )
     kwargs = {"num_workers": 1, "pin_memory": True}
     train_loader = DataLoader(
         dataset=train_dataset, batch_size=batch_size, shuffle=True, **kwargs
@@ -67,12 +133,21 @@ def get_datasets(
         set_size,
         segment_len,
         obs_dim,
+        source_dims,
     )
 
 
 class PreferenceDataset(Dataset):
-    def __init__(self, pref_dataset):
+    def __init__(
+        self,
+        pref_dataset,
+        *,
+        encode_sources: bool = False,
+        source_dims: list[int] | None = None,
+    ):
         self.pref_dataset = pref_dataset
+        self.encode_sources = bool(encode_sources)
+        self.source_dims = source_dims
 
     def __len__(self):
         return len(self.pref_dataset["observations"])
@@ -81,17 +156,25 @@ class PreferenceDataset(Dataset):
         observations = self.pref_dataset["observations"][idx]
         observations_2 = self.pref_dataset["observations_2"][idx]
         labels = self.pref_dataset["labels"][idx]
-        return dict(
-            observations=observations, observations_2=observations_2, labels=labels
+        out = dict(
+            observations=observations,
+            observations_2=observations_2,
+            labels=labels,
         )
+        if self.encode_sources:
+            out["source_variable"] = self.pref_dataset["source_variable"][idx]
+        return out
 
     def get_mode_data(self, batch_size):
         batch_size = min(batch_size, len(self))
         idxs = np.random.choice(range(len(self)), size=batch_size, replace=False)
-        return dict(
+        out = dict(
             observations=self.pref_dataset["observations"][idxs],
             observations_2=self.pref_dataset["observations_2"][idxs],
-        ), batch_size
+        )
+        if self.encode_sources:
+            out["source_variable"] = self.pref_dataset["source_variable"][idxs]
+        return out, batch_size
 
 
 class Annealer:
@@ -185,8 +268,18 @@ def get_latent(batch, env, reward_model, mode, num_samples):
     obs1 = torch.from_numpy(obs1).float().to(device)
     obs2 = torch.from_numpy(obs2).float().to(device)
     labels = torch.from_numpy(labels).float().to(device)
+    source = None
+    if "source_variable" in batch:
+        source = torch.from_numpy(batch["source_variable"]).long().to(device)
+    elif getattr(reward_model, "encode_sources", False):
+        raise ValueError("encode_sources=True but source is None in batch")
     with torch.no_grad():
-        mean, _ = reward_model.encode(obs1, obs2, labels)
+        mean, _ = reward_model.encode(
+            obs1,
+            obs2,
+            labels,
+            source=source,
+        )
     return mean.cpu().numpy()
 
 

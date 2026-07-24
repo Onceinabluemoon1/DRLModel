@@ -97,11 +97,14 @@ FLAGS_DEF = define_flags_with_default(
     # e.g. latentsweep: shared sweep dir / W&B group for beta×latent_dim grids (see submit_train_vae_grid.bash)
     sweep_folder_tag="",
     # Decoder (VAE / TCVAE / QLAE); see make_reward_decoder in nets.py
-    encoder_use_labels=True,  # pair encoder: concat y into pair_mlp input (q(z|s1,s2,y))
-    decoder_type="mlp",  # mlp | linear | odinlinear | slotlinear | ellenlinear | offsetlinear
-    decoder_gate_temperature=1.0,  # linear / slotlinear softmax: lower => sharper routing
+    encode_labels=True,  # pair encoder: concat y into pair_mlp input (q(z|s1,s2,y))
+    encode_sources=False,  # pair encoder: one-hot GT source_variable after set pool (q(z|s1,s2,y,u))
+    decoder_type="mlp",  # mlp | linear | poslinear | odinlinear | slotlinear | ellenlinear | offsetlinear
+    decoder_gate_temperature=1.0,  # slotlinear softmax: lower => sharper routing
     decoder_slot_routing="softmax",  # slotlinear only: softmax | sum
     decoder_orth_weight=0.0,  # odinlinear only: ODIN row orth on z_head.weight
+    decoder_sparsity_weight=0.0,  # poslinear only: L1 on theta(s) feature activations
+    decoder_sparsity_mode="elementwise",  # poslinear only: elementwise (L1) | group (lasso over heads)
 )
 
 
@@ -138,13 +141,25 @@ def _sweep_folder_display_tag(tag: str) -> str:
     return tag
 
 
+def _sweep_model_scope_prefix(*, model_type: str, sweep_folder_tag: str) -> str | None:
+    if sweep_folder_tag == "lgrid":
+        return f"{model_type}grid"
+    return None
+
+
 def _flag_bool(value: bool) -> str:
     return "T" if value else "F"
 
 
+def batch_source(*, batch, device, encode_sources: bool):
+    if not encode_sources:
+        return None
+    return batch["source_variable"].to(device).long()
+
+
 def _run_dir_timestamp(ts: str) -> str:
     ts = ts.strip()
-    if ts.startswith("arrayjob_"):
+    if ts.startswith("job=") or ts.startswith("arrayjob_"):
         return ""
     return ts
 
@@ -168,7 +183,7 @@ def main(_):
     run_label = FLAGS.pref_dataset.strip() or FLAGS.env
     run_label = f"{run_label}_A={effective_set_size(flags_set_size=FLAGS.set_size, dataset_path=FLAGS.dataset_path)}"
     nz_tag = f"nz={FLAGS.latent_dim}"
-    learned_prior_tag = f"learnpz={_flag_bool(FLAGS.learned_prior)}"
+    learned_prior_tag = f"pz={_flag_bool(FLAGS.learned_prior)}"
     run_tags = [nz_tag]
     if FLAGS.model_type != "QLAE":
         run_tags.append(learned_prior_tag)
@@ -183,7 +198,12 @@ def main(_):
         run_tags.append(f"slotr={FLAGS.decoder_slot_routing}")
     if str(FLAGS.decoder_type).lower() == "odinlinear":
         run_tags.append(f"orthw={FLAGS.decoder_orth_weight}")
-    run_tags.append(f"encY={_flag_bool(FLAGS.encoder_use_labels)}")
+    if str(FLAGS.decoder_type).lower() == "poslinear":
+        run_tags.append(f"sparw={FLAGS.decoder_sparsity_weight}")
+        if str(FLAGS.decoder_sparsity_mode).lower() != "elementwise":
+            run_tags.append(f"sparm={FLAGS.decoder_sparsity_mode}")
+    run_tags.append(f"encY={_flag_bool(FLAGS.encode_labels)}")
+    run_tags.append(f"encS={_flag_bool(FLAGS.encode_sources)}")
     run_tag_str = "_".join(run_tags)
     sweep_folder_tag_raw = FLAGS.sweep_folder_tag.strip()
     sweep_folder_tag = (
@@ -191,8 +211,15 @@ def main(_):
         if sweep_folder_tag_raw
         else ""
     )
+    sweep_model_prefix = None
     if sweep_folder_tag_raw:
-        sweep_scope_tags = [sweep_folder_tag]
+        sweep_model_prefix = _sweep_model_scope_prefix(
+            model_type=str(FLAGS.model_type),
+            sweep_folder_tag=sweep_folder_tag,
+        )
+        sweep_scope_tags = (
+            [sweep_model_prefix] if sweep_model_prefix else [sweep_folder_tag]
+        )
         if FLAGS.model_type != "QLAE":
             sweep_scope_tags.append(learned_prior_tag)
         if "VAE" in FLAGS.model_type:
@@ -204,7 +231,12 @@ def main(_):
             sweep_scope_tags.append(f"slotr={FLAGS.decoder_slot_routing}")
         if str(FLAGS.decoder_type).lower() == "odinlinear":
             sweep_scope_tags.append(f"orthw={FLAGS.decoder_orth_weight}")
-        sweep_scope_tags.append(f"encY={_flag_bool(FLAGS.encoder_use_labels)}")
+        if str(FLAGS.decoder_type).lower() == "poslinear":
+            sweep_scope_tags.append(f"sparw={FLAGS.decoder_sparsity_weight}")
+            if str(FLAGS.decoder_sparsity_mode).lower() != "elementwise":
+                sweep_scope_tags.append(f"sparm={FLAGS.decoder_sparsity_mode}")
+        sweep_scope_tags.append(f"encY={_flag_bool(FLAGS.encode_labels)}")
+        sweep_scope_tags.append(f"encS={_flag_bool(FLAGS.encode_sources)}")
         sweep_scope_tag = "_".join(sweep_scope_tags)
     else:
         sweep_scope_tag = f"nz={FLAGS.latent_dim}"
@@ -214,9 +246,12 @@ def main(_):
     if FLAGS.run_timestamp.strip():
         # Array sweeps: one W&B group per submit-time RUN_TIMESTAMP.
         if sweep_folder_tag:
-            FLAGS.logging.group = (
-                f"{run_label}_{FLAGS.model_type}_{sweep_scope_tag}_{timestamp}"
-            )
+            if sweep_model_prefix:
+                FLAGS.logging.group = f"{run_label}_{sweep_scope_tag}_{timestamp}"
+            else:
+                FLAGS.logging.group = (
+                    f"{run_label}_{FLAGS.model_type}_{sweep_scope_tag}_{timestamp}"
+                )
         else:
             FLAGS.logging.group = (
                 f"{run_label}_{FLAGS.model_type}_{run_tag_str}_{timestamp}"
@@ -231,7 +266,7 @@ def main(_):
         run_subdir = f"{ts_for_dir}_{sweep_scope_tag}" if ts_for_dir else sweep_scope_tag
     else:
         run_subdir = (
-            f"{ts_for_dir}_nz={FLAGS.latent_dim}_learnpz={_flag_bool(FLAGS.learned_prior)}_"
+            f"{ts_for_dir}_nz={FLAGS.latent_dim}_pz={_flag_bool(FLAGS.learned_prior)}_"
             f"agg={FLAGS.loss_aggregation}{anneal_tag}"
         )
     sweep_root = (
@@ -268,13 +303,23 @@ def main(_):
         set_size,
         segment_len,
         obs_dim,
+        source_dims,
     ) = get_datasets(
         FLAGS.dataset_path,
         obs_dim,
         action_dim,
         FLAGS.batch_size,
         FLAGS.set_size,
+        encode_sources=FLAGS.encode_sources,
+        infomec_path=FLAGS.infomec_dataset_path.strip() or None,
     )
+
+    if FLAGS.encode_sources:
+        pair_encoder_models = {"VAE", "VAEClassifier", "TCVAE", "QLAE"}
+        assert FLAGS.model_type in pair_encoder_models, (
+            f"encode_sources requires PairEncoder model; got {FLAGS.model_type!r}"
+        )
+        assert source_dims is not None, "encode_sources=True but source_dims is None"
 
     if FLAGS.model_type == "MLP":
         reward_model = MLPModel(obs_dim, FLAGS.hidden_dim)
@@ -322,8 +367,12 @@ def main(_):
             decoder_type=FLAGS.decoder_type,
             decoder_gate_temperature=FLAGS.decoder_gate_temperature,
             decoder_slot_routing=FLAGS.decoder_slot_routing,
-            encoder_use_labels=FLAGS.encoder_use_labels,
+            encode_labels=FLAGS.encode_labels,
+            encode_sources=FLAGS.encode_sources,
+            source_dims=source_dims,
             decoder_orth_weight=FLAGS.decoder_orth_weight,
+            decoder_sparsity_weight=FLAGS.decoder_sparsity_weight,
+            decoder_sparsity_mode=FLAGS.decoder_sparsity_mode,
         )
     elif FLAGS.model_type == "VAE" or FLAGS.model_type == "VAEClassifier":
         annealer = None
@@ -358,8 +407,12 @@ def main(_):
             decoder_type=FLAGS.decoder_type,
             decoder_gate_temperature=FLAGS.decoder_gate_temperature,
             decoder_slot_routing=FLAGS.decoder_slot_routing,
-            encoder_use_labels=FLAGS.encoder_use_labels,
+            encode_labels=FLAGS.encode_labels,
+            encode_sources=FLAGS.encode_sources,
+            source_dims=source_dims,
             decoder_orth_weight=FLAGS.decoder_orth_weight,
+            decoder_sparsity_weight=FLAGS.decoder_sparsity_weight,
+            decoder_sparsity_mode=FLAGS.decoder_sparsity_mode,
         )
     elif FLAGS.model_type == "MLPClassifier":
         reward_model = MLPClassifier(obs_dim, FLAGS.hidden_dim)
@@ -378,8 +431,12 @@ def main(_):
             decoder_type=FLAGS.decoder_type,
             decoder_gate_temperature=FLAGS.decoder_gate_temperature,
             decoder_slot_routing=FLAGS.decoder_slot_routing,
-            encoder_use_labels=FLAGS.encoder_use_labels,
+            encode_labels=FLAGS.encode_labels,
+            encode_sources=FLAGS.encode_sources,
+            source_dims=source_dims,
             decoder_orth_weight=FLAGS.decoder_orth_weight,
+            decoder_sparsity_weight=FLAGS.decoder_sparsity_weight,
+            decoder_sparsity_mode=FLAGS.decoder_sparsity_mode,
         )
     else:
         raise NotImplementedError
@@ -417,7 +474,17 @@ def main(_):
             observations = batch["observations"].to(device).float()
             observations_2 = batch["observations_2"].to(device).float()
             labels = batch["labels"].to(device).float()
-            loss, batch_metrics = reward_model(observations, observations_2, labels)
+            source = batch_source(
+                batch=batch,
+                device=device,
+                encode_sources=FLAGS.encode_sources,
+            )
+            loss, batch_metrics = reward_model(
+                observations,
+                observations_2,
+                labels,
+                source=source,
+            )
             loss.backward()
             optimizer.step()
 
@@ -431,8 +498,16 @@ def main(_):
                     observations = batch["observations"].to(device).float()
                     observations_2 = batch["observations_2"].to(device).float()
                     labels = batch["labels"].to(device).float()
+                    source = batch_source(
+                        batch=batch,
+                        device=device,
+                        encode_sources=FLAGS.encode_sources,
+                    )
                     loss, batch_metrics = reward_model(
-                        observations, observations_2, labels
+                        observations,
+                        observations_2,
+                        labels,
+                        source=source,
                     )
 
                     for key, val in prefix_metrics(batch_metrics, "eval").items():

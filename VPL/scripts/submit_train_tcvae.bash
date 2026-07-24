@@ -12,7 +12,7 @@
 #   evals_sweep/
 #   • Wall-clock (set once at submit on the login node):
 #       sbatch --export=ALL,RUN_TIMESTAMP=$(date +%Y%m%d_%H%M%S) scripts/submit_train_tcvae.bash
-#   • If RUN_TIMESTAMP is unset but this is a Slurm array job, we default to arrayjob_<SLURM_ARRAY_JOB_ID>.
+#   • If RUN_TIMESTAMP is unset but this is a Slurm array job, we default to job=<SLURM_ARRAY_JOB_ID>.
 #   • All array tasks with the same RUN_TIMESTAMP share one W&B group (tc_weight sweep).
 # Each task writes to .../<RUN_TIMESTAMP>/subruns/<array_task_id>_tc=.../
 # variant.json records sweep_param_name=tc_weight, sweep_param_value=<tc_weight>.
@@ -59,6 +59,9 @@ annealer_type=cosine
 mi_weight=1.0
 dwkl_weight=1.0
 
+encode_labels=True  # pair encoder: concat y into pair_mlp (q(z|s1,s2,y))
+encode_sources=False  # pair encoder: one-hot GT source_variable (InfoMEC; relabelled dataset)
+
 # * 2 goals
 # pref_dataset="sort_2goals_T=1_Q=5000"
 # pref_dataset="sort_2goals_T=10_Q=5000"
@@ -85,7 +88,7 @@ run_train_tc() {
   comment="${subrun}_tc=${tc_weight}"
 
   if [ -z "${RUN_TIMESTAMP:-}" ] && [ -n "${SLURM_ARRAY_JOB_ID:-}" ]; then
-    RUN_TIMESTAMP="arrayjob_${SLURM_ARRAY_JOB_ID}"
+    RUN_TIMESTAMP="job=${SLURM_ARRAY_JOB_ID}"
   fi
   if [ -n "${RUN_TIMESTAMP:-}" ]; then
     TS_ARGS+=(--run_timestamp="${RUN_TIMESTAMP}")
@@ -110,6 +113,8 @@ run_train_tc() {
     --seed=42 \
     --batch_size=${batch_size} \
     --set_size=${set_size} \
+    --encode_labels="${encode_labels}" \
+    --encode_sources="${encode_sources}" \
     --n_epochs=500 \
     --eval_freq=50 \
     --save_freq=50 \

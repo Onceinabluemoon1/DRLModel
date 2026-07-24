@@ -3,7 +3,10 @@ import math
 import einops as ei
 import torch
 import torch.distributions as D
-from pref_learn.models.nets import reward_decoder_column_orth_penalty
+from pref_learn.models.nets import (
+    reward_decoder_column_orth_penalty,
+    reward_decoder_theta_sparsity,
+)
 from pref_learn.models.utils import logvar_to_std
 from pref_learn.models.vae import VAEModel
 from torch import logsumexp as lse
@@ -41,8 +44,12 @@ class TCVAEModel(VAEModel):
         decoder_type: str = "mlp",
         decoder_gate_temperature: float = 1.0,
         decoder_slot_routing: str = "softmax",
-        encoder_use_labels: bool = True,
+        encode_labels: bool = True,
+        encode_sources: bool = False,
+        source_dims: list[int] | None = None,
         decoder_orth_weight: float = 0.0,
+        decoder_sparsity_weight: float = 0.0,
+        decoder_sparsity_mode: str = "elementwise",
     ):
         if flow_prior:
             raise NotImplementedError("TCVAEModel does not support flow_prior.")
@@ -65,8 +72,12 @@ class TCVAEModel(VAEModel):
             decoder_type=decoder_type,
             decoder_gate_temperature=decoder_gate_temperature,
             decoder_slot_routing=decoder_slot_routing,
-            encoder_use_labels=encoder_use_labels,
+            encode_labels=encode_labels,
+            encode_sources=encode_sources,
+            source_dims=source_dims,
             decoder_orth_weight=decoder_orth_weight,
+            decoder_sparsity_weight=decoder_sparsity_weight,
+            decoder_sparsity_mode=decoder_sparsity_mode,
         )
         self.dataset_size = int(dataset_size)
         self.tc_weight = tc_weight
@@ -140,8 +151,8 @@ class TCVAEModel(VAEModel):
         dwkl_loss = ei.reduce(dwkl_per_sample, "b ->", self.loss_agg)
         return mi_loss, tc_loss, dwkl_loss
 
-    def forward(self, s1, s2, y):  # (B, A, T, O), (B, A, 1)
-        mean, logvar = self.encode(s1, s2, y)  # (B, D), (B, D)
+    def forward(self, s1, s2, y, source=None):  # (B, A, T, O), (B, A, 1)
+        mean, logvar = self.encode(s1, s2, y, source=source)  # (B, D), (B, D)
         z = self.reparameterization(mean=mean, std=logvar_to_std(logvar))  # (B, D)
         N, B, D = self.dataset_size, mean.shape[0], mean.shape[1]
 
@@ -170,6 +181,10 @@ class TCVAEModel(VAEModel):
             orth_loss = reward_decoder_column_orth_penalty(decoder=self.decoder)
             total_loss = total_loss + self.decoder_orth_weight * orth_loss
             orth_metrics["decoder_orth_loss"] = orth_loss.item()
+        if self.decoder_sparsity_weight > 0.0:
+            sparsity_loss = reward_decoder_theta_sparsity(decoder=self.decoder)
+            total_loss = total_loss + self.decoder_sparsity_weight * sparsity_loss
+            orth_metrics["decoder_sparsity_loss"] = sparsity_loss.item()
         # latent_loss mean-pools over D → VAEModel-style D/A scale, not β-TC 1/A
         vanilla_kld_loss = self.latent_loss(mean, logvar)  # KL(q(z|x) || p(z))
         vanilla_kl_norm = (

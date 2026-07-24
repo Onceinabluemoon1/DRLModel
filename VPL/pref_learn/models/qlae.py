@@ -13,6 +13,7 @@ from pref_learn.models.nets import (
     PairEncoder,
     make_reward_decoder,
     reward_decoder_column_orth_penalty,
+    reward_decoder_theta_sparsity,
 )
 from pref_learn.models.quantizer import FSQQuantizer
 
@@ -41,19 +42,26 @@ class QLAE(nn.Module):
         decoder_type: str = "mlp",
         decoder_gate_temperature: float = 1.0,
         decoder_slot_routing: str = "softmax",
-        encoder_use_labels: bool = True,
+        encode_labels: bool = True,
+        encode_sources: bool = False,
+        source_dims: list[int] | None = None,
         decoder_orth_weight: float = 0.0,
+        decoder_sparsity_weight: float = 0.0,
+        decoder_sparsity_mode: str = "elementwise",
     ):
         super().__init__()
         assert loss_aggregation in ("sum", "mean")
-        self.encoder_use_labels = bool(encoder_use_labels)
+        self.encode_labels = bool(encode_labels)
+        self.encode_sources = bool(encode_sources)
         self.encoder = PairEncoder(
             obs_dim=obs_dim,
             hidden_dim=hidden_dim,
             latent_dim=latent_dim,
             segment_len=segment_len,
             gaussian_latent=False,
-            encoder_use_labels=encoder_use_labels,
+            encode_labels=encode_labels,
+            encode_sources=encode_sources,
+            source_dims=source_dims,
         )
         self.quantizer = FSQQuantizer(
             num_latents=latent_dim,
@@ -68,9 +76,11 @@ class QLAE(nn.Module):
             decoder_input=decoder_input,
             gate_temperature=decoder_gate_temperature,
             slot_routing=decoder_slot_routing,
+            sparsity_mode=decoder_sparsity_mode,
         )
         self.decoder_type = str(decoder_type).lower()
         self.decoder_orth_weight = float(decoder_orth_weight)
+        self.decoder_sparsity_weight = float(decoder_sparsity_weight)
         self.latent_dim = latent_dim
         self.annotation_size = annotation_size
         self.segment_len = segment_len
@@ -78,7 +88,7 @@ class QLAE(nn.Module):
         self.scaling = reward_scaling
         self.loss_agg = loss_aggregation
 
-    def encode(self, s1: torch.Tensor, s2: torch.Tensor, y: torch.Tensor):
+    def encode(self, s1: torch.Tensor, s2: torch.Tensor, y: torch.Tensor, source=None):
         """
         Returns quantized latents for downstream use and continuous pre-quant latents.
 
@@ -86,14 +96,14 @@ class QLAE(nn.Module):
             z_q: (B, D)
             z_c: (B, D)
         """
-        z_c = self.encode_continuous(s1=s1, s2=s2, y=y)
+        z_c = self.encode_continuous(s1=s1, s2=s2, y=y, source=source)
         z_q = self.quantizer(z=z_c)["z_q"]
         return z_q, z_c
 
     def encode_continuous(
-        self, s1: torch.Tensor, s2: torch.Tensor, y: torch.Tensor
+        self, s1: torch.Tensor, s2: torch.Tensor, y: torch.Tensor, source=None
     ) -> torch.Tensor:
-        return self.encoder(s1=s1, s2=s2, y=y)  # (B, D)
+        return self.encoder(s1=s1, s2=s2, y=y, source=source)  # (B, D)
 
     def quantize(self, z_c: torch.Tensor) -> dict[str, torch.Tensor]:
         return self.quantizer(z=z_c)
@@ -171,14 +181,20 @@ class QLAE(nn.Module):
             "enc_zq_unique_mean": len(torch.unique(z_q, dim=0)) / max(z_q.shape[0], 1),
         }
 
-    def forward_btl(self, s1: torch.Tensor, s2: torch.Tensor, y: torch.Tensor):
+    def forward_btl(
+        self,
+        s1: torch.Tensor,
+        s2: torch.Tensor,
+        y: torch.Tensor,
+        source=None,
+    ):
         """
         Encode, quantize, and compute Bradley-Terry logits.
 
         Returns:
             recon_loss, logits, labels, p_hat, z_c, z_q
         """
-        z_c = self.encode_continuous(s1=s1, s2=s2, y=y)  # (B, D)
+        z_c = self.encode_continuous(s1=s1, s2=s2, y=y, source=source)  # (B, D)
         z_q = self.quantize(z_c=z_c)["z_q"]  # (B, D)
 
         z = ei.repeat(z_q, "B D -> B A T D", A=self.annotation_size, T=self.segment_len)
@@ -192,14 +208,20 @@ class QLAE(nn.Module):
         recon_loss = self.reconstruction_loss(label=labels, logits=logits)
         return recon_loss, logits, labels, p_hat, z_c, z_q
 
-    def forward(self, s1, s2, y):  # (B, A, T, O), (B, A, 1)
-        recon_loss, _, labels, p_hat, z_c, z_q = self.forward_btl(s1=s1, s2=s2, y=y)
+    def forward(self, s1, s2, y, source=None):  # (B, A, T, O), (B, A, 1)
+        recon_loss, _, labels, p_hat, z_c, z_q = self.forward_btl(
+            s1=s1, s2=s2, y=y, source=source
+        )
         total_loss = recon_loss
         orth_metrics: dict[str, float] = {}
         if self.decoder_orth_weight > 0.0:
             orth_loss = reward_decoder_column_orth_penalty(decoder=self.decoder)
             total_loss = total_loss + self.decoder_orth_weight * orth_loss
             orth_metrics["decoder_orth_loss"] = orth_loss.item()
+        if self.decoder_sparsity_weight > 0.0:
+            sparsity_loss = reward_decoder_theta_sparsity(decoder=self.decoder)
+            total_loss = total_loss + self.decoder_sparsity_weight * sparsity_loss
+            orth_metrics["decoder_sparsity_loss"] = sparsity_loss.item()
         acc = self.accuracy(labels, p_hat)
         metrics = {
             "total_loss": total_loss.item(),
@@ -211,8 +233,8 @@ class QLAE(nn.Module):
         }
         return total_loss, metrics
 
-    def sample_posterior(self, s1, s2, y):
-        z_q, z_c = self.encode(s1, s2, y)
+    def sample_posterior(self, s1, s2, y, source=None):
+        z_q, z_c = self.encode(s1, s2, y, source=source)
         return z_q, z_c, z_q
 
     def update_posteriors(self, posteriors, biased_latents):

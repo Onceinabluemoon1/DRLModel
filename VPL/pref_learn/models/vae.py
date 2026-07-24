@@ -8,6 +8,7 @@ from pref_learn.models.nets import (
     PairEncoder,
     make_reward_decoder,
     reward_decoder_column_orth_penalty,
+    reward_decoder_theta_sparsity,
 )
 from pref_learn.models.utils import Annealer, logvar_to_std
 
@@ -35,20 +36,27 @@ class VAEModel(nn.Module):
         decoder_type: str = "mlp",
         decoder_gate_temperature: float = 1.0,
         decoder_slot_routing: str = "softmax",
-        encoder_use_labels: bool = True,
+        encode_labels: bool = True,
+        encode_sources: bool = False,
+        source_dims: list[int] | None = None,
         decoder_orth_weight: float = 0.0,
+        decoder_sparsity_weight: float = 0.0,
+        decoder_sparsity_mode: str = "elementwise",
     ):
         super(VAEModel, self).__init__()
         assert loss_aggregation in ("sum", "mean")
         self.discrete_latents = bool(discrete_latents)
-        self.encoder_use_labels = bool(encoder_use_labels)
+        self.encode_labels = bool(encode_labels)
+        self.encode_sources = bool(encode_sources)
         self.encoder = PairEncoder(
             obs_dim=obs_dim,
             hidden_dim=hidden_dim,
             latent_dim=latent_dim,
             segment_len=segment_len,
             gaussian_latent=True,
-            encoder_use_labels=encoder_use_labels,
+            encode_labels=encode_labels,
+            encode_sources=encode_sources,
+            source_dims=source_dims,
         )
         self.decoder = make_reward_decoder(
             decoder_type=decoder_type,
@@ -59,9 +67,11 @@ class VAEModel(nn.Module):
             decoder_input=decoder_input,
             gate_temperature=decoder_gate_temperature,
             slot_routing=decoder_slot_routing,
+            sparsity_mode=decoder_sparsity_mode,
         )
         self.decoder_type = str(decoder_type).lower()
         self.decoder_orth_weight = float(decoder_orth_weight)
+        self.decoder_sparsity_weight = float(decoder_sparsity_weight)
         self.latent_dim = latent_dim
         self.prior_mean = torch.nn.Parameter(
             torch.zeros(latent_dim), requires_grad=learned_prior
@@ -83,17 +93,23 @@ class VAEModel(nn.Module):
         self.loss_agg = loss_aggregation
         self.normalize_kl = normalize_kl
 
-    def encode(self, s1, s2, y):
+    def encode(self, s1, s2, y, source=None):
         """
         Input:
             traj1: (B, A, T, O)
             traj2: (B, A, T, O)
             y: (B, A, 1)
+            source: optional (B, n_sources) discrete GT source indices
         Output:
             mean: (B, Z)
             logvar: (B, Z)
         """
-        mean, logvar = self.encoder(s1=s1, s2=s2, y=y)  # (B, Z), (B, Z)
+        mean, logvar = self.encoder(
+            s1=s1,
+            s2=s2,
+            y=y,
+            source=source,
+        )  # (B, Z), (B, Z)
         return mean, logvar
 
     def decode(self, obs, z) -> torch.Tensor:
@@ -254,8 +270,8 @@ class VAEModel(nn.Module):
             "enc_mean_abs": mean.abs().mean().item(),
         }
 
-    def forward(self, s1, s2, y):  # (B, A, T, O), (B, A, 1)
-        mean, logvar = self.encode(s1, s2, y)  # (B, Z), (B, Z)
+    def forward(self, s1, s2, y, source=None):  # (B, A, T, O), (B, A, 1)
+        mean, logvar = self.encode(s1, s2, y, source=source)  # (B, Z), (B, Z)
         std = logvar_to_std(logvar)
 
         if self.flow_prior:
@@ -288,6 +304,10 @@ class VAEModel(nn.Module):
             orth_loss = reward_decoder_column_orth_penalty(decoder=self.decoder)
             total_loss = total_loss + self.decoder_orth_weight * orth_loss
             orth_metrics["decoder_orth_loss"] = orth_loss.item()
+        if self.decoder_sparsity_weight > 0.0:
+            sparsity_loss = reward_decoder_theta_sparsity(decoder=self.decoder)
+            total_loss = total_loss + self.decoder_sparsity_weight * sparsity_loss
+            orth_metrics["decoder_sparsity_loss"] = sparsity_loss.item()
 
         acc = self.accuracy(labels, p_hat)
         metrics = {
@@ -315,8 +335,8 @@ class VAEModel(nn.Module):
             z = eps
         return z
 
-    def sample_posterior(self, s1, s2, y):
-        mean, logvar = self.encode(s1, s2, y)
+    def sample_posterior(self, s1, s2, y, source=None):
+        mean, logvar = self.encode(s1, s2, y, source=source)
         z = self.reparameterization(mean, logvar_to_std(logvar))
         return mean, logvar, z
 
@@ -363,8 +383,8 @@ class VAEClassifier(VAEModel):
             normalize_kl=normalize_kl,
         )
 
-    def forward(self, s1, s2, y):  # (B, A, T, O), (B, A, 1)
-        mean, logvar = self.encode(s1, s2, y)  # (B, Z), (B, Z)
+    def forward(self, s1, s2, y, source=None):  # (B, A, T, O), (B, A, 1)
+        mean, logvar = self.encode(s1, s2, y, source=source)  # (B, Z), (B, Z)
         std = logvar_to_std(logvar)
 
         if self.flow_prior:

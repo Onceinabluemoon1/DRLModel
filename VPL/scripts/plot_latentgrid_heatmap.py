@@ -285,6 +285,7 @@ def enrich_rows_with_infomec(
         encode_batch_size,
         _shared_variant,
         dataset_path,
+        query_source,
         device,
     ) = plt_infomec.prepare_infomec_eval_arrays(
         run_dirs[0],
@@ -316,7 +317,8 @@ def enrich_rows_with_infomec(
             model=model, variant=variant
         )
         latents = plt_infomec.batched_encode(
-            model, obs1, obs2, labels, encode_batch_size, device
+            model, obs1, obs2, labels, encode_batch_size, device,
+            source=query_source,
         )
         result = compute_infomec(
             sources=sources, latents=latents, discrete_latents=discrete_latents

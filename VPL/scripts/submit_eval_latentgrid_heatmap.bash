@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=plot_latentgrid_heatmap
 #SBATCH --gres=shard:12
-#SBATCH --array=0-14
+#SBATCH --array=0
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=16G
 #SBATCH --output=/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/logs_slurm/eval_latentgrid_heatmap/eval_latentgrid_heatmap_%A_%a.out
@@ -12,9 +12,8 @@
 #
 # Local (no Slurm): copy-paste block below (works in zsh; conda activate drl first if needed).
 : <<'LOCAL_CUDA_RUN'
-GPU=5; cd /scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/VPL; INPUT_DIRS=(
-  "/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/outputs/sort_4goals_T=1_Q=20000_A=16/QLAE/20260625_222934_lgrid_learnpz=F_dec=slotlinear_slotr=sum_encY=T"
-  "/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/outputs/sort_4goals_T=1_Q=20000_A=16/QLAE/20260625_204917_lgrid_learnpz=F_dec=slotlinear_slotr=sum_encY=T"
+GPU=6; cd /scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/VPL; INPUT_DIRS=(
+  "/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/outputs/sort_4goals_obs=15_T=1_Q=20000_A=16/VAE/20260720_154510_VAEgrid_pz=F_anneal=F_dec=poslinear_sparw=0.001_sparm=group_encY=T_encS=T"
 ); for d in "${INPUT_DIRS[@]}"; do CUDA_VISIBLE_DEVICES=$GPU python scripts/plot_latentgrid_heatmap.py --input-dir="$d" --model-selection=final --split=all --device=cuda --dpi=200 --num-bins=10; done
 LOCAL_CUDA_RUN
 
@@ -24,7 +23,7 @@ conda activate drl
 
 #* latentsweep roots (each must contain subruns/ with variant.json + checkpoint)
 INPUT_DIRS=(
-  "/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/outputs/sort_4goals_obs=15_T=1_Q=20000_A=16/QLAE/20260629_003701_lgrid_nv=6_dec=offsetlinear_encY=T"
+/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/outputs/sort_4goals_obs=15_T=25_Q=20000_A=16/QLAE/20260720_233353_QLAEgrid_nv=9_dec=poslinear_sparw=0.01_encY=T_encS=F
 )
 
 #* plot_latentgrid_heatmap CLI (shared across array tasks)

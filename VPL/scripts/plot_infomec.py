@@ -598,6 +598,7 @@ def collect_epoch_checkpoint_infomec_series(
     batch_size: int,
     device: torch.device,
     discrete_latents: bool,
+    source: np.ndarray | None = None,
 ) -> Optional[Dict[str, Any]]:
     ckpts = gather_epoch_checkpoints(run_dir)
     if not ckpts:
@@ -613,7 +614,9 @@ def collect_epoch_checkpoint_infomec_series(
     for ep, ckpt_path in ckpts:
         model = torch.load(ckpt_path, map_location=device, weights_only=False).to(device)
         model.eval()
-        latents = batched_encode(model, obs1, obs2, labels, batch_size, device)
+        latents = batched_encode(
+            model, obs1, obs2, labels, batch_size, device, source=source
+        )
         if latent_dim is None:
             latent_dim = int(latents.shape[1])
         result = compute_infomec(
@@ -686,6 +689,7 @@ def run_epoch_checkpoint_infomec_curve(
     batch_size: int,
     device: torch.device,
     discrete_latents: bool,
+    source: np.ndarray | None = None,
 ) -> None:
     payload = collect_epoch_checkpoint_infomec_series(
         run_dir,
@@ -696,6 +700,7 @@ def run_epoch_checkpoint_infomec_curve(
         batch_size,
         device,
         discrete_latents,
+        source=source,
     )
     save_infomec_epoch_series_artifacts(payload, outdir)
 
@@ -731,6 +736,7 @@ def save_eval_artifacts_after_encode(
     learned_reward_also_save_as: Optional[Path] = None,
     learned_reward_sweep_outdir: Optional[Path] = None,
     learned_reward_sweep_comment: Optional[str] = None,
+    query_source: np.ndarray | None = None,
 ) -> Dict[str, Any]:
     """Persist latents, NMI heatmap, latent 2D embedding, infomec_metrics.json, summary.txt under outdir.
 
@@ -815,6 +821,7 @@ def save_eval_artifacts_after_encode(
             batch_size=batch_size,
             run_title=run_title,
             learned_reward_max_comp=learned_reward_max_comp,
+            query_source=query_source,
         )
         if model_supports_probabilistic_reward(model=model):
             sweep_comment = str(learned_reward_sweep_comment or input_dir.name).strip()
@@ -1077,15 +1084,60 @@ def infer_source_columns(
     return np.stack(columns, axis=1), names
 
 
-def batched_encode(model, obs1, obs2, labels, batch_size, device):
+def model_encode_sources(model: torch.nn.Module) -> bool:
+    return bool(getattr(model, "encode_sources", False))
+
+
+def slice_query_source(batch: dict, idx: np.ndarray) -> np.ndarray | None:
+    """``(N, n_sources)`` GT source indices for the split, or ``None`` if absent."""
+    if "source_variable" not in batch:
+        return None
+    return np.asarray(batch["source_variable"])[idx]
+
+
+def encode_source_kwargs(
+    *,
+    model: torch.nn.Module,
+    source: np.ndarray | None,
+    start: int,
+    end: int,
+    device: torch.device,
+) -> dict[str, torch.Tensor]:
+    if not model_encode_sources(model=model):
+        return {}
+    if source is None:
+        raise ValueError(
+            "Model has encode_sources=True but source is None. "
+            "Use a relabelled dataset with source_variable."
+        )
+    u = torch.from_numpy(np.asarray(source[start:end])).long().to(device)
+    return {"source": u}
+
+
+def batched_encode(
+    model,
+    obs1,
+    obs2,
+    labels,
+    batch_size,
+    device,
+    source=None,
+):
     means = []
     for start in range(0, len(obs1), batch_size):
         end = min(start + batch_size, len(obs1))
         o1 = torch.from_numpy(obs1[start:end]).float().to(device)
         o2 = torch.from_numpy(obs2[start:end]).float().to(device)
         y = torch.from_numpy(labels[start:end]).float().to(device)
+        enc_kw = encode_source_kwargs(
+            model=model,
+            source=source,
+            start=start,
+            end=end,
+            device=device,
+        )
         with torch.no_grad():
-            mean, _ = model.encode(o1, o2, y)  # B, Z
+            mean, _ = model.encode(o1, o2, y, **enc_kw)  # B, Z
         means.append(mean.cpu().numpy())
     return np.concatenate(means, axis=0)
 
@@ -1100,6 +1152,7 @@ def batched_learned_rewards_on_obs1(
     *,
     comparison_obs: np.ndarray | None = None,
     reward_mode: Literal["raw", "prob"] = "prob",
+    source: np.ndarray | None = None,
 ) -> np.ndarray:
     """Encoder latent per query (VAE posterior mean; QLAE ``z_q``), then reward on ``obs1``.
 
@@ -1122,8 +1175,11 @@ def batched_learned_rewards_on_obs1(
         o2 = torch.from_numpy(obs2[start:end]).float().to(device)
         y = torch.from_numpy(labels[start:end]).float().to(device)
         b_n = end - start
+        enc_kw = encode_source_kwargs(
+            model=model, source=source, start=start, end=end, device=device
+        )
         with torch.no_grad():
-            mean, _ = model.encode(o1, o2, y)  # (B, Z)
+            mean, _ = model.encode(o1, o2, y, **enc_kw)  # (B, Z)
             if reward_mode == "prob":
                 assert comp_t is not None
                 o_flat = o1.reshape(b_n * s_n * t_n, o_dim)  # (B*S*T, O)
@@ -1216,6 +1272,7 @@ def maybe_save_learned_reward_by_annotator_mode(
     learned_reward_mode: Literal["raw", "prob"] = "prob",
     learned_reward_max_comp: int = 512,
     also_save_as: Optional[Path] = None,
+    query_source: np.ndarray | None = None,
 ) -> Optional[Dict[str, Any]]:
     """Ravens sort env: scatter learned reward vs EE (x,y), one subplot per GT annotator mode.
 
@@ -1251,6 +1308,7 @@ def maybe_save_learned_reward_by_annotator_mode(
         device=device,
         comparison_obs=comparison_pool,
         reward_mode=learned_reward_mode,
+        source=query_source,
     )
     per_mode_obs, per_mode_r = gather_learned_rewards_by_annotator_mode(
         obs1,
@@ -1335,7 +1393,13 @@ def preference_dataloader_for_split(
         "observations_2": batch["observations_2"][idx, :set_length],
         "labels": batch["labels"][idx, :set_length],
     }
-    dataset = PreferenceDataset(sub)
+    query_source = slice_query_source(batch=batch, idx=idx)
+    if query_source is not None:
+        sub["source_variable"] = query_source
+    dataset = PreferenceDataset(
+        sub,
+        encode_sources=query_source is not None,
+    )
     return DataLoader(
         dataset=dataset,
         batch_size=batch_size,
@@ -1358,7 +1422,10 @@ def encode_latents_dataloader(
             o1 = batch["observations"].to(device).float()  # (B, A, T, O)
             o2 = batch["observations_2"].to(device).float()
             y = batch["labels"].to(device).float()
-            mean, _ = model.encode(o1, o2, y)  # (B, Z)
+            enc_kw: dict[str, torch.Tensor] = {}
+            if model_encode_sources(model=model):
+                enc_kw["source"] = batch["source_variable"].to(device).long()
+            mean, _ = model.encode(o1, o2, y, **enc_kw)  # (B, Z)
             means.append(mean.cpu().numpy())
     return np.concatenate(means, axis=0)  # (N, Z)
 
@@ -1420,6 +1487,7 @@ def encode_posterior_mu_logvar_unperturbed(
     obs2: np.ndarray,
     labels: np.ndarray,
     device: torch.device,
+    source: np.ndarray | None = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     q(z|s1,s2,y) for a single batch row: encoder mean and log_var (diagonal), no table sweep.
@@ -1444,8 +1512,15 @@ def encode_posterior_mu_logvar_unperturbed(
     t1 = torch.from_numpy(o1).float().to(device)
     t2 = torch.from_numpy(o2).float().to(device)
     yv = torch.from_numpy(y_3d).float().to(device)
+    enc_kw = encode_source_kwargs(
+        model=model,
+        source=source,
+        start=0,
+        end=1,
+        device=device,
+    )
     with torch.no_grad():
-        m, lv = model.encode(t1, t2, yv)
+        m, lv = model.encode(t1, t2, yv, **enc_kw)
     return m.cpu().numpy().reshape(-1), lv.cpu().numpy().reshape(-1)
 
 
@@ -1462,6 +1537,7 @@ def encode_latent_means_on_xy_table_grid(
     time_index: int = -1,
     move: Literal["obs1", "obs2", "both"] = "obs1",
     max_batch: int = 1024,
+    base_source: np.ndarray | None = None,
 ) -> np.ndarray:
     """
     VAE encoder posterior *mean* on a 2D grid of **object** table positions (SortEnv ``O[3:5]``).
@@ -1537,8 +1613,18 @@ def encode_latent_means_on_xy_table_grid(
         t1 = torch.from_numpy(o1b_t[start:end]).float().to(device)
         t2 = torch.from_numpy(o2b_t[start:end]).float().to(device)
         yv = torch.from_numpy(yb_t[start:end]).float().to(device)
+        enc_kw = encode_source_kwargs(
+            model=model,
+            source=base_source,
+            start=0,
+            end=1,
+            device=device,
+        )
+        if enc_kw:
+            u = enc_kw["source"]  # (1, n_sources)
+            enc_kw["source"] = u.expand(end - start, -1)
         with torch.no_grad():
-            m, _ = model.encode(t1, t2, yv)
+            m, _ = model.encode(t1, t2, yv, **enc_kw)
         means_b.append(m.cpu().numpy())
     m_all = np.concatenate(means_b, axis=0)  # (B, L) — (Gx*Gy, L)
     l_m = int(m_all.shape[1])
@@ -1740,6 +1826,7 @@ def prepare_infomec_eval_arrays(
     int,
     dict,
     Path,
+    np.ndarray | None,
     torch.device,
 ]:
     """Load dataset + build observation tensors and source matrix for one training run_dir."""
@@ -1776,6 +1863,7 @@ def prepare_infomec_eval_arrays(
         source_cols.append(cols)
         source_names.extend(names)
     sources = np.concatenate(source_cols, axis=1)
+    query_source = slice_query_source(batch=batch, idx=idx)
     return (
         obs1,
         obs2,
@@ -1786,6 +1874,7 @@ def prepare_infomec_eval_arrays(
         bs,
         variant,
         dataset_path,
+        query_source,
         device,
     )
 
@@ -2288,6 +2377,7 @@ def main(args: AnalysisCLI) -> None:
         batch_size,
         variant,
         dataset_path,
+        query_source,
         device,
     ) = prepare_infomec_eval_arrays(
         input_dir,
@@ -2320,6 +2410,7 @@ def main(args: AnalysisCLI) -> None:
         batch_size,
         device,
         discrete_latents,
+        source=query_source,
     )
 
     latent_xy_table_grid_png: Optional[Path] = None
@@ -2342,6 +2433,7 @@ def main(args: AnalysisCLI) -> None:
             obs2[0:1],
             labels[0:1],
             device,
+            source=(None if query_source is None else query_source[0:1]),
         )  # (L,), (L,)
         means = encode_latent_means_on_xy_table_grid(
             model,
@@ -2354,6 +2446,7 @@ def main(args: AnalysisCLI) -> None:
             annotation_index=0,
             time_index=-1,
             move="obs1",
+            base_source=(None if query_source is None else query_source[0:1]),
         )  # (G, G, L)
         latent_xy_table_grid_png = outdir / "latent_mean_vs_xy_table_grid.png"
         save_latent_xy_grid_heatmaps(
@@ -2434,6 +2527,7 @@ def main(args: AnalysisCLI) -> None:
         device=device,
         learned_reward_mode=args.learned_reward_mode,
         learned_reward_max_comp=args.learned_reward_max_comp,
+        query_source=query_source,
     )
     if epoch_payload is not None:
         save_infomec_epoch_series_artifacts(

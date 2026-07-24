@@ -12,7 +12,7 @@
 #   evals_sweep/
 #   • Wall-clock (set once at submit on the login node):
 #       sbatch --export=ALL,RUN_TIMESTAMP=$(date +%Y%m%d_%H%M%S) scripts/submit_train_vae.bash
-#   • If RUN_TIMESTAMP is unset but this is a Slurm array job, we default to arrayjob_<SLURM_ARRAY_JOB_ID>.
+#   • If RUN_TIMESTAMP is unset but this is a Slurm array job, we default to job=<SLURM_ARRAY_JOB_ID>.
 #   • All array tasks with the same RUN_TIMESTAMP share one W&B group (beta sweep).
 # Each task writes to .../<RUN_TIMESTAMP>/subruns/<array_task_id>_beta=.../
 # variant.json records sweep_param_name=kl_weight, sweep_param_value=<beta>.
@@ -47,9 +47,14 @@ learned_prior=False
 use_annealing=False
 
 decoder_type=slotlinear
-decoder_gate_temperature=1.0  # linear / slotlinear softmax: lower ⇒ peakier α_j
+decoder_gate_temperature=1.0  # slotlinear softmax: lower ⇒ peakier α_j
 decoder_slot_routing=sum   # slotlinear only: softmax | sum (direct Σ r_j)
-decoder_orth_weight=0.0  # odinlinear only; no-op for linear / slotlinear
+decoder_orth_weight=0.0  # odinlinear only; no-op for other decoders
+decoder_sparsity_weight=0.0  # poslinear only: L1 on theta(s); no-op for other decoders
+decoder_sparsity_mode=elementwise  # poslinear only: elementwise (L1, parts-biased) | group (lasso over heads, axes-biased)
+
+encode_labels=True  # pair encoder: concat y into pair_mlp (q(z|s1,s2,y))
+encode_sources=False  # pair encoder: one-hot GT source_variable (InfoMEC; relabelled dataset)
 
 # * 2 goals
 # pref_dataset="sort_2goals_T=1_Q=5000"
@@ -77,7 +82,7 @@ run_train_beta() {
   comment="${subrun}_beta=${beta}"
 
   if [ -z "${RUN_TIMESTAMP:-}" ] && [ -n "${SLURM_ARRAY_JOB_ID:-}" ]; then
-    RUN_TIMESTAMP="arrayjob_${SLURM_ARRAY_JOB_ID}"
+    RUN_TIMESTAMP="job=${SLURM_ARRAY_JOB_ID}"
   fi
   if [ -n "${RUN_TIMESTAMP:-}" ]; then
     TS_ARGS+=(--run_timestamp="${RUN_TIMESTAMP}")
@@ -102,6 +107,10 @@ run_train_beta() {
     --decoder_gate_temperature="${decoder_gate_temperature}" \
     --decoder_slot_routing="${decoder_slot_routing}" \
     --decoder_orth_weight="${decoder_orth_weight}" \
+    --decoder_sparsity_weight="${decoder_sparsity_weight}" \
+    --decoder_sparsity_mode="${decoder_sparsity_mode}" \
+    --encode_labels="${encode_labels}" \
+    --encode_sources="${encode_sources}" \
     --n_epochs=500 \
     --eval_freq=50 \
     --save_freq=50 \

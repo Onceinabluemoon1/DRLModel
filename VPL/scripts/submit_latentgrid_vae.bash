@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=train_vae_grid
 #SBATCH --gres=shard:12
-#SBATCH --array=0-47%8
+#SBATCH --array=0-41%7
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=16G
 #SBATCH --output=/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/logs_slurm/train_vae_grid/train_vae_grid_%A_%a.out
@@ -14,7 +14,7 @@
 #     evals_latentgrid/
 #   • Wall-clock (set once at submit on the login node):
 #       sbatch --export=ALL,RUN_TIMESTAMP=$(date +%Y%m%d_%H%M%S) scripts/submit_train_vae_grid.bash
-#   • If RUN_TIMESTAMP is unset but this is a Slurm array job, we default to arrayjob_<SLURM_ARRAY_JOB_ID>.
+#   • If RUN_TIMESTAMP is unset but this is a Slurm array job, we default to job=<SLURM_ARRAY_JOB_ID>.
 #   • All tasks with the same RUN_TIMESTAMP share one W&B group (same tag as sweep folder).
 # Each task writes to .../<sweep_folder>/subruns/<array_task_id>_nz=<L>_beta=.../
 # variant.json records sweep_param_name=kl_weight, sweep_param_value=<beta> (latent_dim in variant).
@@ -32,7 +32,6 @@ BETAS=(
     0.3
     1.0
     3.0
-    6.0
 )
 LATENT_DIMS=(
     2
@@ -53,10 +52,15 @@ normalize_kl=True
 learned_prior=False
 use_annealing=False
 
-decoder_type=ellenlinear
-decoder_gate_temperature=1.0  # linear / slotlinear softmax: lower ⇒ peakier α_j
+decoder_type=poslinear
+decoder_gate_temperature=1.0  # slotlinear softmax: lower ⇒ peakier α_j
 decoder_slot_routing=sum   # slotlinear only: softmax | sum (direct Σ r_j)
-decoder_orth_weight=0.0  # odinlinear only; no-op for linear / slotlinear
+decoder_orth_weight=0.0  # odinlinear only; no-op for other decoders
+decoder_sparsity_weight=0.001  # poslinear only: L1 on theta(s); no-op for other decoders
+decoder_sparsity_mode=group  # poslinear only: elementwise (L1, parts-biased) | group (lasso over heads, axes-biased)
+
+encode_labels=True  # pair encoder: concat y into pair_mlp (q(z|s1,s2,y))
+encode_sources=True  # pair encoder: one-hot GT source_variable after set pool (InfoMEC)
 
 # * 2 goals
 # pref_dataset="sort_2goals_T=1_Q=5000"
@@ -100,7 +104,7 @@ run_train_grid() {
   comment="${subrun}_nz=${latent_dim}_beta=${beta}"
 
   if [ -z "${RUN_TIMESTAMP:-}" ] && [ -n "${SLURM_ARRAY_JOB_ID:-}" ]; then
-    RUN_TIMESTAMP="arrayjob_${SLURM_ARRAY_JOB_ID}"
+    RUN_TIMESTAMP="job=${SLURM_ARRAY_JOB_ID}"
   fi
   if [ -n "${RUN_TIMESTAMP:-}" ]; then
     TS_ARGS+=(--run_timestamp="${RUN_TIMESTAMP}")
@@ -126,6 +130,10 @@ run_train_grid() {
     --decoder_gate_temperature="${decoder_gate_temperature}" \
     --decoder_slot_routing="${decoder_slot_routing}" \
     --decoder_orth_weight="${decoder_orth_weight}" \
+    --decoder_sparsity_weight="${decoder_sparsity_weight}" \
+    --decoder_sparsity_mode="${decoder_sparsity_mode}" \
+    --encode_labels="${encode_labels}" \
+    --encode_sources="${encode_sources}" \
     --n_epochs=500 \
     --eval_freq=50 \
     --save_freq=50 \
@@ -160,5 +168,5 @@ fi
 sbatch --export=ALL,RUN_TIMESTAMP=$(date +%Y%m%d_%H%M%S) scripts/submit_train_vae_grid.bash
 
 # Serial loop (one GPU; full grid in order; shared W&B group):
-CUDA_VISIBLE_DEVICES=0 RUN_TIMESTAMP=$(date +%Y%m%d_%H%M%S) bash scripts/submit_train_vae_grid.bash serial
+CUDA_VISIBLE_DEVICES=6 RUN_TIMESTAMP=$(date +%Y%m%d_%H%M%S) bash scripts/submit_train_vae_grid.bash serial
 EOF

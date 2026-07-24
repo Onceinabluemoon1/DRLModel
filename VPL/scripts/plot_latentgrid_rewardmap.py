@@ -64,6 +64,17 @@ def sweep_param_filename_prefix(*, sweep_param_name: str) -> str:
     return SWEEP_PARAM_FILENAME_PREFIX.get(str(sweep_param_name), str(sweep_param_name))
 
 
+def rewardmap_run_dir_tag(
+    *,
+    ts: str,
+    sweep_param_name: str,
+    sweep_param_value: float,
+) -> str:
+    """``<timestamp>_<prefix>=<value>`` for ``evals_rewardmap/<tag>/``."""
+    prefix = sweep_param_filename_prefix(sweep_param_name=sweep_param_name)
+    return f"{ts}_{prefix}={sweep_param_value:g}"
+
+
 def rewardmap_out_png(
     *,
     outdir: Path,
@@ -74,7 +85,7 @@ def rewardmap_out_png(
     infom: Optional[float] = None,
     infoc: Optional[float] = None,
 ) -> Path:
-    """``evals_rewardmap/<ts>/<raw|prob>_rewards/{mode}_{prefix}={val}_nz={nz}[_infom=…][_infoc=…].png``."""
+    """``evals_rewardmap/<ts>_<prefix>=<val>/<raw|prob>_rewards/{mode}_{prefix}={val}_nz={nz}[_infom=…][_infoc=…].png``."""
     mode_dir = outdir / REWARD_MODE_OUTDIR[reward_mode]
     prefix = sweep_param_filename_prefix(sweep_param_name=sweep_param_name)
     fname = f"{reward_mode}_{prefix}={sweep_param_value:g}_nz={latent_dim}"
@@ -106,10 +117,13 @@ class LatentGridRewardMapCLI:
     """``evals_latentgrid/<timestamp>/`` with ``latentgrid_metrics_train.csv``; default latest."""
 
     recon_top_k: int = 4
-    """Auto HP: keep this many lowest avg-``recon_loss`` rows, then pick max InfoM."""
+    """Auto HP: among threshold-passing rows, keep up to this many lowest avg-``recon_loss`` HPs, then pick max InfoM."""
+
+    recon_loss_threshold: Optional[float] = None
+    """Auto HP: only consider HP rows with avg ``recon_loss`` at or below this value; default no threshold."""
 
     outdir: Optional[Path] = None
-    """Default ``<input_dir>/evals_rewardmap/<timestamp>/``."""
+    """Default ``<input_dir>/evals_rewardmap/<timestamp>_<prefix>=<value>/``."""
 
     reward_mode: RewardMapMode = RewardMapMode.both
     """``raw``: decoder head output; ``prob``: BTL preference using one head only."""
@@ -228,8 +242,9 @@ def select_sweep_param_value(
     *,
     rows: list[dict[str, str]],
     recon_top_k: int,
+    recon_loss_threshold: Optional[float] = None,
 ) -> tuple[float, dict[str, Any]]:
-    """Among lowest-avg-``recon_loss`` HP rows, pick the one with highest max InfoM."""
+    """Filter by avg-``recon_loss`` threshold, keep up to top-k, then pick highest max InfoM."""
     by_hp: dict[float, dict[str, list[float]]] = {}
     for row in rows:
         hp = float(row["sweep_param_value"])
@@ -249,19 +264,57 @@ def select_sweep_param_value(
         }
         for hp, vals in by_hp.items()
     }
-    k = min(int(recon_top_k), len(row_stats))
+
+    #* threshold filter (optional)
+    filtered_stats = row_stats
+    if recon_loss_threshold is not None:
+        filtered_stats = {
+            hp: stats
+            for hp, stats in row_stats.items()
+            if stats["avg_recon_loss"] <= float(recon_loss_threshold)
+        }
+        if not filtered_stats:
+            best_hp, best_stats = min(
+                row_stats.items(),
+                key=lambda item: (item[1]["avg_recon_loss"], item[0]),
+            )
+            raise RuntimeError(
+                f"No HP rows with avg_recon_loss <= {recon_loss_threshold:g}; "
+                f"lowest is {best_hp:g} "
+                f"(avg_recon_loss={best_stats['avg_recon_loss']:.6g})"
+            )
+
+    k = min(int(recon_top_k), len(filtered_stats))
     recon_candidates = sorted(
-        row_stats.items(),
+        filtered_stats.items(),
         key=lambda item: (item[1]["avg_recon_loss"], item[0]),
     )[:k]
     selected_hp, selected_stats = max(
         recon_candidates,
         key=lambda item: (item[1]["max_infom"], -item[1]["avg_recon_loss"]),
     )
+
+    if recon_loss_threshold is not None:
+        method = (
+            f"avg_recon_loss<={recon_loss_threshold:g}, "
+            f"lowest-{k}-of-{len(filtered_stats)} then max_infom"
+        )
+    else:
+        method = f"lowest-{k}-avg_recon_loss then max_infom"
+
     selection_info: dict[str, Any] = {
-        "method": f"lowest-{k}-avg_recon_loss then max_infom",
+        "method": method,
         "recon_top_k": k,
+        "recon_loss_threshold": recon_loss_threshold,
+        "n_threshold_passing": len(filtered_stats),
         "row_stats": {f"{hp:g}": stats for hp, stats in row_stats.items()},
+        "threshold_passing": [
+            {"sweep_param_value": hp, **stats}
+            for hp, stats in sorted(
+                filtered_stats.items(),
+                key=lambda item: (item[1]["avg_recon_loss"], item[0]),
+            )
+        ],
         "recon_candidates": [
             {"sweep_param_value": hp, **stats} for hp, stats in recon_candidates
         ],
@@ -276,6 +329,7 @@ def resolve_sweep_param_value(
     sweep_param_value: Optional[float],
     latentgrid_metrics_dir: Optional[Path],
     recon_top_k: int,
+    recon_loss_threshold: Optional[float] = None,
 ) -> tuple[float, dict[str, Any]]:
     if sweep_param_value is not None:
         return float(sweep_param_value), {
@@ -291,6 +345,7 @@ def resolve_sweep_param_value(
     selected_hp, selection_info = select_sweep_param_value(
         rows=metric_rows,
         recon_top_k=recon_top_k,
+        recon_loss_threshold=recon_loss_threshold,
     )
     selection_info["latentgrid_metrics_csv"] = str(csv_path)
     selected = selection_info["selected"]
@@ -388,11 +443,19 @@ def encode_query_latents(
     obs1: torch.Tensor,
     obs2: torch.Tensor,
     labels: torch.Tensor,
+    source: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    enc_kw: dict[str, torch.Tensor] = {}
+    if plt_infomec.model_encode_sources(model=model):
+        if source is None:
+            raise ValueError(
+                "Model has encode_sources=True but source is None."
+            )
+        enc_kw["source"] = source
     if isinstance(model, QLAE):
-        z_q, _ = model.encode(obs1, obs2, labels)
+        z_q, _ = model.encode(obs1, obs2, labels, **enc_kw)
         return z_q
-    mean, _ = model.encode(obs1, obs2, labels)
+    mean, _ = model.encode(obs1, obs2, labels, **enc_kw)
     return mean
 
 
@@ -486,6 +549,7 @@ def batched_per_head_rewards_on_obs1(
     prob_max_comp: int = 512,
     prob_chunk_size: int = 64,
     prob_comp_chunk_size: int = 64,
+    source: np.ndarray | None = None,
 ) -> np.ndarray:
     """``(Q, S, T, Z)`` per-head rewards on ``obs1`` with encoder latents per query."""
     q_n = int(len(obs1))
@@ -509,8 +573,21 @@ def batched_per_head_rewards_on_obs1(
         o2 = torch.from_numpy(obs2[start:end]).float().to(device)
         y = torch.from_numpy(labels[start:end]).float().to(device)
         b_n = end - start
+        u: torch.Tensor | None = None
+        if plt_infomec.model_encode_sources(model=model):
+            if source is None:
+                raise ValueError(
+                    "Model has encode_sources=True but source is None."
+                )
+            u = torch.from_numpy(source[start:end]).long().to(device)
         with torch.no_grad():
-            z_q = encode_query_latents(model=model, obs1=o1, obs2=o2, labels=y)  # (B, Z)
+            z_q = encode_query_latents(
+                model=model,
+                obs1=o1,
+                obs2=o2,
+                labels=y,
+                source=u,
+            )  # (B, Z)
             z = ei.repeat(z_q, "B Z -> B S T Z", S=s_n, T=t_n)
             if reward_mode == "raw":
                 x = torch.cat([o1, z], dim=-1)  # (B, S, T, O+Z)
@@ -668,6 +745,7 @@ def main() -> None:
         sweep_param_value=args.sweep_param_value,
         latentgrid_metrics_dir=args.latentgrid_metrics_dir,
         recon_top_k=args.recon_top_k,
+        recon_loss_threshold=args.recon_loss_threshold,
     )
 
     rows = filter_subruns_for_sweep_value(
@@ -696,10 +774,15 @@ def main() -> None:
             )
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_tag = rewardmap_run_dir_tag(
+        ts=ts,
+        sweep_param_name=str(rows[0]["sweep_param_name"]),
+        sweep_param_value=float(sweep_param_value),
+    )
     outdir = (
         args.outdir.expanduser().resolve()
         if args.outdir is not None
-        else input_dir / "evals_rewardmap" / ts
+        else input_dir / "evals_rewardmap" / run_tag
     )
     outdir.mkdir(parents=True, exist_ok=True)
 
@@ -714,6 +797,7 @@ def main() -> None:
         encode_batch_size,
         _variant,
         dataset_path,
+        query_source,
         device,
     ) = plt_infomec.prepare_infomec_eval_arrays(
         ref_run_dir,
@@ -812,6 +896,7 @@ def main() -> None:
                 prob_max_comp=args.prob_max_comp,
                 prob_chunk_size=args.prob_chunk_size,
                 prob_comp_chunk_size=args.prob_comp_chunk_size,
+                source=query_source,
             )
             png_path = rewardmap_out_png(
                 outdir=outdir,
