@@ -49,7 +49,7 @@ HEAD_GRID_NCOLS = 4
 
 REWARD_MODE_OUTDIR: dict[str, str] = {
     "raw": "raw_rewards",
-    "prob": "prob_rewards",
+    "btl": "btl_rewards",
 }
 
 # sweep_param_name -> filename prefix (e.g. kl_weight -> beta)
@@ -62,7 +62,7 @@ SWEEP_PARAM_FILENAME_PREFIX: dict[str, str] = {
 
 class RewardMapMode(str, Enum):
     raw = "raw"
-    prob = "prob"
+    btl = "btl"
     both = "both"
 
 
@@ -76,12 +76,12 @@ class RewardMapBtlUnit(str, Enum):
     traj = "traj"
 
 
-class ScatterTrajFrame(str, Enum):
+class BtlTrajScatter(str, Enum):
     last = "last"
     random = "random"
 
 
-class ProbScaling(str, Enum):
+class BtlLogitScaling(str, Enum):
     train = "train"
     per_head = "per_head"
 
@@ -97,13 +97,13 @@ def rewardmap_run_dir_tag(
     sweep_param_value: float,
     btl_unit: RewardMapBtlUnit,
     plot_xy: RewardMapPlotXY,
-    prob_scaling: ProbScaling,
+    btl_logit_scaling: BtlLogitScaling,
 ) -> str:
-    """``<timestamp>_btlUnit=…_xy=…_probScaling=…_<prefix>=<value>``."""
+    """``<timestamp>_btlUnit=…_xy=…_btlLogitScaling=…_<prefix>=<value>``."""
     prefix = sweep_param_filename_prefix(sweep_param_name=sweep_param_name)
     return (
         f"{ts}_btlUnit={btl_unit.value}_xy={plot_xy.value}_"
-        f"probScaling={prob_scaling.value}_{prefix}={sweep_param_value:g}"
+        f"btlLogitScaling={btl_logit_scaling.value}_{prefix}={sweep_param_value:g}"
     )
 
 
@@ -135,13 +135,13 @@ def rewardmap_out_png(
     sweep_param_name: str,
     sweep_param_value: float,
     latent_dim: int,
-    reward_mode: Literal["raw", "prob"],
+    reward_mode: Literal["raw", "btl"],
     recon_loss: Optional[float] = None,
     infom: Optional[float] = None,
     infoe: Optional[float] = None,
     infoc: Optional[float] = None,
 ) -> Path:
-    """``…/{mode}_{prefix}=<val>_nz=<nz>_recon=…_M=…_E=…_C=….png``."""
+    """Flat non-sort layout: ``…/{mode}_{prefix}=<val>_nz=<nz>_recon=….png``."""
     mode_dir = outdir / REWARD_MODE_OUTDIR[reward_mode]
     prefix = sweep_param_filename_prefix(sweep_param_name=sweep_param_name)
     fname = f"{reward_mode}_{prefix}={sweep_param_value:g}_nz={latent_dim}"
@@ -151,66 +151,53 @@ def rewardmap_out_png(
         infoe=infoe,
         infoc=infoc,
     )
-    fname += ".png"
-    return mode_dir / fname
+    return mode_dir / f"{fname}.png"
 
 
-def stratified_nz_dirname(
-    *,
-    latent_dim: int,
-    recon_loss: Optional[float] = None,
-    infom: Optional[float] = None,
-    infoe: Optional[float] = None,
-    infoc: Optional[float] = None,
-) -> str:
-    """``nz=2_recon=…_M=…_E=…_C=…`` — stratified parent folder only."""
-    dirname = f"nz={latent_dim}"
-    dirname += rewardmap_metrics_fname_suffix(
-        recon_loss=recon_loss,
-        infom=infom,
-        infoe=infoe,
-        infoc=infoc,
-    )
-    return dirname
+def sort_easy_panel_stem(*, latent_dim: int, panel_idx: int, panel_name: str) -> str:
+    """``nz=4_00left`` / ``nz=4_08aggregate``."""
+    return f"nz={latent_dim}_{int(panel_idx):02d}{panel_name}"
 
 
-def stratified_pref_mode_stem(
-    *,
-    latent_dim: int,
-    pref_mode_idx: int,
-    pref_mode_name: str,
-) -> str:
-    """``nz=4_00left``, ``nz=4_04top_left`` (0-based mode index + ANNOTATOR_SPECS name)."""
-    return f"nz={latent_dim}_{int(pref_mode_idx):02d}{pref_mode_name}"
-
-
-def rewardmap_stratified_out_png(
+def sort_easy_nz_png(
     *,
     outdir: Path,
+    reward_mode: Literal["raw", "btl"],
     latent_dim: int,
-    reward_mode: Literal["raw", "prob"],
-    pref_mode_idx: int,
-    pref_mode_name: str,
+    stem: str,
     recon_loss: Optional[float] = None,
     infom: Optional[float] = None,
     infoe: Optional[float] = None,
     infoc: Optional[float] = None,
 ) -> Path:
-    """``…/stratified/nz=4_recon=…_M=…_E=…_C=…/nz=4_00left.png``."""
-    nz_dir = stratified_nz_dirname(
-        latent_dim=latent_dim,
+    """``…/btl_rewards/nz=4_recon=…_M=…_E=…_C=…/<stem>.png``."""
+    nz_dir = f"nz={latent_dim}" + rewardmap_metrics_fname_suffix(
         recon_loss=recon_loss,
         infom=infom,
         infoe=infoe,
         infoc=infoc,
     )
-    mode_dir = outdir / REWARD_MODE_OUTDIR[reward_mode] / "stratified" / nz_dir
-    stem = stratified_pref_mode_stem(
-        latent_dim=latent_dim,
-        pref_mode_idx=pref_mode_idx,
-        pref_mode_name=pref_mode_name,
-    )
-    return mode_dir / f"{stem}.png"
+    return outdir / REWARD_MODE_OUTDIR[reward_mode] / nz_dir / f"{stem}.png"
+
+
+def infomec_path_metrics(
+    *,
+    infomec: dict[str, float] | None,
+    recon_loss: float | None,
+) -> dict[str, float | None]:
+    if infomec is None:
+        return {
+            "recon_loss": recon_loss,
+            "infom": None,
+            "infoe": None,
+            "infoc": None,
+        }
+    return {
+        "recon_loss": recon_loss,
+        "infom": float(infomec["infom"]),
+        "infoe": float(infomec["infoe"]),
+        "infoc": float(infomec["infoc"]),
+    }
 
 
 def aligned_pref_mode_labels(
@@ -241,37 +228,6 @@ def aligned_pref_mode_labels(
     if len(out) != n_queries:
         raise ValueError(f"mode_labels subsample len {len(out)} != n_queries {n_queries}")
     return out
-
-
-def filter_preference_queries_by_pref_mode(
-    *,
-    obs1: np.ndarray,
-    obs2: np.ndarray,
-    labels: np.ndarray,
-    query_source: np.ndarray | None,
-    mode_labels: np.ndarray,
-    pref_mode: int,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray | None, int]:
-    """Keep queries with ``source_mode == pref_mode``."""
-    mask = np.asarray(mode_labels).reshape(-1) == int(pref_mode)
-    n_q = int(mask.sum())
-    src_out = None if query_source is None else np.asarray(query_source)[mask]
-    return obs1[mask], obs2[mask], labels[mask], src_out, n_q
-
-
-def slice_rewards_by_pref_mode(
-    *,
-    obs1: np.ndarray,
-    rewards: np.ndarray,
-    mode_labels: np.ndarray,
-    pref_mode: int,
-    scatter_t_idx: np.ndarray | None = None,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, int]:
-    """Slice precomputed ``(Q, …)`` rewards/obs for one GT pref mode (plot-only)."""
-    mask = np.asarray(mode_labels).reshape(-1) == int(pref_mode)
-    n_q = int(mask.sum())
-    scatter_out = None if scatter_t_idx is None else scatter_t_idx[mask]
-    return obs1[mask], rewards[mask], scatter_out, n_q
 
 
 def global_raw_reward_limits(
@@ -312,7 +268,7 @@ class LatentGridRewardMapCLI:
     """Default ``<input_dir>/evals_rewardmap/<ts>_btlUnit=…_xy=…_<prefix>=<value>/``."""
 
     reward_mode: RewardMapMode = RewardMapMode.both
-    """``raw``: decoder head output; ``prob``: BTL preference using one head only."""
+    """``raw``: decoder head output; ``btl``: BTL preference using one head only."""
 
     model_selection: plt_infomec.ModelSelection = plt_infomec.ModelSelection.final
     """Checkpoint: ``best_model.pt`` or final epoch checkpoint."""
@@ -330,13 +286,10 @@ class LatentGridRewardMapCLI:
     """Scatter plane for SortEnv: ``ee`` = ``O[1]`` vs ``O[0]`` (base at top); ``obj`` = ``O[3:5]``."""
 
     btl_unit: RewardMapBtlUnit = RewardMapBtlUnit.frame
-    """``frame``: one sampled frame per segment for prob BTL; ``traj``: segment BTL (sum over ``T``)."""
+    """``frame``: one sampled frame per segment for BTL; ``traj``: segment BTL (sum over ``T``)."""
 
-    scatter_traj_frame: ScatterTrajFrame = ScatterTrajFrame.last
-    """``last``/``random`` frame per ``(q,s)``: xy scatter if ``btl_unit=traj``; prob BTL ``s_A`` if ``btl_unit=frame``."""
-
-    scatter_traj_seed: int = 0
-    """RNG seed for ``scatter_traj_frame=random``."""
+    btl_traj_scatter: BtlTrajScatter = BtlTrajScatter.last
+    """``last``/``random`` frame per ``(q,s)``: xy scatter if ``btl_unit=traj``; BTL ``s_A`` if ``btl_unit=frame``."""
 
     batch_size: Optional[int] = None
     """Encoder batch size; default from variant.json."""
@@ -356,11 +309,8 @@ class LatentGridRewardMapCLI:
     prob_comp_chunk_size: int = 64
     """Comparison-pool chunk size for probabilistic per-head decode."""
 
-    prob_scaling: ProbScaling = ProbScaling.train
+    btl_logit_scaling: BtlLogitScaling = BtlLogitScaling.train
     """``train``: model ``reward_scaling``; ``per_head``: divide by ``nz`` (traj) or ``T·nz`` (frame)."""
-
-    stratify_pref_mode: bool = False
-    """If True, also write ``<raw|prob>_rewards/stratified/nz=<nz>/…`` per GT pref mode."""
 
     dpi: int = 150
 
@@ -797,23 +747,23 @@ def encode_query_latents(
     return mean
 
 
-def resolve_prob_btl_scaling(
+def resolve_btl_logit_scaling(
     *,
     train_scaling: float,
-    prob_scaling: ProbScaling,
+    btl_logit_scaling: BtlLogitScaling,
     btl_unit: RewardMapBtlUnit,
     segment_len: int,
     latent_dim: int,
 ) -> float:
     """Eval-only BTL scaling for per-head prob maps vs summed-head training."""
-    if prob_scaling == ProbScaling.train:
+    if btl_logit_scaling == BtlLogitScaling.train:
         return float(train_scaling)
     denom = float(latent_dim)
     if btl_unit == RewardMapBtlUnit.frame:
         denom *= float(segment_len)
     if denom <= 0.0:
         raise ValueError(
-            f"prob_scaling=per_head needs T>0 and nz>0; got T={segment_len}, nz={latent_dim}"
+            f"btl_logit_scaling=per_head needs T>0 and nz>0; got T={segment_len}, nz={latent_dim}"
         )
     return float(train_scaling) / denom
 
@@ -915,25 +865,23 @@ def random_traj_scatter_frame_indices(
     q_n: int,
     s_n: int,
     t_n: int,
-    seed: int,
 ) -> np.ndarray:
     """Random frame per ``(q,s)``. ``(Q,S)``."""
-    rng = np.random.default_rng(seed=seed)
+    rng = np.random.default_rng()
     return rng.integers(low=0, high=t_n, size=(q_n, s_n))
 
 
-def resolve_scatter_traj_frame_indices(
+def resolve_btl_traj_scatter_indices(
     *,
     q_n: int,
     s_n: int,
     t_n: int,
-    mode: ScatterTrajFrame,
-    seed: int,
+    mode: BtlTrajScatter,
 ) -> np.ndarray:
-    """Pick one frame index per ``(q,s)`` for traj xy or frame prob BTL. ``(Q,S)``."""
-    if mode == ScatterTrajFrame.last:
+    """Pick one frame index per ``(q,s)`` for traj xy or frame BTL. ``(Q,S)``."""
+    if mode == BtlTrajScatter.last:
         return last_traj_scatter_frame_indices(q_n=q_n, s_n=s_n, t_n=t_n)
-    return random_traj_scatter_frame_indices(q_n=q_n, s_n=s_n, t_n=t_n, seed=seed)
+    return random_traj_scatter_frame_indices(q_n=q_n, s_n=s_n, t_n=t_n)
 
 
 def scatter_obs_at_traj_frames(
@@ -969,9 +917,9 @@ def batched_per_head_rewards_on_obs1(
     labels: np.ndarray,
     batch_size: int,
     device: torch.device,
-    reward_mode: Literal["raw", "prob"],
+    reward_mode: Literal["raw", "btl"],
     btl_unit: RewardMapBtlUnit = RewardMapBtlUnit.frame,
-    prob_scaling: ProbScaling = ProbScaling.train,
+    btl_logit_scaling: BtlLogitScaling = BtlLogitScaling.train,
     comparison_obs: np.ndarray | None = None,
     prob_max_comp: int = 512,
     prob_chunk_size: int = 64,
@@ -989,7 +937,7 @@ def batched_per_head_rewards_on_obs1(
     traj_mode = btl_unit == RewardMapBtlUnit.traj
     frame_sampled_prob = (
         btl_unit == RewardMapBtlUnit.frame
-        and reward_mode == "prob"
+        and reward_mode == "btl"
         and scatter_t_idx is not None
     )
     segment_rewards = traj_mode or frame_sampled_prob
@@ -999,16 +947,16 @@ def batched_per_head_rewards_on_obs1(
         rewards = np.full((q_n, s_n, t_n, n_heads), np.nan, dtype=np.float64)
 
     comp_t: torch.Tensor | None = None
-    if reward_mode == "prob":
+    if reward_mode == "btl":
         assert comparison_obs is not None
         comp_t = torch.from_numpy(comparison_obs).float().to(device)
 
     scaling = float(getattr(model, "scaling", 1.0))
     frame_logit_scale = 1.0
-    if reward_mode == "prob":
-        scaling = resolve_prob_btl_scaling(
+    if reward_mode == "btl":
+        scaling = resolve_btl_logit_scaling(
             train_scaling=scaling,
-            prob_scaling=prob_scaling,
+            btl_logit_scaling=btl_logit_scaling,
             btl_unit=btl_unit,
             segment_len=t_n,
             latent_dim=z_dim,
@@ -1116,7 +1064,7 @@ def batched_summed_reward_on_obs1(
     labels: np.ndarray,
     batch_size: int,
     device: torch.device,
-    reward_mode: Literal["raw", "prob"],
+    reward_mode: Literal["raw", "btl"],
     btl_unit: RewardMapBtlUnit = RewardMapBtlUnit.frame,
     comparison_obs: np.ndarray | None = None,
     prob_chunk_size: int = 64,
@@ -1131,7 +1079,7 @@ def batched_summed_reward_on_obs1(
     traj_mode = btl_unit == RewardMapBtlUnit.traj
     frame_sampled_prob = (
         btl_unit == RewardMapBtlUnit.frame
-        and reward_mode == "prob"
+        and reward_mode == "btl"
         and scatter_t_idx is not None
     )
     segment_rewards = traj_mode or frame_sampled_prob
@@ -1141,7 +1089,7 @@ def batched_summed_reward_on_obs1(
         rewards = np.full((q_n, s_n, t_n), np.nan, dtype=np.float64)
 
     comp_t: torch.Tensor | None = None
-    if reward_mode == "prob":
+    if reward_mode == "btl":
         assert comparison_obs is not None
         comp_t = torch.from_numpy(comparison_obs).float().to(device)
 
@@ -1311,7 +1259,7 @@ def format_infomec_suptitle_suffix(
 def format_reward_map_suptitle(
     *,
     meta: dict[str, Any],
-    reward_mode: Literal["raw", "prob"],
+    reward_mode: Literal["raw", "btl"],
     ckpt_label: str,
     split: str,
     btl_unit: RewardMapBtlUnit,
@@ -1343,7 +1291,7 @@ def save_per_head_reward_figure(
     obs1: np.ndarray,
     rewards: np.ndarray,
     meta: dict[str, Any],
-    reward_mode: Literal["raw", "prob"],
+    reward_mode: Literal["raw", "btl"],
     ckpt_label: str,
     split: str,
     out_png: Path,
@@ -1381,7 +1329,7 @@ def save_per_head_reward_figure(
         if summed_rewards is None:
             if reward_mode != "raw":
                 raise ValueError(
-                    "summed_rewards is required for prob mode summed-head panel"
+                    "summed_rewards is required for btl mode summed-head panel"
                 )
             summed_rewards = rewards[..., :n_active].sum(axis=-1)
         highlight_panel_indices = [
@@ -1407,7 +1355,7 @@ def save_per_head_reward_figure(
         x_idx=int(layout["x_idx"]),
         y_idx=int(layout["y_idx"]),
     )
-    if reward_mode == "prob":
+    if reward_mode == "btl":
         vmin = 0.0 if reward_vmin is None else float(reward_vmin)
         vmax = 1.0 if reward_vmax is None else float(reward_vmax)
     else:
@@ -1448,9 +1396,9 @@ def save_per_head_reward_figure(
     plt.close(fig)
 
 
-def reward_modes_to_run(*, reward_mode: RewardMapMode) -> list[Literal["raw", "prob"]]:
+def reward_modes_to_run(*, reward_mode: RewardMapMode) -> list[Literal["raw", "btl"]]:
     if reward_mode == RewardMapMode.both:
-        return ["raw", "prob"]
+        return ["raw", "btl"]
     return [reward_mode.value]  # type: ignore[list-item]
 
 
@@ -1498,7 +1446,7 @@ def main() -> None:
         sweep_param_value=float(sweep_param_value),
         btl_unit=args.btl_unit,
         plot_xy=args.plot_xy,
-        prob_scaling=args.prob_scaling,
+        btl_logit_scaling=args.btl_logit_scaling,
     )
     outdir = (
         args.outdir.expanduser().resolve()
@@ -1535,16 +1483,15 @@ def main() -> None:
     frame_mode = args.btl_unit == RewardMapBtlUnit.frame
     scatter_t_idx: np.ndarray | None = None
     if traj_mode or frame_mode:
-        scatter_t_idx = resolve_scatter_traj_frame_indices(
+        scatter_t_idx = resolve_btl_traj_scatter_indices(
             q_n=q_n,
             s_n=s_n,
             t_n=t_n,
-            mode=args.scatter_traj_frame,
-            seed=args.scatter_traj_seed,
+            mode=args.btl_traj_scatter,
         )
     n_scatter = q_n * s_n if (traj_mode or frame_mode) else q_n * s_n * t_n
     scatter_frame_msg = (
-        f", scatter_traj_frame={args.scatter_traj_frame.value}"
+        f", btl_traj_scatter={args.btl_traj_scatter.value}"
         if (traj_mode or frame_mode)
         else ""
     )
@@ -1554,19 +1501,17 @@ def main() -> None:
         f"training dataset={dataset_path} ({q_n} queries, "
         f"{n_scatter} scatter pts, btl_unit={args.btl_unit.value}, "
         f"viz_data_frac={args.viz_data_frac:g}, plot_xy={args.plot_xy.value}, "
-        f"prob_scaling={args.prob_scaling.value}"
+        f"btl_logit_scaling={args.btl_logit_scaling.value}"
         f"{scatter_frame_msg}) | device={device}"
     )
 
     pref_mode_labels: np.ndarray | None = None
     pref_mode_names: list[str] | None = None
     n_pref_modes = 0
-    if args.stratify_pref_mode:
-        env_name = str(rows[0]["env"])
-        if not plt_infomec.is_ravens_sort_env(env_name):
-            raise ValueError(
-                f"--stratify-pref-mode requires a Ravens sort env; got {env_name!r}"
-            )
+    env_name = str(rows[0]["env"])
+    #* sort-easy: always stratify reward maps by GT preference mode
+    stratify_pref_mode = plt_infomec.is_ravens_sort_env(env_name)
+    if stratify_pref_mode:
         pref_mode_labels = aligned_pref_mode_labels(
             dataset_path=dataset_path,
             split=args.split,
@@ -1581,7 +1526,7 @@ def main() -> None:
         )
         if n_pref_modes <= 0:
             raise RuntimeError(
-                f"No preference modes in dataset {dataset_path} for stratify-pref-mode"
+                f"No preference modes in dataset {dataset_path} for sort-easy stratify"
             )
         pref_mode_names = raw_names
         if pref_mode_names is None:
@@ -1605,7 +1550,7 @@ def main() -> None:
         metrics_dir=args.latentgrid_metrics_dir,
     )
     recon_by_run_dir = load_latentgrid_recon_loss_by_run_dir(csv_path=metrics_csv_path)
-    if "prob" in modes:
+    if "btl" in modes:
         if traj_mode:
             comparison_pool = plt_infomec.build_comparison_traj_pool(
                 obs1=obs1,
@@ -1634,15 +1579,14 @@ def main() -> None:
         "viz_data_frac": float(args.viz_data_frac),
         "viz_data_seed": int(args.viz_data_seed),
         "plot_xy": args.plot_xy.value,
-        "prob_scaling": args.prob_scaling.value,
+        "btl_logit_scaling": args.btl_logit_scaling.value,
         "btl_unit": args.btl_unit.value,
-        "scatter_traj_frame": (
-            args.scatter_traj_frame.value if (traj_mode or frame_mode) else None
+        "btl_traj_scatter": (
+            args.btl_traj_scatter.value if (traj_mode or frame_mode) else None
         ),
-        "scatter_traj_seed": int(args.scatter_traj_seed),
         "n_scatter_points": int(n_scatter),
-        "stratify_pref_mode": bool(args.stratify_pref_mode),
-        "n_pref_modes": int(n_pref_modes) if args.stratify_pref_mode else None,
+        "stratify_pref_mode": bool(stratify_pref_mode),
+        "n_pref_modes": int(n_pref_modes) if stratify_pref_mode else None,
         "dataset": str(dataset_path),
         "figures": [],
     }
@@ -1685,7 +1629,7 @@ def main() -> None:
             "model_selection": model_selection_tag,
             "pngs": {},
         }
-        if args.stratify_pref_mode:
+        if stratify_pref_mode:
             entry["stratified_pngs"] = {}
         if infomec is not None:
             entry["infomec"] = infomec
@@ -1700,7 +1644,7 @@ def main() -> None:
                 device=device,
                 reward_mode=mode,
                 btl_unit=args.btl_unit,
-                prob_scaling=args.prob_scaling,
+                btl_logit_scaling=args.btl_logit_scaling,
                 comparison_obs=comparison_pool,
                 prob_max_comp=args.prob_max_comp,
                 prob_chunk_size=args.prob_chunk_size,
@@ -1708,49 +1652,55 @@ def main() -> None:
                 source=query_source,
                 scatter_t_idx=scatter_t_idx,
             )
-            raw_vmin: float | None = None
-            raw_vmax: float | None = None
-            if args.stratify_pref_mode and mode == "raw":
-                raw_vmin, raw_vmax = global_raw_reward_limits(
-                    rewards=rewards,
-                    latent_dim=nz,
-                )
-            png_path = rewardmap_out_png(
-                outdir=outdir,
-                sweep_param_name=sweep_param_name,
-                sweep_param_value=sweep_param_val,
-                latent_dim=nz,
-                reward_mode=mode,
+            path_metrics = infomec_path_metrics(
+                infomec=infomec,
                 recon_loss=recon_loss,
-                infom=float(infomec["infom"]),
-                infoe=float(infomec["infoe"]),
-                infoc=float(infomec["infoc"]),
             )
-            save_per_head_reward_figure(
-                obs1=obs1,
-                rewards=rewards,
+            save_kw: dict[str, Any] = dict(
                 meta=row,
                 reward_mode=mode,
                 ckpt_label=ckpt_label,
                 split=args.split,
-                out_png=png_path,
                 dpi=args.dpi,
                 plot_xy=args.plot_xy,
                 btl_unit=args.btl_unit,
-                scatter_t_idx=scatter_t_idx,
                 infomec=infomec,
                 recon_loss=recon_loss,
+                n_panels=nz,
             )
-            entry["pngs"][mode] = str(png_path.relative_to(outdir))
-            tqdm.write(f"{row['comment']}: saved {png_path.relative_to(outdir)}")
 
-            if not args.stratify_pref_mode:
+            if not stratify_pref_mode:
+                png_path = rewardmap_out_png(
+                    outdir=outdir,
+                    sweep_param_name=sweep_param_name,
+                    sweep_param_value=sweep_param_val,
+                    latent_dim=nz,
+                    reward_mode=mode,
+                    **path_metrics,
+                )
+                save_per_head_reward_figure(
+                    obs1=obs1,
+                    rewards=rewards,
+                    out_png=png_path,
+                    scatter_t_idx=scatter_t_idx,
+                    **save_kw,
+                )
+                entry["pngs"][mode] = str(png_path.relative_to(outdir))
+                tqdm.write(f"{row['comment']}: saved {png_path.relative_to(outdir)}")
                 continue
+
+            #* sort-easy: panels = per-mode + aggregate (idx = n_pref_modes)
             assert pref_mode_labels is not None
             assert pref_mode_names is not None
             n_active = min(nz, MAX_HEAD_PANELS)
             if mode == "raw":
                 summed_rewards = rewards[..., :n_active].sum(axis=-1)
+                raw_vmin, raw_vmax = global_raw_reward_limits(
+                    rewards=rewards,
+                    latent_dim=nz,
+                )
+                save_kw["reward_vmin"] = raw_vmin
+                save_kw["reward_vmax"] = raw_vmax
             else:
                 summed_rewards = batched_summed_reward_on_obs1(
                     model=model,
@@ -1766,63 +1716,76 @@ def main() -> None:
                     source=query_source,
                     scatter_t_idx=scatter_t_idx,
                 )
+                save_kw["reward_vmin"] = 0.0
+                save_kw["reward_vmax"] = 1.0
+            save_kw["include_summed_head_panel"] = True
+
+            panels: list[tuple[int, str, np.ndarray, np.ndarray, np.ndarray | None, np.ndarray, int]] = []
             for pref_mode in range(n_pref_modes):
-                mode_name = str(pref_mode_names[pref_mode])
                 mask = np.asarray(pref_mode_labels).reshape(-1) == int(pref_mode)
-                obs1_m, rewards_m, scatter_t_idx_m, n_q_m = slice_rewards_by_pref_mode(
-                    obs1=obs1,
-                    rewards=rewards,
-                    mode_labels=pref_mode_labels,
-                    pref_mode=pref_mode,
-                    scatter_t_idx=scatter_t_idx,
+                scatter_m = None if scatter_t_idx is None else scatter_t_idx[mask]
+                panels.append(
+                    (
+                        pref_mode,
+                        str(pref_mode_names[pref_mode]),
+                        obs1[mask],
+                        rewards[mask],
+                        scatter_m,
+                        summed_rewards[mask],
+                        int(mask.sum()),
+                    )
                 )
-                summed_rewards_m = summed_rewards[mask]
-                pref_stem = stratified_pref_mode_stem(
+            panels.append(
+                (
+                    n_pref_modes,
+                    "aggregate",
+                    obs1,
+                    rewards,
+                    scatter_t_idx,
+                    summed_rewards,
+                    q_n,
+                )
+            )
+
+            stratified: dict[str, Any] = {}
+            for panel_idx, panel_name, obs_p, rew_p, scatter_p, sum_p, n_q_p in panels:
+                stem = sort_easy_panel_stem(
                     latent_dim=nz,
-                    pref_mode_idx=pref_mode,
-                    pref_mode_name=mode_name,
+                    panel_idx=panel_idx,
+                    panel_name=panel_name,
                 )
-                pref_png = rewardmap_stratified_out_png(
+                png_path = sort_easy_nz_png(
                     outdir=outdir,
-                    latent_dim=nz,
                     reward_mode=mode,
-                    pref_mode_idx=pref_mode,
-                    pref_mode_name=mode_name,
-                    recon_loss=recon_loss,
-                    infom=float(infomec["infom"]),
-                    infoe=float(infomec["infoe"]),
-                    infoc=float(infomec["infoc"]),
+                    latent_dim=nz,
+                    stem=stem,
+                    **path_metrics,
                 )
                 save_per_head_reward_figure(
-                    obs1=obs1_m,
-                    rewards=rewards_m,
-                    meta=row,
-                    reward_mode=mode,
-                    ckpt_label=ckpt_label,
-                    split=args.split,
-                    out_png=pref_png,
-                    dpi=args.dpi,
-                    plot_xy=args.plot_xy,
-                    btl_unit=args.btl_unit,
-                    scatter_t_idx=scatter_t_idx_m,
-                    infomec=infomec,
-                    pref_mode_name=mode_name,
-                    n_queries=n_q_m,
-                    reward_vmin=raw_vmin if mode == "raw" else 0.0,
-                    reward_vmax=raw_vmax if mode == "raw" else 1.0,
-                    n_panels=nz,
-                    include_summed_head_panel=True,
-                    summed_rewards=summed_rewards_m,
-                    recon_loss=recon_loss,
+                    obs1=obs_p,
+                    rewards=rew_p,
+                    out_png=png_path,
+                    scatter_t_idx=scatter_p,
+                    pref_mode_name=panel_name,
+                    n_queries=n_q_p,
+                    summed_rewards=sum_p,
+                    **save_kw,
                 )
-                rel = str(pref_png.relative_to(outdir))
-                entry["stratified_pngs"].setdefault(mode, {})[pref_stem] = {
+                rel = str(png_path.relative_to(outdir))
+                stratified[stem] = {
                     "path": rel,
-                    "pref_mode": int(pref_mode),
-                    "pref_mode_name": mode_name,
-                    "n_queries": int(n_q_m),
+                    "pref_mode": int(panel_idx),
+                    "pref_mode_name": panel_name,
+                    "n_queries": int(n_q_p),
                 }
-                tqdm.write(f"{row['comment']}: saved {rel} (n_queries={n_q_m})")
+                tqdm.write(f"{row['comment']}: saved {rel} (n_queries={n_q_p})")
+            entry["stratified_pngs"][mode] = stratified
+            agg_stem = sort_easy_panel_stem(
+                latent_dim=nz,
+                panel_idx=n_pref_modes,
+                panel_name="aggregate",
+            )
+            entry["pngs"][mode] = stratified[agg_stem]["path"]
 
         manifest["figures"].append(entry)
 
