@@ -60,6 +60,32 @@ SWEEP_PARAM_FILENAME_PREFIX: dict[str, str] = {
 }
 
 
+class RewardMapMode(str, Enum):
+    raw = "raw"
+    prob = "prob"
+    both = "both"
+
+
+class RewardMapPlotXY(str, Enum):
+    ee = "ee"
+    obj = "obj"
+
+
+class RewardMapBtlUnit(str, Enum):
+    frame = "frame"
+    traj = "traj"
+
+
+class ScatterTrajFrame(str, Enum):
+    last = "last"
+    random = "random"
+
+
+class ProbScaling(str, Enum):
+    train = "train"
+    per_head = "per_head"
+
+
 def sweep_param_filename_prefix(*, sweep_param_name: str) -> str:
     return SWEEP_PARAM_FILENAME_PREFIX.get(str(sweep_param_name), str(sweep_param_name))
 
@@ -69,10 +95,38 @@ def rewardmap_run_dir_tag(
     ts: str,
     sweep_param_name: str,
     sweep_param_value: float,
+    btl_unit: RewardMapBtlUnit,
+    plot_xy: RewardMapPlotXY,
+    prob_scaling: ProbScaling,
 ) -> str:
-    """``<timestamp>_<prefix>=<value>`` for ``evals_rewardmap/<tag>/``."""
+    """``<timestamp>_btlUnit=…_xy=…_probScaling=…_<prefix>=<value>``."""
     prefix = sweep_param_filename_prefix(sweep_param_name=sweep_param_name)
-    return f"{ts}_{prefix}={sweep_param_value:g}"
+    return (
+        f"{ts}_btlUnit={btl_unit.value}_xy={plot_xy.value}_"
+        f"probScaling={prob_scaling.value}_{prefix}={sweep_param_value:g}"
+    )
+
+
+def rewardmap_metrics_fname_suffix(
+    *,
+    recon_loss: Optional[float] = None,
+    infom: Optional[float] = None,
+    infoe: Optional[float] = None,
+    infoc: Optional[float] = None,
+) -> str:
+    """``_recon=…_M=…_E=…_C=…`` appended after ``nz=…`` in reward-map PNG names."""
+    parts: list[str] = []
+    if recon_loss is not None:
+        parts.append(f"recon={recon_loss:.3g}")
+    if infom is not None:
+        parts.append(f"M={infom:.3g}")
+    if infoe is not None:
+        parts.append(f"E={infoe:.3g}")
+    if infoc is not None:
+        parts.append(f"C={infoc:.3g}")
+    if not parts:
+        return ""
+    return "_" + "_".join(parts)
 
 
 def rewardmap_out_png(
@@ -82,25 +136,157 @@ def rewardmap_out_png(
     sweep_param_value: float,
     latent_dim: int,
     reward_mode: Literal["raw", "prob"],
+    recon_loss: Optional[float] = None,
     infom: Optional[float] = None,
+    infoe: Optional[float] = None,
     infoc: Optional[float] = None,
 ) -> Path:
-    """``evals_rewardmap/<ts>_<prefix>=<val>/<raw|prob>_rewards/{mode}_{prefix}={val}_nz={nz}[_infom=…][_infoc=…].png``."""
+    """``…/{mode}_{prefix}=<val>_nz=<nz>_recon=…_M=…_E=…_C=….png``."""
     mode_dir = outdir / REWARD_MODE_OUTDIR[reward_mode]
     prefix = sweep_param_filename_prefix(sweep_param_name=sweep_param_name)
     fname = f"{reward_mode}_{prefix}={sweep_param_value:g}_nz={latent_dim}"
-    if infom is not None:
-        fname += f"_infom={infom:.3g}"
-    if infoc is not None:
-        fname += f"_infoc={infoc:.3g}"
+    fname += rewardmap_metrics_fname_suffix(
+        recon_loss=recon_loss,
+        infom=infom,
+        infoe=infoe,
+        infoc=infoc,
+    )
     fname += ".png"
     return mode_dir / fname
 
 
-class RewardMapMode(str, Enum):
-    raw = "raw"
-    prob = "prob"
-    both = "both"
+def stratified_nz_dirname(
+    *,
+    latent_dim: int,
+    recon_loss: Optional[float] = None,
+    infom: Optional[float] = None,
+    infoe: Optional[float] = None,
+    infoc: Optional[float] = None,
+) -> str:
+    """``nz=2_recon=…_M=…_E=…_C=…`` — stratified parent folder only."""
+    dirname = f"nz={latent_dim}"
+    dirname += rewardmap_metrics_fname_suffix(
+        recon_loss=recon_loss,
+        infom=infom,
+        infoe=infoe,
+        infoc=infoc,
+    )
+    return dirname
+
+
+def stratified_pref_mode_stem(
+    *,
+    latent_dim: int,
+    pref_mode_idx: int,
+    pref_mode_name: str,
+) -> str:
+    """``nz=4_00left``, ``nz=4_04top_left`` (0-based mode index + ANNOTATOR_SPECS name)."""
+    return f"nz={latent_dim}_{int(pref_mode_idx):02d}{pref_mode_name}"
+
+
+def rewardmap_stratified_out_png(
+    *,
+    outdir: Path,
+    latent_dim: int,
+    reward_mode: Literal["raw", "prob"],
+    pref_mode_idx: int,
+    pref_mode_name: str,
+    recon_loss: Optional[float] = None,
+    infom: Optional[float] = None,
+    infoe: Optional[float] = None,
+    infoc: Optional[float] = None,
+) -> Path:
+    """``…/stratified/nz=4_recon=…_M=…_E=…_C=…/nz=4_00left.png``."""
+    nz_dir = stratified_nz_dirname(
+        latent_dim=latent_dim,
+        recon_loss=recon_loss,
+        infom=infom,
+        infoe=infoe,
+        infoc=infoc,
+    )
+    mode_dir = outdir / REWARD_MODE_OUTDIR[reward_mode] / "stratified" / nz_dir
+    stem = stratified_pref_mode_stem(
+        latent_dim=latent_dim,
+        pref_mode_idx=pref_mode_idx,
+        pref_mode_name=pref_mode_name,
+    )
+    return mode_dir / f"{stem}.png"
+
+
+def aligned_pref_mode_labels(
+    *,
+    dataset_path: Path,
+    split: str,
+    n_queries: int,
+    viz_data_frac: float,
+    viz_data_seed: int,
+) -> np.ndarray:
+    """``source_mode`` labels aligned with ``prepare_preference_eval_arrays`` subsample."""
+    mode_labels = plt_infomec.source_mode_labels_for_split(
+        dataset_path=dataset_path,
+        split=split,
+    )
+    n = int(len(mode_labels))
+    frac_f = float(viz_data_frac)
+    if frac_f >= 1.0 or n <= 1:
+        if n != n_queries:
+            raise ValueError(
+                f"mode_labels len {n} != n_queries {n_queries} without subsample"
+            )
+        return mode_labels
+    k = max(1, int(round(frac_f * n)))
+    rng = np.random.default_rng(seed=viz_data_seed)
+    idx = np.sort(rng.choice(n, size=k, replace=False))
+    out = mode_labels[idx]
+    if len(out) != n_queries:
+        raise ValueError(f"mode_labels subsample len {len(out)} != n_queries {n_queries}")
+    return out
+
+
+def filter_preference_queries_by_pref_mode(
+    *,
+    obs1: np.ndarray,
+    obs2: np.ndarray,
+    labels: np.ndarray,
+    query_source: np.ndarray | None,
+    mode_labels: np.ndarray,
+    pref_mode: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray | None, int]:
+    """Keep queries with ``source_mode == pref_mode``."""
+    mask = np.asarray(mode_labels).reshape(-1) == int(pref_mode)
+    n_q = int(mask.sum())
+    src_out = None if query_source is None else np.asarray(query_source)[mask]
+    return obs1[mask], obs2[mask], labels[mask], src_out, n_q
+
+
+def slice_rewards_by_pref_mode(
+    *,
+    obs1: np.ndarray,
+    rewards: np.ndarray,
+    mode_labels: np.ndarray,
+    pref_mode: int,
+    scatter_t_idx: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, int]:
+    """Slice precomputed ``(Q, …)`` rewards/obs for one GT pref mode (plot-only)."""
+    mask = np.asarray(mode_labels).reshape(-1) == int(pref_mode)
+    n_q = int(mask.sum())
+    scatter_out = None if scatter_t_idx is None else scatter_t_idx[mask]
+    return obs1[mask], rewards[mask], scatter_out, n_q
+
+
+def global_raw_reward_limits(
+    *,
+    rewards: np.ndarray,
+    latent_dim: int,
+) -> tuple[float, float]:
+    """Min/max over active head columns and their sum on the full (mixed) reward tensor."""
+    n_active = min(int(latent_dim), MAX_HEAD_PANELS)
+    if rewards.size == 0 or n_active <= 0:
+        return 0.0, 1.0
+    flat = rewards.reshape(-1, rewards.shape[-1])[:, :n_active]
+    summed = flat.sum(axis=-1)
+    all_vals = np.concatenate([flat.reshape(-1), summed], axis=0)
+    return float(np.min(all_vals)), float(np.max(all_vals))
 
 
 @dataclass
@@ -117,13 +303,13 @@ class LatentGridRewardMapCLI:
     """``evals_latentgrid/<timestamp>/`` with ``latentgrid_metrics_train.csv``; default latest."""
 
     recon_top_k: int = 4
-    """Auto HP: among threshold-passing rows, keep up to this many lowest avg-``recon_loss`` HPs, then pick max InfoM."""
+    """Auto HP: among rows with ≥1 passing cell, keep up to this many lowest mean-passing-``recon_loss`` HPs, then pick max InfoM over passing cells."""
 
     recon_loss_threshold: Optional[float] = None
-    """Auto HP: only consider HP rows with avg ``recon_loss`` at or below this value; default no threshold."""
+    """Auto HP: row survives if any cell has ``recon_loss`` ≤ threshold; top-k ranks by mean recon over passing cells only; InfoM tie-break uses passing cells."""
 
     outdir: Optional[Path] = None
-    """Default ``<input_dir>/evals_rewardmap/<timestamp>_<prefix>=<value>/``."""
+    """Default ``<input_dir>/evals_rewardmap/<ts>_btlUnit=…_xy=…_<prefix>=<value>/``."""
 
     reward_mode: RewardMapMode = RewardMapMode.both
     """``raw``: decoder head output; ``prob``: BTL preference using one head only."""
@@ -132,7 +318,25 @@ class LatentGridRewardMapCLI:
     """Checkpoint: ``best_model.pt`` or final epoch checkpoint."""
 
     split: Literal["all", "train", "eval"] = "all"
-    """Dataset split for reward maps."""
+    """Dataset split for reward maps (training preference pickle)."""
+
+    viz_data_frac: float = 1.0
+    """Random query subsample fraction in ``(0, 1]`` for scatter viz (full data at 1.0)."""
+
+    viz_data_seed: int = 0
+    """RNG seed for ``viz_data_frac`` subsampling."""
+
+    plot_xy: RewardMapPlotXY = RewardMapPlotXY.ee
+    """Scatter plane for SortEnv: ``ee`` = ``O[1]`` vs ``O[0]`` (base at top); ``obj`` = ``O[3:5]``."""
+
+    btl_unit: RewardMapBtlUnit = RewardMapBtlUnit.frame
+    """``frame``: one sampled frame per segment for prob BTL; ``traj``: segment BTL (sum over ``T``)."""
+
+    scatter_traj_frame: ScatterTrajFrame = ScatterTrajFrame.last
+    """``last``/``random`` frame per ``(q,s)``: xy scatter if ``btl_unit=traj``; prob BTL ``s_A`` if ``btl_unit=frame``."""
+
+    scatter_traj_seed: int = 0
+    """RNG seed for ``scatter_traj_frame=random``."""
 
     batch_size: Optional[int] = None
     """Encoder batch size; default from variant.json."""
@@ -151,6 +355,12 @@ class LatentGridRewardMapCLI:
 
     prob_comp_chunk_size: int = 64
     """Comparison-pool chunk size for probabilistic per-head decode."""
+
+    prob_scaling: ProbScaling = ProbScaling.train
+    """``train``: model ``reward_scaling``; ``per_head``: divide by ``nz`` (traj) or ``T·nz`` (frame)."""
+
+    stratify_pref_mode: bool = False
+    """If True, also write ``<raw|prob>_rewards/stratified/nz=<nz>/…`` per GT pref mode."""
 
     dpi: int = 150
 
@@ -238,67 +448,148 @@ def load_latentgrid_metrics_rows(*, csv_path: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(f))
 
 
+def load_latentgrid_recon_loss_by_run_dir(*, csv_path: Path) -> dict[str, float]:
+    """``run_dir`` (resolved) -> train ``recon_loss`` from latentgrid metrics CSV."""
+    lookup: dict[str, float] = {}
+    for row in load_latentgrid_metrics_rows(csv_path=csv_path):
+        run_dir = Path(row["run_dir"]).expanduser().resolve()
+        lookup[str(run_dir)] = float(row["recon_loss"])
+    return lookup
+
+
+def _hp_row_stats(
+    *,
+    cells: list[tuple[int, float, float]],
+    recon_loss_threshold: Optional[float],
+) -> dict[str, Any]:
+    """Per-HP stats from ``(latent_dim, recon_loss, infom)`` cells (one per ``nz``)."""
+    if not cells:
+        raise RuntimeError("HP row has no metric cells")
+
+    recons = [recon for _, recon, _ in cells]
+    infoms = [infom for _, _, infom in cells]
+    avg_recon_loss = float(mean(recons))
+    max_infom_all = float(max(infoms))
+    min_recon_loss = float(min(recons))
+
+    if recon_loss_threshold is None:
+        return {
+            "avg_recon_loss": avg_recon_loss,
+            "mean_passing_recon": avg_recon_loss,
+            "min_recon_loss": min_recon_loss,
+            "max_infom": max_infom_all,
+            "max_infom_all": max_infom_all,
+            "n_cells": len(cells),
+            "n_cells_passing": len(cells),
+            "passing_nz": sorted(nz for nz, _, _ in cells),
+        }
+
+    thr = float(recon_loss_threshold)
+    passing_cells = [(nz, recon, infom) for nz, recon, infom in cells if recon <= thr]
+    passing_nz = sorted(nz for nz, _, _ in passing_cells)
+    passing_recons = [recon for _, recon, _ in passing_cells]
+    passing_infoms = [infom for _, _, infom in passing_cells]
+    n_passing = len(passing_cells)
+    mean_passing_recon = float(mean(passing_recons)) if n_passing > 0 else float("inf")
+    max_infom = float(max(passing_infoms)) if n_passing > 0 else float("-inf")
+
+    return {
+        "avg_recon_loss": avg_recon_loss,
+        "mean_passing_recon": mean_passing_recon,
+        "min_recon_loss": min_recon_loss,
+        "max_infom": max_infom,
+        "max_infom_all": max_infom_all,
+        "n_cells": len(cells),
+        "n_cells_passing": n_passing,
+        "passing_nz": passing_nz,
+    }
+
+
 def select_sweep_param_value(
     *,
     rows: list[dict[str, str]],
     recon_top_k: int,
     recon_loss_threshold: Optional[float] = None,
 ) -> tuple[float, dict[str, Any]]:
-    """Filter by avg-``recon_loss`` threshold, keep up to top-k, then pick highest max InfoM."""
-    by_hp: dict[float, dict[str, list[float]]] = {}
+    """Keep rows with ≥1 passing cell, top-k by mean passing recon, then max InfoM on passing cells."""
+    by_hp: dict[float, list[tuple[int, float, float]]] = {}
     for row in rows:
         hp = float(row["sweep_param_value"])
+        nz = int(row["latent_dim"])
         recon = float(row["recon_loss"])
         infom = float(row["infom"])
-        bucket = by_hp.setdefault(hp, {"recon": [], "infom": []})
-        bucket["recon"].append(recon)
-        bucket["infom"].append(infom)
+        by_hp.setdefault(hp, []).append((nz, recon, infom))
 
     if not by_hp:
         raise RuntimeError("No sweep rows in latentgrid metrics CSV")
 
     row_stats = {
-        hp: {
-            "avg_recon_loss": float(mean(vals["recon"])),
-            "max_infom": float(max(vals["infom"])),
-        }
-        for hp, vals in by_hp.items()
+        hp: _hp_row_stats(
+            cells=cells,
+            recon_loss_threshold=recon_loss_threshold,
+        )
+        for hp, cells in by_hp.items()
     }
 
-    #* threshold filter (optional)
+    def recon_rank(stats: dict[str, Any]) -> float:
+        return float(stats["mean_passing_recon"])
+
+    # * threshold filter: row survives if any cell passes (optional)
     filtered_stats = row_stats
     if recon_loss_threshold is not None:
         filtered_stats = {
             hp: stats
             for hp, stats in row_stats.items()
-            if stats["avg_recon_loss"] <= float(recon_loss_threshold)
+            if int(stats["n_cells_passing"]) > 0
         }
         if not filtered_stats:
             best_hp, best_stats = min(
                 row_stats.items(),
-                key=lambda item: (item[1]["avg_recon_loss"], item[0]),
+                key=lambda item: (item[1]["min_recon_loss"], item[0]),
             )
             raise RuntimeError(
-                f"No HP rows with avg_recon_loss <= {recon_loss_threshold:g}; "
-                f"lowest is {best_hp:g} "
-                f"(avg_recon_loss={best_stats['avg_recon_loss']:.6g})"
+                f"No HP rows with any cell recon_loss <= {recon_loss_threshold:g}; "
+                f"closest is {best_hp:g} "
+                f"(min_recon_loss={best_stats['min_recon_loss']:.6g})"
             )
 
     k = min(int(recon_top_k), len(filtered_stats))
     recon_candidates = sorted(
         filtered_stats.items(),
-        key=lambda item: (item[1]["avg_recon_loss"], item[0]),
+        key=lambda item: (recon_rank(item[1]), item[0]),
     )[:k]
+
+    def effective_max_infom(stats: dict[str, float | int]) -> float:
+        if recon_loss_threshold is None:
+            return float(stats["max_infom"])
+        if int(stats["n_cells_passing"]) > 0:
+            return float(stats["max_infom"])
+        return float("-inf")
+
     selected_hp, selected_stats = max(
         recon_candidates,
-        key=lambda item: (item[1]["max_infom"], -item[1]["avg_recon_loss"]),
+        key=lambda item: (effective_max_infom(item[1]), -recon_rank(item[1])),
     )
+    used_infom_fallback = recon_loss_threshold is not None and effective_max_infom(
+        selected_stats
+    ) == float("-inf")
+    if used_infom_fallback:
+        selected_hp, selected_stats = max(
+            recon_candidates,
+            key=lambda item: (
+                float(item[1]["max_infom_all"]),
+                -recon_rank(item[1]),
+            ),
+        )
 
     if recon_loss_threshold is not None:
         method = (
-            f"avg_recon_loss<={recon_loss_threshold:g}, "
-            f"lowest-{k}-of-{len(filtered_stats)} then max_infom"
+            f"any_cell_recon<={recon_loss_threshold:g}, "
+            f"lowest-{k}-of-{len(filtered_stats)}_mean_passing_recon then "
+            f"max_infom(recon_loss<={recon_loss_threshold:g})"
         )
+        if used_infom_fallback:
+            method += " [fallback: max_infom_all, no threshold-passing cells in top-k]"
     else:
         method = f"lowest-{k}-avg_recon_loss then max_infom"
 
@@ -307,12 +598,13 @@ def select_sweep_param_value(
         "recon_top_k": k,
         "recon_loss_threshold": recon_loss_threshold,
         "n_threshold_passing": len(filtered_stats),
+        "infom_fallback_all_cells": used_infom_fallback,
         "row_stats": {f"{hp:g}": stats for hp, stats in row_stats.items()},
         "threshold_passing": [
             {"sweep_param_value": hp, **stats}
             for hp, stats in sorted(
                 filtered_stats.items(),
-                key=lambda item: (item[1]["avg_recon_loss"], item[0]),
+                key=lambda item: (recon_rank(item[1]), item[0]),
             )
         ],
         "recon_candidates": [
@@ -349,18 +641,35 @@ def resolve_sweep_param_value(
     )
     selection_info["latentgrid_metrics_csv"] = str(csv_path)
     selected = selection_info["selected"]
+    recon_key = (
+        "mean_passing_recon" if recon_loss_threshold is not None else "avg_recon_loss"
+    )
+    infom_msg = f"max_infom={selected['max_infom']:.4g}"
+    if recon_loss_threshold is not None:
+        passing_nz = selected.get("passing_nz", [])
+        infom_msg += (
+            f" (passing_nz={passing_nz}, "
+            f"n_cells_passing={selected['n_cells_passing']}/{selected['n_cells']}, "
+            f"max_infom_all={selected['max_infom_all']:.4g})"
+        )
     print(
         f"Auto-selected {selection_info['method']}: "
         f"sweep_param_value={selected_hp:g} "
-        f"(avg_recon_loss={selected['avg_recon_loss']:.6g}, "
-        f"max_infom={selected['max_infom']:.4g}) "
+        f"({recon_key}={selected[recon_key]:.6g}, {infom_msg}) "
         f"from {csv_path.parent.name}"
     )
     for cand in selection_info["recon_candidates"]:
         hp = float(cand["sweep_param_value"])
-        print(
-            f"  candidate {hp:g}: avg_recon_loss={cand['avg_recon_loss']:.6g}, "
+        cand_infom = (
             f"max_infom={cand['max_infom']:.4g}"
+            if cand["max_infom"] != float("-inf")
+            else f"max_infom=— (max_infom_all={cand['max_infom_all']:.4g})"
+        )
+        passing_nz = cand.get("passing_nz", [])
+        print(
+            f"  candidate {hp:g}: {recon_key}={cand[recon_key]:.6g}, "
+            f"{cand_infom}, "
+            f"n_cells_passing={cand['n_cells_passing']}/{cand['n_cells']}"
             + (" ← selected" if np.isclose(hp, selected_hp) else "")
         )
     return selected_hp, selection_info
@@ -374,11 +683,12 @@ def load_subrun_metadata(*, run_dir: Path) -> dict[str, Any]:
     sweep_param_name, sweep_param_value, sweep_param_label = sweep_from_variant(
         variant=variant
     )
+    decoder_type = str(variant.get("decoder_type", "mlp")).lower()
     return {
         "run_dir": run_dir.resolve(),
         "comment": str(variant.get("comment", run_dir.name)),
         "model_type": str(variant.get("model_type", "")),
-        "decoder_type": str(variant.get("decoder_type", "mlp")).lower(),
+        "decoder_type": decoder_type,
         "latent_dim": int(variant["latent_dim"]),
         "sweep_param_name": sweep_param_name,
         "sweep_param_value": float(sweep_param_value),
@@ -416,7 +726,35 @@ def filter_subruns_for_sweep_value(
     return rows
 
 
-def resolve_reward_map_layout(*, env_name: str) -> dict[str, Any]:
+def resolve_reward_map_layout(
+    *,
+    env_name: str,
+    plot_xy: RewardMapPlotXY,
+    obs_dim: int | None,
+) -> dict[str, Any]:
+    if plot_xy == RewardMapPlotXY.obj:
+        if obs_dim is not None and obs_dim < 5:
+            raise ValueError(
+                f"plot_xy=obj requires obs_dim>=5 (SortEnv object xyz); got {obs_dim}"
+            )
+        scatter_s = 0.25
+        title_fontsize = 9
+        if plt_infomec.is_ravens_sort_env(env_name):
+            layout = plt_infomec.sort_learned_reward_map_layout(
+                env_name=env_name, n_modes=1
+            )
+            scatter_s = layout.scatter_s
+            title_fontsize = layout.title_fontsize
+        return dict(
+            x_idx=3,
+            y_idx=4,
+            axis_xlabel="obj x",
+            axis_ylabel="obj y",
+            invert_yaxis=False,
+            scatter_s=scatter_s,
+            title_fontsize=title_fontsize,
+        )
+
     if plt_infomec.is_ravens_sort_env(env_name):
         layout = plt_infomec.sort_learned_reward_map_layout(env_name=env_name, n_modes=1)
         return dict(
@@ -424,6 +762,7 @@ def resolve_reward_map_layout(*, env_name: str) -> dict[str, Any]:
             y_idx=layout.y_idx,
             axis_xlabel=layout.axis_xlabel,
             axis_ylabel=layout.axis_ylabel,
+            invert_yaxis=layout.invert_yaxis,
             scatter_s=layout.scatter_s,
             title_fontsize=layout.title_fontsize,
         )
@@ -432,6 +771,7 @@ def resolve_reward_map_layout(*, env_name: str) -> dict[str, Any]:
         y_idx=1,
         axis_xlabel="obs[0]",
         axis_ylabel="obs[1]",
+        invert_yaxis=False,
         scatter_s=0.25,
         title_fontsize=9,
     )
@@ -448,15 +788,34 @@ def encode_query_latents(
     enc_kw: dict[str, torch.Tensor] = {}
     if plt_infomec.model_encode_sources(model=model):
         if source is None:
-            raise ValueError(
-                "Model has encode_sources=True but source is None."
-            )
+            raise ValueError("Model has encode_sources=True but source is None.")
         enc_kw["source"] = source
     if isinstance(model, QLAE):
         z_q, _ = model.encode(obs1, obs2, labels, **enc_kw)
         return z_q
     mean, _ = model.encode(obs1, obs2, labels, **enc_kw)
     return mean
+
+
+def resolve_prob_btl_scaling(
+    *,
+    train_scaling: float,
+    prob_scaling: ProbScaling,
+    btl_unit: RewardMapBtlUnit,
+    segment_len: int,
+    latent_dim: int,
+) -> float:
+    """Eval-only BTL scaling for per-head prob maps vs summed-head training."""
+    if prob_scaling == ProbScaling.train:
+        return float(train_scaling)
+    denom = float(latent_dim)
+    if btl_unit == RewardMapBtlUnit.frame:
+        denom *= float(segment_len)
+    if denom <= 0.0:
+        raise ValueError(
+            f"prob_scaling=per_head needs T>0 and nz>0; got T={segment_len}, nz={latent_dim}"
+        )
+    return float(train_scaling) / denom
 
 
 def _probabilistic_reward_heads_chunk(
@@ -467,6 +826,7 @@ def _probabilistic_reward_heads_chunk(
     comparison_obs: torch.Tensor,
     scaling: float,
     comp_chunk_size: int,
+    frame_logit_scale: float = 1.0,
 ) -> torch.Tensor:
     """``E_{s_B}[p(y=1 | s_A, s_B, z)]`` per head; one query chunk. ``(M, Z)``."""
     s_a = model._as_batl_obs(obs=s_a)  # (M, 1, T, O)
@@ -475,6 +835,7 @@ def _probabilistic_reward_heads_chunk(
     n_n = int(s_b.shape[0])
     z_dim = int(z.shape[-1])
     p_sum = torch.zeros((m_n, z_dim), device=s_a.device, dtype=s_a.dtype)
+    logit_scale = float(frame_logit_scale)
 
     for n_start in range(0, n_n, comp_chunk_size):
         n_end = min(n_start + comp_chunk_size, n_n)
@@ -492,7 +853,7 @@ def _probabilistic_reward_heads_chunk(
 
         r_a_j = r_a_heads.sum(dim=-2) / scaling  # (M, N_c, Z)
         r_b_j = r_b_heads.sum(dim=-2) / scaling
-        p_pref = torch.sigmoid(r_a_j - r_b_j)  # (M, N_c, Z)
+        p_pref = torch.sigmoid(logit_scale * (r_a_j - r_b_j))  # (M, N_c, Z)
         p_sum += p_pref.sum(dim=1)  # (M, Z)
 
     return p_sum / float(n_n)  # (M, Z)
@@ -507,6 +868,7 @@ def _probabilistic_reward_heads_batch(
     scaling: float,
     chunk_size: int,
     comp_chunk_size: int,
+    frame_logit_scale: float = 1.0,
 ) -> torch.Tensor:
     """``E_{s_B}[p(y=1 | s_A, s_B, z)]`` for each head. ``(M, Z)``."""
     m_n = int(s_a.shape[0])
@@ -518,6 +880,7 @@ def _probabilistic_reward_heads_batch(
             comparison_obs=comparison_obs,
             scaling=scaling,
             comp_chunk_size=comp_chunk_size,
+            frame_logit_scale=frame_logit_scale,
         )
 
     chunks: list[torch.Tensor] = []
@@ -531,9 +894,71 @@ def _probabilistic_reward_heads_batch(
                 comparison_obs=comparison_obs,
                 scaling=scaling,
                 comp_chunk_size=comp_chunk_size,
+                frame_logit_scale=frame_logit_scale,
             )
         )
     return torch.cat(chunks, dim=0)  # (M, Z)
+
+
+def last_traj_scatter_frame_indices(
+    *,
+    q_n: int,
+    s_n: int,
+    t_n: int,
+) -> np.ndarray:
+    """Last frame ``t=T-1`` per ``(q,s)``. ``(Q,S)``."""
+    return np.full((q_n, s_n), t_n - 1, dtype=np.int64)
+
+
+def random_traj_scatter_frame_indices(
+    *,
+    q_n: int,
+    s_n: int,
+    t_n: int,
+    seed: int,
+) -> np.ndarray:
+    """Random frame per ``(q,s)``. ``(Q,S)``."""
+    rng = np.random.default_rng(seed=seed)
+    return rng.integers(low=0, high=t_n, size=(q_n, s_n))
+
+
+def resolve_scatter_traj_frame_indices(
+    *,
+    q_n: int,
+    s_n: int,
+    t_n: int,
+    mode: ScatterTrajFrame,
+    seed: int,
+) -> np.ndarray:
+    """Pick one frame index per ``(q,s)`` for traj xy or frame prob BTL. ``(Q,S)``."""
+    if mode == ScatterTrajFrame.last:
+        return last_traj_scatter_frame_indices(q_n=q_n, s_n=s_n, t_n=t_n)
+    return random_traj_scatter_frame_indices(q_n=q_n, s_n=s_n, t_n=t_n, seed=seed)
+
+
+def scatter_obs_at_traj_frames(
+    *,
+    obs1: np.ndarray,
+    scatter_t_idx: np.ndarray,
+) -> np.ndarray:
+    """``obs1`` ``(Q,S,T,O)`` → ``(Q·S,O)`` at ``scatter_t_idx[q,s]`` per segment."""
+    q_n, s_n, _, o_dim = obs1.shape
+    q_idx = np.arange(q_n)[:, None]
+    s_idx = np.arange(s_n)[None, :]
+    return obs1[q_idx, s_idx, scatter_t_idx, :].reshape(q_n * s_n, o_dim)
+
+
+def gather_obs1_at_frame_indices(
+    *,
+    obs1: torch.Tensor,
+    scatter_t_idx: np.ndarray,
+) -> torch.Tensor:
+    """``obs1`` ``(B,S,T,O)`` → ``(B·S,O)`` at ``scatter_t_idx[b,s]`` per segment."""
+    b_n, s_n, _, o_dim = obs1.shape
+    b_idx = torch.arange(b_n, device=obs1.device)[:, None]
+    s_idx = torch.arange(s_n, device=obs1.device)[None, :]
+    t_idx = torch.from_numpy(np.asarray(scatter_t_idx)).long().to(device=obs1.device)
+    return obs1[b_idx, s_idx, t_idx, :].reshape(b_n * s_n, o_dim)
 
 
 def batched_per_head_rewards_on_obs1(
@@ -545,20 +970,33 @@ def batched_per_head_rewards_on_obs1(
     batch_size: int,
     device: torch.device,
     reward_mode: Literal["raw", "prob"],
+    btl_unit: RewardMapBtlUnit = RewardMapBtlUnit.frame,
+    prob_scaling: ProbScaling = ProbScaling.train,
     comparison_obs: np.ndarray | None = None,
     prob_max_comp: int = 512,
     prob_chunk_size: int = 64,
     prob_comp_chunk_size: int = 64,
     source: np.ndarray | None = None,
+    scatter_t_idx: np.ndarray | None = None,
 ) -> np.ndarray:
-    """``(Q, S, T, Z)`` per-head rewards on ``obs1`` with encoder latents per query."""
+    """Per-head rewards on ``obs1``; ``(Q,S,Z)`` if traj/sampled-frame prob else ``(Q,S,T,Z)`` or ``(Q,S,Z)`` raw traj."""
     q_n = int(len(obs1))
     s_n = int(obs1.shape[1])
     t_n = int(obs1.shape[2])
     o_dim = int(obs1.shape[-1])
     z_dim = int(model.latent_dim)
     n_heads = min(z_dim, MAX_HEAD_PANELS)
-    rewards = np.full((q_n, s_n, t_n, n_heads), np.nan, dtype=np.float64)
+    traj_mode = btl_unit == RewardMapBtlUnit.traj
+    frame_sampled_prob = (
+        btl_unit == RewardMapBtlUnit.frame
+        and reward_mode == "prob"
+        and scatter_t_idx is not None
+    )
+    segment_rewards = traj_mode or frame_sampled_prob
+    if segment_rewards:
+        rewards = np.full((q_n, s_n, n_heads), np.nan, dtype=np.float64)
+    else:
+        rewards = np.full((q_n, s_n, t_n, n_heads), np.nan, dtype=np.float64)
 
     comp_t: torch.Tensor | None = None
     if reward_mode == "prob":
@@ -566,6 +1004,17 @@ def batched_per_head_rewards_on_obs1(
         comp_t = torch.from_numpy(comparison_obs).float().to(device)
 
     scaling = float(getattr(model, "scaling", 1.0))
+    frame_logit_scale = 1.0
+    if reward_mode == "prob":
+        scaling = resolve_prob_btl_scaling(
+            train_scaling=scaling,
+            prob_scaling=prob_scaling,
+            btl_unit=btl_unit,
+            segment_len=t_n,
+            latent_dim=z_dim,
+        )
+        if btl_unit == RewardMapBtlUnit.frame:
+            frame_logit_scale = float(t_n)
 
     for start in range(0, q_n, batch_size):
         end = min(start + batch_size, q_n)
@@ -576,9 +1025,7 @@ def batched_per_head_rewards_on_obs1(
         u: torch.Tensor | None = None
         if plt_infomec.model_encode_sources(model=model):
             if source is None:
-                raise ValueError(
-                    "Model has encode_sources=True but source is None."
-                )
+                raise ValueError("Model has encode_sources=True but source is None.")
             u = torch.from_numpy(source[start:end]).long().to(device)
         with torch.no_grad():
             z_q = encode_query_latents(
@@ -592,12 +1039,57 @@ def batched_per_head_rewards_on_obs1(
             if reward_mode == "raw":
                 x = torch.cat([o1, z], dim=-1)  # (B, S, T, O+Z)
                 r_heads = model.decoder(x, vector_rewards=True)
-                rewards[start:end, :, :, :n_heads] = (
-                    r_heads[..., :n_heads].detach().cpu().numpy()
-                )
+                if traj_mode:
+                    rewards[start:end, :, :n_heads] = (
+                        r_heads[..., :n_heads].sum(dim=-2).detach().cpu().numpy()
+                    )
+                else:
+                    rewards[start:end, :, :, :n_heads] = (
+                        r_heads[..., :n_heads].detach().cpu().numpy()
+                    )
                 continue
 
             assert comp_t is not None
+            if traj_mode:
+                seg_flat = o1.reshape(b_n * s_n, t_n, o_dim)
+                z_flat = ei.repeat(z_q, "B Z -> (B S) Z", S=s_n)
+                r_flat = _probabilistic_reward_heads_batch(
+                    model=model,
+                    s_a=seg_flat,
+                    z=z_flat,
+                    comparison_obs=comp_t,
+                    scaling=scaling,
+                    chunk_size=prob_chunk_size,
+                    comp_chunk_size=prob_comp_chunk_size,
+                    frame_logit_scale=frame_logit_scale,
+                )  # (B*S, Z)
+                rewards[start:end, :, :n_heads] = (
+                    r_flat[:, :n_heads].reshape(b_n, s_n, n_heads).detach().cpu().numpy()
+                )
+                continue
+
+            if frame_sampled_prob:
+                assert scatter_t_idx is not None
+                o_flat = gather_obs1_at_frame_indices(
+                    obs1=o1,
+                    scatter_t_idx=scatter_t_idx[start:end],
+                )  # (B*S, O)
+                z_flat = ei.repeat(z_q, "B Z -> (B S) Z", S=s_n)
+                r_flat = _probabilistic_reward_heads_batch(
+                    model=model,
+                    s_a=o_flat,
+                    z=z_flat,
+                    comparison_obs=comp_t,
+                    scaling=scaling,
+                    chunk_size=prob_chunk_size,
+                    comp_chunk_size=prob_comp_chunk_size,
+                    frame_logit_scale=frame_logit_scale,
+                )  # (B*S, Z)
+                rewards[start:end, :, :n_heads] = (
+                    r_flat[:, :n_heads].reshape(b_n, s_n, n_heads).detach().cpu().numpy()
+                )
+                continue
+
             o_flat = o1.reshape(b_n * s_n * t_n, o_dim)
             z_flat = ei.repeat(z_q, "B Z -> (B S T) Z", S=s_n, T=t_n)
             r_flat = _probabilistic_reward_heads_batch(
@@ -608,9 +1100,121 @@ def batched_per_head_rewards_on_obs1(
                 scaling=scaling,
                 chunk_size=prob_chunk_size,
                 comp_chunk_size=prob_comp_chunk_size,
+                frame_logit_scale=frame_logit_scale,
             )  # (B*S*T, Z)
             rewards[start:end, :, :, :n_heads] = (
                 r_flat[:, :n_heads].reshape(b_n, s_n, t_n, n_heads).detach().cpu().numpy()
+            )
+    return rewards
+
+
+def batched_summed_reward_on_obs1(
+    *,
+    model: torch.nn.Module,
+    obs1: np.ndarray,
+    obs2: np.ndarray,
+    labels: np.ndarray,
+    batch_size: int,
+    device: torch.device,
+    reward_mode: Literal["raw", "prob"],
+    btl_unit: RewardMapBtlUnit = RewardMapBtlUnit.frame,
+    comparison_obs: np.ndarray | None = None,
+    prob_chunk_size: int = 64,
+    source: np.ndarray | None = None,
+    scatter_t_idx: np.ndarray | None = None,
+) -> np.ndarray:
+    """Summed-head rewards on ``obs1``; ``(Q,S)`` if traj/sampled-frame prob else ``(Q,S,T)`` or ``(Q,S)`` raw traj."""
+    q_n = int(len(obs1))
+    s_n = int(obs1.shape[1])
+    t_n = int(obs1.shape[2])
+    o_dim = int(obs1.shape[-1])
+    traj_mode = btl_unit == RewardMapBtlUnit.traj
+    frame_sampled_prob = (
+        btl_unit == RewardMapBtlUnit.frame
+        and reward_mode == "prob"
+        and scatter_t_idx is not None
+    )
+    segment_rewards = traj_mode or frame_sampled_prob
+    if segment_rewards:
+        rewards = np.full((q_n, s_n), np.nan, dtype=np.float64)
+    else:
+        rewards = np.full((q_n, s_n, t_n), np.nan, dtype=np.float64)
+
+    comp_t: torch.Tensor | None = None
+    if reward_mode == "prob":
+        assert comparison_obs is not None
+        comp_t = torch.from_numpy(comparison_obs).float().to(device)
+
+    for start in range(0, q_n, batch_size):
+        end = min(start + batch_size, q_n)
+        o1 = torch.from_numpy(obs1[start:end]).float().to(device)  # (B, S, T, O)
+        o2 = torch.from_numpy(obs2[start:end]).float().to(device)
+        y = torch.from_numpy(labels[start:end]).float().to(device)
+        b_n = end - start
+        u: torch.Tensor | None = None
+        if plt_infomec.model_encode_sources(model=model):
+            if source is None:
+                raise ValueError("Model has encode_sources=True but source is None.")
+            u = torch.from_numpy(source[start:end]).long().to(device)
+        with torch.no_grad():
+            z_q = encode_query_latents(
+                model=model,
+                obs1=o1,
+                obs2=o2,
+                labels=y,
+                source=u,
+            )  # (B, Z)
+            z = ei.repeat(z_q, "B Z -> B S T Z", S=s_n, T=t_n)
+            if reward_mode == "raw":
+                x = torch.cat([o1, z], dim=-1)  # (B, S, T, O+Z)
+                r = model.decoder(x, vector_rewards=False)  # (B, S, T, 1)
+                if traj_mode:
+                    rewards[start:end, :] = (
+                        r.sum(dim=-2).squeeze(-1).detach().cpu().numpy()
+                    )
+                else:
+                    rewards[start:end, :, :] = r.squeeze(-1).detach().cpu().numpy()
+                continue
+
+            assert comp_t is not None
+            if traj_mode:
+                seg_flat = o1.reshape(b_n * s_n, t_n, o_dim)
+                z_flat = ei.repeat(z_q, "B Z -> (B S) Z", S=s_n)
+                r_flat = model.get_probabilistic_reward(
+                    s_a=seg_flat,
+                    z=z_flat,
+                    comparison_obs=comp_t,
+                    chunk_size=prob_chunk_size,
+                )  # (B*S, 1)
+                rewards[start:end, :] = r_flat.reshape(b_n, s_n).detach().cpu().numpy()
+                continue
+
+            if frame_sampled_prob:
+                assert scatter_t_idx is not None
+                o_flat = gather_obs1_at_frame_indices(
+                    obs1=o1,
+                    scatter_t_idx=scatter_t_idx[start:end],
+                )  # (B*S, O)
+                z_flat = ei.repeat(z_q, "B Z -> (B S) Z", S=s_n)
+                r_flat = model.get_probabilistic_reward(
+                    s_a=o_flat,
+                    z=z_flat,
+                    comparison_obs=comp_t,
+                    chunk_size=prob_chunk_size,
+                )  # (B*S, 1)
+                rewards[start:end, :] = r_flat.reshape(b_n, s_n).detach().cpu().numpy()
+                continue
+
+            o_flat = o1.reshape(b_n * s_n * t_n, o_dim)
+            z_flat = ei.repeat(z_q, "B Z -> (B S T) Z", S=s_n, T=t_n)
+            r_flat = model.get_probabilistic_reward(
+                s_a=o_flat,
+                z=z_flat,
+                comparison_obs=comp_t,
+                chunk_size=prob_chunk_size,
+            )  # (B*S*T, 1)
+            rewards[start:end, :, :] = (
+                r_flat.reshape(b_n, s_n, t_n).detach().cpu().numpy()
             )
     return rewards
 
@@ -620,14 +1224,23 @@ def flatten_obs_and_head_rewards(
     obs1: np.ndarray,
     rewards: np.ndarray,
     latent_dim: int,
+    scatter_t_idx: np.ndarray | None = None,
+    n_panels: int = MAX_HEAD_PANELS,
 ) -> tuple[list[np.ndarray], list[np.ndarray]]:
-    """Build 16 panel lists: shared obs, per-head scalar reward."""
-    obs_flat = ei.rearrange(obs1, "q s t o -> (q s t) o")
-    rw_flat = ei.rearrange(rewards, "q s t z -> (q s t) z")
+    """Build per-head panel lists: shared obs, per-head scalar reward."""
+    use_scatter_frame = scatter_t_idx is not None and rewards.ndim == 3
+    if use_scatter_frame:
+        obs_flat = scatter_obs_at_traj_frames(obs1=obs1, scatter_t_idx=scatter_t_idx)
+        rw_flat = rewards.reshape(-1, rewards.shape[-1])
+    else:
+        obs_flat = ei.rearrange(obs1, "q s t o -> (q s t) o")
+        rw_flat = ei.rearrange(rewards, "q s t z -> (q s t) z")
     n_active = min(int(latent_dim), MAX_HEAD_PANELS)
+    compact = int(n_panels) < MAX_HEAD_PANELS
+    n_show = min(n_active, int(n_panels)) if compact else MAX_HEAD_PANELS
     per_head_obs: list[np.ndarray] = []
     per_head_r: list[np.ndarray] = []
-    for head_idx in range(MAX_HEAD_PANELS):
+    for head_idx in range(n_show):
         if head_idx < n_active:
             per_head_obs.append(obs_flat)
             per_head_r.append(rw_flat[:, head_idx : head_idx + 1])
@@ -637,10 +1250,43 @@ def flatten_obs_and_head_rewards(
     return per_head_obs, per_head_r
 
 
-def head_panel_titles(*, latent_dim: int) -> list[str]:
+def append_summed_head_reward_panel(
+    *,
+    obs1: np.ndarray,
+    rewards: np.ndarray,
+    per_head_obs: list[np.ndarray],
+    per_head_r: list[np.ndarray],
+    panel_titles: list[str],
+    summed_rewards: np.ndarray,
+    scatter_t_idx: np.ndarray | None = None,
+) -> int:
+    """Append one panel with summed-head rewards; returns its panel index."""
+    use_scatter_frame = scatter_t_idx is not None and rewards.ndim == 3
+    if use_scatter_frame:
+        obs_flat = scatter_obs_at_traj_frames(obs1=obs1, scatter_t_idx=scatter_t_idx)
+    else:
+        obs_flat = ei.rearrange(obs1, "q s t o -> (q s t) o")
+    summed = np.asarray(summed_rewards)
+    if summed.ndim == 2:
+        rw_flat = summed.reshape(-1, 1)
+    elif summed.ndim == 3:
+        rw_flat = ei.rearrange(summed, "q s t -> (q s t) 1")
+    else:
+        raise ValueError(
+            f"summed_rewards must be (Q,S) or (Q,S,T); got shape {summed.shape}"
+        )
+    per_head_obs.append(obs_flat)
+    per_head_r.append(rw_flat)
+    panel_titles.append(r"$\sum_i r_i$")
+    return len(panel_titles) - 1
+
+
+def head_panel_titles(*, latent_dim: int, n_panels: int = MAX_HEAD_PANELS) -> list[str]:
     n_active = min(int(latent_dim), MAX_HEAD_PANELS)
+    compact = int(n_panels) < MAX_HEAD_PANELS
+    n_show = min(n_active, int(n_panels)) if compact else MAX_HEAD_PANELS
     titles: list[str] = []
-    for head_idx in range(MAX_HEAD_PANELS):
+    for head_idx in range(n_show):
         if head_idx < n_active:
             titles.append(f"$z_{head_idx}$")
         else:
@@ -648,8 +1294,14 @@ def head_panel_titles(*, latent_dim: int) -> list[str]:
     return titles
 
 
-def format_infomec_suptitle_suffix(*, infomec: dict[str, float]) -> str:
+def format_infomec_suptitle_suffix(
+    *,
+    infomec: dict[str, float],
+    recon_loss: float | None = None,
+) -> str:
+    recon_part = f"recon={recon_loss:.3g} " if recon_loss is not None else ""
     return (
+        f"{recon_part}"
         f"InfoM={infomec['infom']:.3g} "
         f"InfoE={infomec['infoe']:.3g} "
         f"InfoC={infomec['infoc']:.3g}"
@@ -662,18 +1314,27 @@ def format_reward_map_suptitle(
     reward_mode: Literal["raw", "prob"],
     ckpt_label: str,
     split: str,
+    btl_unit: RewardMapBtlUnit,
     infomec: dict[str, float] | None = None,
+    pref_mode_name: str | None = None,
+    n_queries: int | None = None,
+    recon_loss: float | None = None,
 ) -> str:
     param_label = meta["sweep_param_label"]
     param_val = meta["sweep_param_value"]
     lines = [
-        f"Per-head reward ({reward_mode})",
+        f"Per-head reward ({reward_mode}, btl={btl_unit.value})",
         str(meta["env"]),
         f"{param_label}={param_val:g}, nz={meta['latent_dim']}, dec={meta['decoder_type']}",
         f"split={split}, {ckpt_label}",
     ]
+    if pref_mode_name is not None:
+        q_msg = f", n_queries={n_queries}" if n_queries is not None else ""
+        lines.append(f"pref_mode={pref_mode_name} (segment A only{q_msg})")
     if infomec is not None:
-        lines.append(format_infomec_suptitle_suffix(infomec=infomec))
+        lines.append(
+            format_infomec_suptitle_suffix(infomec=infomec, recon_loss=recon_loss)
+        )
     return "\n".join(lines)
 
 
@@ -687,41 +1348,100 @@ def save_per_head_reward_figure(
     split: str,
     out_png: Path,
     dpi: int,
+    plot_xy: RewardMapPlotXY,
+    btl_unit: RewardMapBtlUnit,
+    scatter_t_idx: np.ndarray | None = None,
     infomec: dict[str, float] | None = None,
+    pref_mode_name: str | None = None,
+    n_queries: int | None = None,
+    reward_vmin: float | None = None,
+    reward_vmax: float | None = None,
+    n_panels: int = MAX_HEAD_PANELS,
+    include_summed_head_panel: bool = False,
+    summed_rewards: np.ndarray | None = None,
+    recon_loss: float | None = None,
 ) -> None:
-    layout = resolve_reward_map_layout(env_name=str(meta["env"]))
+    nz = int(meta["latent_dim"])
+    layout = resolve_reward_map_layout(
+        env_name=str(meta["env"]),
+        plot_xy=plot_xy,
+        obs_dim=int(obs1.shape[-1]),
+    )
     per_head_obs, per_head_r = flatten_obs_and_head_rewards(
         obs1=obs1,
         rewards=rewards,
-        latent_dim=int(meta["latent_dim"]),
+        latent_dim=nz,
+        scatter_t_idx=scatter_t_idx,
+        n_panels=n_panels,
     )
+    panel_titles = head_panel_titles(latent_dim=nz, n_panels=n_panels)
+    highlight_panel_indices: list[int] | None = None
+    if include_summed_head_panel:
+        n_active = min(nz, MAX_HEAD_PANELS)
+        if summed_rewards is None:
+            if reward_mode != "raw":
+                raise ValueError(
+                    "summed_rewards is required for prob mode summed-head panel"
+                )
+            summed_rewards = rewards[..., :n_active].sum(axis=-1)
+        highlight_panel_indices = [
+            append_summed_head_reward_panel(
+                obs1=obs1,
+                rewards=rewards,
+                per_head_obs=per_head_obs,
+                per_head_r=per_head_r,
+                panel_titles=panel_titles,
+                summed_rewards=summed_rewards,
+                scatter_t_idx=scatter_t_idx,
+            )
+        ]
+    use_scatter_frame = scatter_t_idx is not None and rewards.ndim == 3
+    if use_scatter_frame:
+        obs_for_limits = scatter_obs_at_traj_frames(
+            obs1=obs1, scatter_t_idx=scatter_t_idx
+        )
+    else:
+        obs_for_limits = obs1.reshape(-1, obs1.shape[-1])
     xlim, ylim = observation_xy_limits(
-        obs=obs1.reshape(-1, obs1.shape[-1]),
+        obs=obs_for_limits,
         x_idx=int(layout["x_idx"]),
         y_idx=int(layout["y_idx"]),
     )
+    if reward_mode == "prob":
+        vmin = 0.0 if reward_vmin is None else float(reward_vmin)
+        vmax = 1.0 if reward_vmax is None else float(reward_vmax)
+    else:
+        vmin = reward_vmin
+        vmax = reward_vmax
+    ncols = min(HEAD_GRID_NCOLS, max(len(per_head_obs), 1))
     fig = plot_observation_rewards_by_annotator_mode(
         per_head_obs,
         per_head_r,
-        mode_titles=head_panel_titles(latent_dim=int(meta["latent_dim"])),
+        mode_titles=panel_titles,
         suptitle=format_reward_map_suptitle(
             meta=meta,
             reward_mode=reward_mode,
             ckpt_label=ckpt_label,
             split=split,
+            btl_unit=btl_unit,
             infomec=infomec,
+            pref_mode_name=pref_mode_name,
+            n_queries=n_queries,
+            recon_loss=recon_loss,
         ),
         scatter_s=float(layout["scatter_s"]),
-        ncols=HEAD_GRID_NCOLS,
+        ncols=ncols,
         x_idx=int(layout["x_idx"]),
         y_idx=int(layout["y_idx"]),
         axis_xlabel=str(layout["axis_xlabel"]),
         axis_ylabel=str(layout["axis_ylabel"]),
+        invert_yaxis=bool(layout.get("invert_yaxis", False)),
         xlim=xlim,
         ylim=ylim,
         title_fontsize=int(layout["title_fontsize"]),
-        reward_vmin=0.0 if reward_mode == "prob" else None,
-        reward_vmax=1.0 if reward_mode == "prob" else None,
+        reward_vmin=vmin,
+        reward_vmax=vmax,
+        highlight_panel_indices=highlight_panel_indices,
     )
     out_png.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_png, dpi=dpi, bbox_inches="tight", pad_inches=0.12)
@@ -756,9 +1476,7 @@ def main() -> None:
         atol=args.sweep_param_atol,
     )
     if not rows:
-        raise RuntimeError(
-            f"No subruns with {sweep_param_value!r} under {input_dir}"
-        )
+        raise RuntimeError(f"No subruns with {sweep_param_value!r} under {input_dir}")
 
     decoder_type = str(rows[0]["decoder_type"])
     if not decoder_sums_latent_heads(decoder_type=decoder_type):
@@ -778,6 +1496,9 @@ def main() -> None:
         ts=ts,
         sweep_param_name=str(rows[0]["sweep_param_name"]),
         sweep_param_value=float(sweep_param_value),
+        btl_unit=args.btl_unit,
+        plot_xy=args.plot_xy,
+        prob_scaling=args.prob_scaling,
     )
     outdir = (
         args.outdir.expanduser().resolve()
@@ -791,29 +1512,87 @@ def main() -> None:
         obs1,
         obs2,
         labels,
-        _sources,
-        _source_names,
-        _source_keys,
         encode_batch_size,
         _variant,
         dataset_path,
         query_source,
         device,
-    ) = plt_infomec.prepare_infomec_eval_arrays(
+    ) = plt_infomec.prepare_preference_eval_arrays(
         ref_run_dir,
         split=args.split,
-        num_bins=10,
         batch_size=args.batch_size,
         set_length=args.set_length,
         dataset_override=None,
         device_str=args.device,
+        viz_data_frac=args.viz_data_frac,
+        viz_data_seed=args.viz_data_seed,
     )
     batch_size = int(args.batch_size or encode_batch_size)
+    q_n = int(len(obs1))
+    s_n = int(obs1.shape[1])
+    t_n = int(obs1.shape[2])
+    traj_mode = args.btl_unit == RewardMapBtlUnit.traj
+    frame_mode = args.btl_unit == RewardMapBtlUnit.frame
+    scatter_t_idx: np.ndarray | None = None
+    if traj_mode or frame_mode:
+        scatter_t_idx = resolve_scatter_traj_frame_indices(
+            q_n=q_n,
+            s_n=s_n,
+            t_n=t_n,
+            mode=args.scatter_traj_frame,
+            seed=args.scatter_traj_seed,
+        )
+    n_scatter = q_n * s_n if (traj_mode or frame_mode) else q_n * s_n * t_n
+    scatter_frame_msg = (
+        f", scatter_traj_frame={args.scatter_traj_frame.value}"
+        if (traj_mode or frame_mode)
+        else ""
+    )
     print(
         f"Reward maps: {len(rows)} subruns | {rows[0]['sweep_param_label']}"
         f"={sweep_param_value:g} | dec={decoder_type} | "
-        f"dataset={dataset_path} ({len(obs1)} queries) | device={device}"
+        f"training dataset={dataset_path} ({q_n} queries, "
+        f"{n_scatter} scatter pts, btl_unit={args.btl_unit.value}, "
+        f"viz_data_frac={args.viz_data_frac:g}, plot_xy={args.plot_xy.value}, "
+        f"prob_scaling={args.prob_scaling.value}"
+        f"{scatter_frame_msg}) | device={device}"
     )
+
+    pref_mode_labels: np.ndarray | None = None
+    pref_mode_names: list[str] | None = None
+    n_pref_modes = 0
+    if args.stratify_pref_mode:
+        env_name = str(rows[0]["env"])
+        if not plt_infomec.is_ravens_sort_env(env_name):
+            raise ValueError(
+                f"--stratify-pref-mode requires a Ravens sort env; got {env_name!r}"
+            )
+        pref_mode_labels = aligned_pref_mode_labels(
+            dataset_path=dataset_path,
+            split=args.split,
+            n_queries=q_n,
+            viz_data_frac=args.viz_data_frac,
+            viz_data_seed=args.viz_data_seed,
+        )
+        raw_names = plt_infomec.source_mode_names_from_dataset(dataset_path=dataset_path)
+        n_pref_modes = plt_infomec.resolve_n_annotator_modes(
+            mode_labels=pref_mode_labels,
+            mode_names=raw_names,
+        )
+        if n_pref_modes <= 0:
+            raise RuntimeError(
+                f"No preference modes in dataset {dataset_path} for stratify-pref-mode"
+            )
+        pref_mode_names = raw_names
+        if pref_mode_names is None:
+            pref_mode_names = [
+                plt_infomec.source_mode_display_name(m, mode_names=None)
+                for m in range(n_pref_modes)
+            ]
+        print(
+            f"Stratify pref mode: {n_pref_modes} modes, "
+            f"comparison pool stays mixed ({q_n} subsampled queries total)"
+        )
 
     comparison_pool: np.ndarray | None = None
     modes = reward_modes_to_run(reward_mode=args.reward_mode)
@@ -821,12 +1600,25 @@ def main() -> None:
         input_dir=input_dir,
         metrics_dir=args.latentgrid_metrics_dir,
     )
+    metrics_csv_path = resolve_latentgrid_metrics_csv(
+        input_dir=input_dir,
+        metrics_dir=args.latentgrid_metrics_dir,
+    )
+    recon_by_run_dir = load_latentgrid_recon_loss_by_run_dir(csv_path=metrics_csv_path)
     if "prob" in modes:
-        comparison_pool = plt_infomec.build_comparison_obs_pool(
-            obs1=obs1,
-            obs2=obs2,
-            max_comp=args.prob_max_comp,
-        )
+        if traj_mode:
+            comparison_pool = plt_infomec.build_comparison_traj_pool(
+                obs1=obs1,
+                obs2=obs2,
+                max_comp=args.prob_max_comp,
+                seed=args.viz_data_seed,
+            )
+        else:
+            comparison_pool = plt_infomec.build_comparison_obs_pool(
+                obs1=obs1,
+                obs2=obs2,
+                max_comp=args.prob_max_comp,
+            )
 
     manifest: dict[str, Any] = {
         "input_dir": str(input_dir),
@@ -839,6 +1631,18 @@ def main() -> None:
         "decoder_type": decoder_type,
         "reward_mode": args.reward_mode.value,
         "split": args.split,
+        "viz_data_frac": float(args.viz_data_frac),
+        "viz_data_seed": int(args.viz_data_seed),
+        "plot_xy": args.plot_xy.value,
+        "prob_scaling": args.prob_scaling.value,
+        "btl_unit": args.btl_unit.value,
+        "scatter_traj_frame": (
+            args.scatter_traj_frame.value if (traj_mode or frame_mode) else None
+        ),
+        "scatter_traj_seed": int(args.scatter_traj_seed),
+        "n_scatter_points": int(n_scatter),
+        "stratify_pref_mode": bool(args.stratify_pref_mode),
+        "n_pref_modes": int(n_pref_modes) if args.stratify_pref_mode else None,
         "dataset": str(dataset_path),
         "figures": [],
     }
@@ -858,6 +1662,7 @@ def main() -> None:
             infomec_root=infomec_root,
             run_dir=run_dir,
         )
+        recon_loss = recon_by_run_dir.get(str(run_dir.resolve()))
         ckpt_path, ckpt_label, selected_epoch, model_selection_tag = (
             plt_infomec.resolve_run_checkpoint(
                 run_dir, model_selection=args.model_selection
@@ -880,6 +1685,8 @@ def main() -> None:
             "model_selection": model_selection_tag,
             "pngs": {},
         }
+        if args.stratify_pref_mode:
+            entry["stratified_pngs"] = {}
         if infomec is not None:
             entry["infomec"] = infomec
 
@@ -892,19 +1699,31 @@ def main() -> None:
                 batch_size=batch_size,
                 device=device,
                 reward_mode=mode,
+                btl_unit=args.btl_unit,
+                prob_scaling=args.prob_scaling,
                 comparison_obs=comparison_pool,
                 prob_max_comp=args.prob_max_comp,
                 prob_chunk_size=args.prob_chunk_size,
                 prob_comp_chunk_size=args.prob_comp_chunk_size,
                 source=query_source,
+                scatter_t_idx=scatter_t_idx,
             )
+            raw_vmin: float | None = None
+            raw_vmax: float | None = None
+            if args.stratify_pref_mode and mode == "raw":
+                raw_vmin, raw_vmax = global_raw_reward_limits(
+                    rewards=rewards,
+                    latent_dim=nz,
+                )
             png_path = rewardmap_out_png(
                 outdir=outdir,
                 sweep_param_name=sweep_param_name,
                 sweep_param_value=sweep_param_val,
                 latent_dim=nz,
                 reward_mode=mode,
+                recon_loss=recon_loss,
                 infom=float(infomec["infom"]),
+                infoe=float(infomec["infoe"]),
                 infoc=float(infomec["infoc"]),
             )
             save_per_head_reward_figure(
@@ -916,10 +1735,94 @@ def main() -> None:
                 split=args.split,
                 out_png=png_path,
                 dpi=args.dpi,
+                plot_xy=args.plot_xy,
+                btl_unit=args.btl_unit,
+                scatter_t_idx=scatter_t_idx,
                 infomec=infomec,
+                recon_loss=recon_loss,
             )
             entry["pngs"][mode] = str(png_path.relative_to(outdir))
             tqdm.write(f"{row['comment']}: saved {png_path.relative_to(outdir)}")
+
+            if not args.stratify_pref_mode:
+                continue
+            assert pref_mode_labels is not None
+            assert pref_mode_names is not None
+            n_active = min(nz, MAX_HEAD_PANELS)
+            if mode == "raw":
+                summed_rewards = rewards[..., :n_active].sum(axis=-1)
+            else:
+                summed_rewards = batched_summed_reward_on_obs1(
+                    model=model,
+                    obs1=obs1,
+                    obs2=obs2,
+                    labels=labels,
+                    batch_size=batch_size,
+                    device=device,
+                    reward_mode=mode,
+                    btl_unit=args.btl_unit,
+                    comparison_obs=comparison_pool,
+                    prob_chunk_size=args.prob_chunk_size,
+                    source=query_source,
+                    scatter_t_idx=scatter_t_idx,
+                )
+            for pref_mode in range(n_pref_modes):
+                mode_name = str(pref_mode_names[pref_mode])
+                mask = np.asarray(pref_mode_labels).reshape(-1) == int(pref_mode)
+                obs1_m, rewards_m, scatter_t_idx_m, n_q_m = slice_rewards_by_pref_mode(
+                    obs1=obs1,
+                    rewards=rewards,
+                    mode_labels=pref_mode_labels,
+                    pref_mode=pref_mode,
+                    scatter_t_idx=scatter_t_idx,
+                )
+                summed_rewards_m = summed_rewards[mask]
+                pref_stem = stratified_pref_mode_stem(
+                    latent_dim=nz,
+                    pref_mode_idx=pref_mode,
+                    pref_mode_name=mode_name,
+                )
+                pref_png = rewardmap_stratified_out_png(
+                    outdir=outdir,
+                    latent_dim=nz,
+                    reward_mode=mode,
+                    pref_mode_idx=pref_mode,
+                    pref_mode_name=mode_name,
+                    recon_loss=recon_loss,
+                    infom=float(infomec["infom"]),
+                    infoe=float(infomec["infoe"]),
+                    infoc=float(infomec["infoc"]),
+                )
+                save_per_head_reward_figure(
+                    obs1=obs1_m,
+                    rewards=rewards_m,
+                    meta=row,
+                    reward_mode=mode,
+                    ckpt_label=ckpt_label,
+                    split=args.split,
+                    out_png=pref_png,
+                    dpi=args.dpi,
+                    plot_xy=args.plot_xy,
+                    btl_unit=args.btl_unit,
+                    scatter_t_idx=scatter_t_idx_m,
+                    infomec=infomec,
+                    pref_mode_name=mode_name,
+                    n_queries=n_q_m,
+                    reward_vmin=raw_vmin if mode == "raw" else 0.0,
+                    reward_vmax=raw_vmax if mode == "raw" else 1.0,
+                    n_panels=nz,
+                    include_summed_head_panel=True,
+                    summed_rewards=summed_rewards_m,
+                    recon_loss=recon_loss,
+                )
+                rel = str(pref_png.relative_to(outdir))
+                entry["stratified_pngs"].setdefault(mode, {})[pref_stem] = {
+                    "path": rel,
+                    "pref_mode": int(pref_mode),
+                    "pref_mode_name": mode_name,
+                    "n_queries": int(n_q_m),
+                }
+                tqdm.write(f"{row['comment']}: saved {rel} (n_queries={n_q_m})")
 
         manifest["figures"].append(entry)
 

@@ -556,7 +556,7 @@ def save_metrics_figure(
     sweep_vals = sorted({float(r["sweep_param_value"]) for r in rows})
     lds = sorted({int(r["latent_dim"]) for r in rows})
     nrows = 2
-    ncols = 4
+    ncols = max(len(wandb_metrics), len(INFOMEC_METRICS))
 
     fig_w = max(14.0, 0.95 * len(lds) * ncols)
     fig_h = max(9.0, 0.45 * len(sweep_vals) * nrows)
@@ -637,7 +637,8 @@ def save_metrics_figure(
             "vmax": float(np.max(finite)) if finite.size else None,
         }
 
-    axes[1, 3].set_visible(False)
+    for col_i in range(len(INFOMEC_METRICS), ncols):
+        axes[1, col_i].set_visible(False)
 
     out_png.parent.mkdir(parents=True, exist_ok=True)
     fig.tight_layout()

@@ -58,9 +58,10 @@ decoder_slot_routing=sum   # slotlinear only: softmax | sum (direct Σ r_j)
 decoder_orth_weight=0.0  # odinlinear only; no-op for other decoders
 decoder_sparsity_weight=0.001  # poslinear only: L1 on theta(s); no-op for other decoders
 decoder_sparsity_mode=group  # poslinear only: elementwise (L1, parts-biased) | group (lasso over heads, axes-biased)
+decoder_softplus_beta=2.0  # poslinear only: softplus beta on theta=softplus(w(h))
 
-encode_labels=True  # pair encoder: concat y into pair_mlp (q(z|s1,s2,y))
-encode_sources=True  # pair encoder: one-hot GT source_variable after set pool (InfoMEC)
+encode_labels=True  # pair encoder: cncat y into pair_mlp (q(z|s1,s2,y))
+encode_sources=False  # pair encoder: one-hot GT source_variable after set pool (InfoMEC)
 
 # * 2 goals
 # pref_dataset="sort_2goals_T=1_Q=5000"
@@ -132,6 +133,7 @@ run_train_grid() {
     --decoder_orth_weight="${decoder_orth_weight}" \
     --decoder_sparsity_weight="${decoder_sparsity_weight}" \
     --decoder_sparsity_mode="${decoder_sparsity_mode}" \
+    --decoder_softplus_beta="${decoder_softplus_beta}" \
     --encode_labels="${encode_labels}" \
     --encode_sources="${encode_sources}" \
     --n_epochs=500 \

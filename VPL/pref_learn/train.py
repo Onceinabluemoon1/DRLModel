@@ -105,6 +105,7 @@ FLAGS_DEF = define_flags_with_default(
     decoder_orth_weight=0.0,  # odinlinear only: ODIN row orth on z_head.weight
     decoder_sparsity_weight=0.0,  # poslinear only: L1 on theta(s) feature activations
     decoder_sparsity_mode="elementwise",  # poslinear only: elementwise (L1) | group (lasso over heads)
+    decoder_softplus_beta=1.0,  # poslinear only: softplus beta on theta = softplus(w(h))
 )
 
 
@@ -373,6 +374,7 @@ def main(_):
             decoder_orth_weight=FLAGS.decoder_orth_weight,
             decoder_sparsity_weight=FLAGS.decoder_sparsity_weight,
             decoder_sparsity_mode=FLAGS.decoder_sparsity_mode,
+            decoder_softplus_beta=FLAGS.decoder_softplus_beta,
         )
     elif FLAGS.model_type == "VAE" or FLAGS.model_type == "VAEClassifier":
         annealer = None
@@ -413,6 +415,7 @@ def main(_):
             decoder_orth_weight=FLAGS.decoder_orth_weight,
             decoder_sparsity_weight=FLAGS.decoder_sparsity_weight,
             decoder_sparsity_mode=FLAGS.decoder_sparsity_mode,
+            decoder_softplus_beta=FLAGS.decoder_softplus_beta,
         )
     elif FLAGS.model_type == "MLPClassifier":
         reward_model = MLPClassifier(obs_dim, FLAGS.hidden_dim)
@@ -437,6 +440,7 @@ def main(_):
             decoder_orth_weight=FLAGS.decoder_orth_weight,
             decoder_sparsity_weight=FLAGS.decoder_sparsity_weight,
             decoder_sparsity_mode=FLAGS.decoder_sparsity_mode,
+            decoder_softplus_beta=FLAGS.decoder_softplus_beta,
         )
     else:
         raise NotImplementedError

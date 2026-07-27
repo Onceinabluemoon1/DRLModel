@@ -50,6 +50,7 @@ class TCVAEModel(VAEModel):
         decoder_orth_weight: float = 0.0,
         decoder_sparsity_weight: float = 0.0,
         decoder_sparsity_mode: str = "elementwise",
+        decoder_softplus_beta: float = 1.0,
     ):
         if flow_prior:
             raise NotImplementedError("TCVAEModel does not support flow_prior.")
@@ -78,6 +79,7 @@ class TCVAEModel(VAEModel):
             decoder_orth_weight=decoder_orth_weight,
             decoder_sparsity_weight=decoder_sparsity_weight,
             decoder_sparsity_mode=decoder_sparsity_mode,
+            decoder_softplus_beta=decoder_softplus_beta,
         )
         self.dataset_size = int(dataset_size)
         self.tc_weight = tc_weight

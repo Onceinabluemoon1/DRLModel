@@ -274,12 +274,7 @@ def get_latent(batch, env, reward_model, mode, num_samples):
     elif getattr(reward_model, "encode_sources", False):
         raise ValueError("encode_sources=True but source is None in batch")
     with torch.no_grad():
-        mean, _ = reward_model.encode(
-            obs1,
-            obs2,
-            labels,
-            source=source,
-        )
+        mean, _ = reward_model.encode(obs1, obs2, labels, source=source)
     return mean.cpu().numpy()
 
 

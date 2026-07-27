@@ -37,6 +37,7 @@ decoder_slot_routing=sum   # slotlinear only: softmax | sum (direct Σ r_j)
 decoder_orth_weight=0.0  # odinlinear only; no-op for other decoders
 decoder_sparsity_weight=0.0  # poslinear only: L1 on theta(s); no-op for other decoders
 decoder_sparsity_mode=elementwise  # poslinear only: elementwise (L1, parts-biased) | group (lasso over heads, axes-biased)
+decoder_softplus_beta=1.0  # poslinear only: softplus beta on theta=softplus(w(h))
 
 encode_labels=True  # pair encoder: concat y into pair_mlp (q(z|s1,s2,y))
 encode_sources=False  # pair encoder: one-hot GT source_variable (InfoMEC; relabelled dataset)
@@ -91,6 +92,7 @@ run_train_qlae() {
     --decoder_orth_weight="${decoder_orth_weight}" \
     --decoder_sparsity_weight="${decoder_sparsity_weight}" \
     --decoder_sparsity_mode="${decoder_sparsity_mode}" \
+    --decoder_softplus_beta="${decoder_softplus_beta}" \
     --encode_labels="${encode_labels}" \
     --encode_sources="${encode_sources}" \
     --n_epochs=500 \

@@ -24,7 +24,10 @@ import numpy as np
 import torch
 from matplotlib.axes import Axes
 from matplotlib.lines import Line2D
-from pref_learn.configs.data_configs import infomec_dataset_path_for_variant
+from pref_learn.configs.data_configs import (
+    infomec_dataset_path_for_variant,
+    pref_dataset_path_for_variant,
+)
 from pref_learn.models.qlae import QLAE
 from pref_learn.models.utils import PreferenceDataset
 from pref_learn.models.vae import VAEModel
@@ -63,10 +66,11 @@ class SortLearnedRewardMapLayout:
     n_goals: Optional[int]
     ncols: int
     scatter_s: float
-    x_idx: int = 0
-    y_idx: int = 1
-    axis_xlabel: str = "EE x"
-    axis_ylabel: str = "EE y"
+    x_idx: int = 1
+    y_idx: int = 0
+    axis_xlabel: str = "EE y"
+    axis_ylabel: str = "EE x"
+    invert_yaxis: bool = True
     title_fontsize: int = 10
 
 
@@ -115,7 +119,7 @@ def format_sort_learned_reward_map_suptitle(
         if layout.n_goals is not None
         else f"{n_modes} pref modes"
     )
-    map_line = f"Learned reward vs EE (x,y): {goal_part} ({env_name})"
+    map_line = f"Learned reward vs EE (y,x): {goal_part} ({env_name})"
     if run_title:
         return f"{map_line}\n{run_title}"
     return map_line
@@ -969,6 +973,97 @@ def resolve_infomec_dataset_path(
     return resolve_dataset_path(run_dir, dataset_rel, override)
 
 
+def resolve_training_dataset_path(
+    run_dir: Path, variant: dict, override: Optional[Path]
+) -> Path:
+    """Training preference pickle from ``variant['pref_dataset']``."""
+    dataset_rel = pref_dataset_path_for_variant(variant=variant)
+    return resolve_dataset_path(run_dir, dataset_rel, override)
+
+
+def subsample_preference_queries(
+    *,
+    obs1: np.ndarray,
+    obs2: np.ndarray,
+    labels: np.ndarray,
+    query_source: np.ndarray | None,
+    frac: float,
+    seed: int = 0,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray | None]:
+    """Random query subsample; ``frac=1`` keeps all rows."""
+    frac_f = float(frac)
+    if not (0.0 < frac_f <= 1.0):
+        raise ValueError(f"viz_data_frac must be in (0, 1]; got {frac_f!r}")
+    n = int(len(obs1))
+    if frac_f >= 1.0 or n <= 1:
+        return obs1, obs2, labels, query_source
+    k = max(1, int(round(frac_f * n)))
+    rng = np.random.default_rng(seed=seed)
+    idx = np.sort(rng.choice(n, size=k, replace=False))
+    src_out = None if query_source is None else np.asarray(query_source)[idx]
+    return obs1[idx], obs2[idx], labels[idx], src_out
+
+
+def prepare_preference_eval_arrays(
+    run_dir: Path,
+    *,
+    split: str,
+    batch_size: Optional[int],
+    set_length: Optional[int],
+    dataset_override: Optional[Path],
+    device_str: str,
+    viz_data_frac: float = 1.0,
+    viz_data_seed: int = 0,
+) -> Tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    int,
+    dict,
+    Path,
+    np.ndarray | None,
+    torch.device,
+]:
+    """Load **training** preference data for reward-map / viz (not InfoMEC held-out set)."""
+    run_dir = run_dir.expanduser().resolve()
+    variant_path = run_dir / "variant.json"
+    if not variant_path.is_file():
+        raise FileNotFoundError(f"Missing variant.json under run_dir: {variant_path}")
+    with open(variant_path, encoding="utf-8") as vf:
+        meta = json.load(vf)
+    variant = meta["variant"]
+    bs = int(variant["batch_size"]) if batch_size is None else int(batch_size)
+    sl = int(variant["set_size"]) if set_length is None else int(set_length)
+    dataset_path = resolve_training_dataset_path(run_dir, variant, dataset_override)
+    with open(dataset_path, "rb") as f:
+        batch = pickle.load(f)
+    n = len(batch["observations"])
+    idx = split_indices(n, split)
+    obs1 = maybe_truncate(np.asarray(batch["observations"])[idx], sl)
+    obs2 = maybe_truncate(np.asarray(batch["observations_2"])[idx], sl)
+    labels = maybe_truncate(np.asarray(batch["labels"])[idx], sl)
+    query_source = slice_query_source(batch=batch, idx=idx)
+    obs1, obs2, labels, query_source = subsample_preference_queries(
+        obs1=obs1,
+        obs2=obs2,
+        labels=labels,
+        query_source=query_source,
+        frac=viz_data_frac,
+        seed=viz_data_seed,
+    )
+    device = resolve_eval_device(device_str)
+    return (
+        obs1,
+        obs2,
+        labels,
+        bs,
+        variant,
+        dataset_path,
+        query_source,
+        device,
+    )
+
+
 def split_indices(n: int, split: str) -> np.ndarray:
     eval_size = int(0.1 * n)
     train_size = n - eval_size
@@ -1114,6 +1209,21 @@ def encode_source_kwargs(
     return {"source": u}
 
 
+def encode_preference_latent_mean(
+    model: torch.nn.Module,
+    o1: torch.Tensor,
+    o2: torch.Tensor,
+    y: torch.Tensor,
+    **enc_kw,
+) -> torch.Tensor:
+    """``(B, Z)`` posterior mean for VAE / QLAE."""
+    if isinstance(model, QLAE):
+        z_q, _ = model.encode(o1, o2, y, **enc_kw)
+        return z_q
+    mean, _ = model.encode(o1, o2, y, **enc_kw)
+    return mean
+
+
 def batched_encode(
     model,
     obs1,
@@ -1137,7 +1247,7 @@ def batched_encode(
             device=device,
         )
         with torch.no_grad():
-            mean, _ = model.encode(o1, o2, y, **enc_kw)  # B, Z
+            mean = encode_preference_latent_mean(model, o1, o2, y, **enc_kw)
         means.append(mean.cpu().numpy())
     return np.concatenate(means, axis=0)
 
@@ -1179,7 +1289,7 @@ def batched_learned_rewards_on_obs1(
             model=model, source=source, start=start, end=end, device=device
         )
         with torch.no_grad():
-            mean, _ = model.encode(o1, o2, y, **enc_kw)  # (B, Z)
+            mean = encode_preference_latent_mean(model, o1, o2, y, **enc_kw)
             if reward_mode == "prob":
                 assert comp_t is not None
                 o_flat = o1.reshape(b_n * s_n * t_n, o_dim)  # (B*S*T, O)
@@ -1213,6 +1323,26 @@ def build_comparison_obs_pool(
         ],
         axis=0,
     )
+    if pool.shape[0] > max_comp:
+        rng = np.random.default_rng(seed=seed)
+        idx = rng.choice(pool.shape[0], size=max_comp, replace=False)
+        pool = pool[idx]
+    return pool
+
+
+def build_comparison_traj_pool(
+    obs1: np.ndarray,
+    obs2: np.ndarray,
+    *,
+    max_comp: int = 2048,
+    seed: int = 0,
+) -> np.ndarray:
+    """Sample comparison trajectories ``s_B`` with shape ``(N, T, O)`` from pref dataset."""
+    t_n = int(obs1.shape[2])
+    o_dim = int(obs1.shape[-1])
+    segs1 = obs1.reshape(-1, t_n, o_dim)
+    segs2 = obs2.reshape(-1, t_n, o_dim)
+    pool = np.concatenate([segs1, segs2], axis=0)  # (N, T, O)
     if pool.shape[0] > max_comp:
         rng = np.random.default_rng(seed=seed)
         idx = rng.choice(pool.shape[0], size=max_comp, replace=False)
@@ -1340,6 +1470,7 @@ def maybe_save_learned_reward_by_annotator_mode(
         y_idx=layout.y_idx,
         axis_xlabel=layout.axis_xlabel,
         axis_ylabel=layout.axis_ylabel,
+        invert_yaxis=layout.invert_yaxis,
         title_fontsize=layout.title_fontsize,
         reward_vmin=0.0 if learned_reward_mode == "prob" else None,
         reward_vmax=1.0 if learned_reward_mode == "prob" else None,
@@ -1425,7 +1556,7 @@ def encode_latents_dataloader(
             enc_kw: dict[str, torch.Tensor] = {}
             if model_encode_sources(model=model):
                 enc_kw["source"] = batch["source_variable"].to(device).long()
-            mean, _ = model.encode(o1, o2, y, **enc_kw)  # (B, Z)
+            mean = encode_preference_latent_mean(model, o1, o2, y, **enc_kw)
             means.append(mean.cpu().numpy())
     return np.concatenate(means, axis=0)  # (N, Z)
 
@@ -1624,7 +1755,7 @@ def encode_latent_means_on_xy_table_grid(
             u = enc_kw["source"]  # (1, n_sources)
             enc_kw["source"] = u.expand(end - start, -1)
         with torch.no_grad():
-            m, _ = model.encode(t1, t2, yv, **enc_kw)
+            m = encode_preference_latent_mean(model, t1, t2, yv, **enc_kw)
         means_b.append(m.cpu().numpy())
     m_all = np.concatenate(means_b, axis=0)  # (B, L) — (Gx*Gy, L)
     l_m = int(m_all.shape[1])
@@ -1829,7 +1960,7 @@ def prepare_infomec_eval_arrays(
     np.ndarray | None,
     torch.device,
 ]:
-    """Load dataset + build observation tensors and source matrix for one training run_dir."""
+    """Load InfoMEC eval dataset + build observation tensors and source matrix."""
     run_dir = run_dir.expanduser().resolve()
     variant_path = run_dir / "variant.json"
     if not variant_path.is_file():

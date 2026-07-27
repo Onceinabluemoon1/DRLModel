@@ -42,6 +42,7 @@ class VAEModel(nn.Module):
         decoder_orth_weight: float = 0.0,
         decoder_sparsity_weight: float = 0.0,
         decoder_sparsity_mode: str = "elementwise",
+        decoder_softplus_beta: float = 1.0,
     ):
         super(VAEModel, self).__init__()
         assert loss_aggregation in ("sum", "mean")
@@ -68,6 +69,7 @@ class VAEModel(nn.Module):
             gate_temperature=decoder_gate_temperature,
             slot_routing=decoder_slot_routing,
             sparsity_mode=decoder_sparsity_mode,
+            softplus_beta=decoder_softplus_beta,
         )
         self.decoder_type = str(decoder_type).lower()
         self.decoder_orth_weight = float(decoder_orth_weight)

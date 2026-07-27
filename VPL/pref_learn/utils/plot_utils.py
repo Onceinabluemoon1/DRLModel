@@ -31,6 +31,7 @@ def plot_reward(
     ylabel: str | None = None,
     xlim: tuple[float, float] | None = None,
     ylim: tuple[float, float] | None = None,
+    invert_yaxis: bool = False,
 ):
     # if not no_norm:
     #     r = (r - r.min()) / (r.max() - r.min())
@@ -58,6 +59,8 @@ def plot_reward(
         ax.set_xlim(xlim)
     if ylim is not None:
         ax.set_ylim(ylim)
+    if invert_yaxis:
+        ax.invert_yaxis()
     if colorbar:
         cb = plt.colorbar(sc, ax=ax)
         cb.set_label("r(s)")
@@ -98,13 +101,15 @@ def plot_observation_rewards_by_annotator_mode(
     reward_vmin: float | None = None,
     reward_vmax: float | None = None,
     ncols: int | None = None,
-    x_idx: int = 0,
-    y_idx: int = 1,
-    axis_xlabel: str = "EE x",
-    axis_ylabel: str = "EE y",
+    x_idx: int = 1,
+    y_idx: int = 0,
+    axis_xlabel: str = "EE y",
+    axis_ylabel: str = "EE x",
     xlim: tuple[float, float] | None = None,
     ylim: tuple[float, float] | None = None,
+    invert_yaxis: bool = True,
     title_fontsize: int = 10,
+    highlight_panel_indices: list[int] | None = None,
 ):
     """
     One scatter panel per annotator mode; each uses only (obs, r) from that mode.
@@ -137,8 +142,8 @@ def plot_observation_rewards_by_annotator_mode(
     n_suptitle_lines = (suptitle.count("\n") + 1) if suptitle else 0
     # * Last column is only for the shared colorbar so it does not overlap subplot data.
     fig_w = 4.2 * ncols + 1.25
-    suptitle_line_frac = 0.032  # figure-height fraction per suptitle line (~fontsize 9)
-    suptitle_top_margin = 0.012
+    suptitle_line_frac = 0.038  # figure-height fraction per suptitle line (~fontsize 9)
+    suptitle_top_margin = 0.020
     if suptitle:
         top = 1.0 - suptitle_top_margin - n_suptitle_lines * suptitle_line_frac
         top = max(top, 0.52 + 0.04 * max(nrows - 1, 0))
@@ -193,6 +198,12 @@ def plot_observation_rewards_by_annotator_mode(
                 ax.set_xlim(xlim)
             if ylim is not None:
                 ax.set_ylim(ylim)
+            if invert_yaxis:
+                ax.invert_yaxis()
+            if highlight_panel_indices is not None and m in highlight_panel_indices:
+                for spine in ax.spines.values():
+                    spine.set_edgecolor("blue")
+                    spine.set_linewidth(2.5)
             continue
         plot_reward(
             ax,
@@ -213,7 +224,12 @@ def plot_observation_rewards_by_annotator_mode(
             ylabel=axis_ylabel,
             xlim=xlim,
             ylim=ylim,
+            invert_yaxis=invert_yaxis,
         )
+        if highlight_panel_indices is not None and m in highlight_panel_indices:
+            for spine in ax.spines.values():
+                spine.set_edgecolor("blue")
+                spine.set_linewidth(2.5)
 
     for k in range(n_modes, len(flat_axes)):
         flat_axes[k].set_visible(False)
