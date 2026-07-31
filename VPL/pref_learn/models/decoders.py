@@ -14,7 +14,7 @@ def split_obs_z(x: torch.Tensor, *, obs_dim: int) -> tuple[torch.Tensor, torch.T
     return obs, z
 
 
-class PosLinearDecoder(nn.Module):
+class MultiplicativeDecoder(nn.Module):
     """Deterministic ``theta_j(s) = softplus(w_j(h))``; ``r = sum_j theta_j(s) z_j``.
 
     Optional ``trunk_layernorm`` on ``h``. Sparsity is always on pre-projection ``theta``.
@@ -71,7 +71,7 @@ class PosLinearDecoder(nn.Module):
         return torch.einsum("batz->bat", r_j).unsqueeze(-1)
 
 
-class EllenLinearDecoder(nn.Module):
+class ConditionalDecoder(nn.Module):
     def __init__(
         self,
         obs_dim: int,
@@ -111,7 +111,7 @@ class EllenLinearDecoder(nn.Module):
         return r_j.sum(dim=-1, keepdim=True)
 
 
-class SlotLinearDecoder(nn.Module):
+class SlotDecoder(nn.Module):
     def __init__(
         self,
         obs_dim: int,
@@ -166,7 +166,7 @@ class SlotLinearDecoder(nn.Module):
         return torch.einsum("batz->bat", weighted_r_j).unsqueeze(-1)
 
 
-class OdinLinearDecoder(nn.Module):
+class OdinDecoder(nn.Module):
     def __init__(
         self,
         obs_dim: int,
@@ -213,63 +213,75 @@ class OdinLinearDecoder(nn.Module):
 
 SUM_HEAD_DECODER_TYPES: frozenset[str] = frozenset(
     {
-        "poslinear",
-        "ellenlinear",
-        "slotlinear",
-        "odinlinear",
+        "multi",
+        "cond",
+        "slot",
+        "odin",
     }
 )
 
 
 def decoder_sums_latent_heads(*, decoder_type: str) -> bool:
-    return str(decoder_type).lower() in SUM_HEAD_DECODER_TYPES
+    return normalize_decoder_type(decoder_type=decoder_type) in SUM_HEAD_DECODER_TYPES
 
 
 def reward_decoder_column_orth_penalty(*, decoder: nn.Module) -> torch.Tensor:
-    if isinstance(decoder, OdinLinearDecoder):
+    if isinstance(decoder, OdinDecoder):
         return decoder.orthogonality_loss()
     p = next(decoder.parameters())
     return torch.zeros((), device=p.device, dtype=p.dtype)
 
 
 def reward_decoder_theta_sparsity(*, decoder: nn.Module) -> torch.Tensor:
-    if isinstance(decoder, PosLinearDecoder) and decoder.last_w_sparsity is not None:
+    if isinstance(decoder, MultiplicativeDecoder) and decoder.last_w_sparsity is not None:
         return decoder.last_w_sparsity
     p = next(decoder.parameters())
     return torch.zeros((), device=p.device, dtype=p.dtype)
 
 
 DecoderType = Literal[
-    "poslinear",
-    "ellenlinear",
-    "slotlinear",
-    "odinlinear",
+    "multi",
+    "cond",
+    "slot",
+    "odin",
 ]
 DECODER_TYPES: tuple[str, ...] = (
-    "poslinear",
-    "ellenlinear",
-    "slotlinear",
-    "odinlinear",
+    "multi",
+    "cond",
+    "slot",
+    "odin",
 )
+
+_DECODER_TYPE_ALIASES: dict[str, str] = {
+    "poslinear": "multi",
+    "ellenlinear": "cond",
+    "slotlinear": "slot",
+    "odinlinear": "odin",
+}
+
+
+def normalize_decoder_type(*, decoder_type: str) -> str:
+    kind = str(decoder_type).lower()
+    return _DECODER_TYPE_ALIASES.get(kind, kind)
 
 
 @dataclass
 class RewardDecoderConfig:
     """Architecture + hyperparameters for ``make_reward_decoder``."""
 
-    decoder_type: str = "poslinear"
+    decoder_type: str = "multi"
     obs_dim: int = 0
     latent_dim: int = 0
     hidden_dim: int = 128
     decoder_input: int | None = None
 
-    # poslinear
+    # multi
     sparsity_mode: str = "elementwise"
     softplus_beta: float = 1.0
     trunk_layernorm: bool = False
 
-    # ellenlinear
-    # slotlinear
+    # cond
+    # slot
     gate_temperature: float = 1.0
     slot_routing: str = "softmax"
 
@@ -289,7 +301,7 @@ class RewardDecoderConfig:
         slot_routing: str = "softmax",
     ) -> "RewardDecoderConfig":
         return cls(
-            decoder_type=str(decoder_type).lower(),
+            decoder_type=normalize_decoder_type(decoder_type=str(decoder_type)),
             obs_dim=int(obs_dim),
             latent_dim=int(latent_dim),
             hidden_dim=int(hidden_dim),
@@ -303,7 +315,7 @@ class RewardDecoderConfig:
 
 
 def make_reward_decoder(*, config: RewardDecoderConfig) -> nn.Module:
-    kind = str(config.decoder_type).lower()
+    kind = normalize_decoder_type(decoder_type=config.decoder_type)
     if kind not in DECODER_TYPES:
         raise ValueError(
             f"Unknown decoder_type={config.decoder_type!r}; choose {DECODER_TYPES}"
@@ -321,21 +333,21 @@ def make_reward_decoder(*, config: RewardDecoderConfig) -> nn.Module:
         latent_dim=config.latent_dim,
         hidden_dim=config.hidden_dim,
     )
-    if kind == "poslinear":
-        return PosLinearDecoder(
+    if kind == "multi":
+        return MultiplicativeDecoder(
             **core,
             sparsity_mode=config.sparsity_mode,
             softplus_beta=config.softplus_beta,
             trunk_layernorm=config.trunk_layernorm,
         )
-    if kind == "ellenlinear":
-        return EllenLinearDecoder(**core)
-    if kind == "slotlinear":
-        return SlotLinearDecoder(
+    if kind == "cond":
+        return ConditionalDecoder(**core)
+    if kind == "slot":
+        return SlotDecoder(
             **core,
             gate_temperature=config.gate_temperature,
             slot_routing=config.slot_routing,
         )
-    if kind == "odinlinear":
-        return OdinLinearDecoder(**core)
+    if kind == "odin":
+        return OdinDecoder(**core)
     raise RuntimeError(f"Unhandled decoder_type={kind!r}")

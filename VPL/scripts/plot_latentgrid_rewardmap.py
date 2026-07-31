@@ -32,7 +32,10 @@ if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
 import plot_infomec as plt_infomec  # noqa: E402
-from pref_learn.models.nets import decoder_sums_latent_heads  # noqa: E402
+from pref_learn.models.nets import (  # noqa: E402
+    decoder_sums_latent_heads,
+    normalize_decoder_type,
+)
 from pref_learn.models.qlae import QLAE  # noqa: E402
 from pref_learn.models.utils import logvar_to_std  # noqa: E402
 from pref_learn.models.vae import VAEModel  # noqa: E402
@@ -656,7 +659,9 @@ def load_subrun_metadata(*, run_dir: Path) -> dict[str, Any]:
     sweep_param_name, sweep_param_value, sweep_param_label = sweep_from_variant(
         variant=variant
     )
-    decoder_type = str(variant.get("decoder_type", "poslinear")).lower()
+    decoder_type = normalize_decoder_type(
+        decoder_type=str(variant.get("decoder_type", "multi"))
+    )
     return {
         "run_dir": run_dir.resolve(),
         "comment": str(variant.get("comment", run_dir.name)),
@@ -1526,7 +1531,7 @@ def main() -> None:
     if not decoder_sums_latent_heads(decoder_type=decoder_type):
         raise RuntimeError(
             f"decoder_type={decoder_type!r} does not sum per-latent heads; "
-            f"choose one of poslinear / ellenlinear / odinlinear / slotlinear."
+            f"choose one of multi / cond / slot / odin."
         )
     for row in rows[1:]:
         if str(row["decoder_type"]) != decoder_type:

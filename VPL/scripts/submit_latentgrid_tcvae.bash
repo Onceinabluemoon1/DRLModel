@@ -61,16 +61,16 @@ encode_labels=True  # pair encoder: concat y into pair_mlp (q(z|s1,s2,y))
 encode_sources=False  # pair encoder: one-hot GT source_variable (InfoMEC; relabelled dataset)
 
 # === decoder args
-decoder_type=poslinear  # poslinear | ellenlinear | slotlinear | odinlinear
+decoder_type=multi  # multi | cond | slot | odin
 
-# poslinear
+# multi
 decoder_sparsity_weight=0.0  # L1 on theta(s)
 decoder_sparsity_mode=elementwise  # elementwise (L1, parts-biased) | group (lasso over heads, axes-biased)
 decoder_softplus_beta=1.0  # softplus beta on theta = softplus(w(h))
 decoder_trunk_layernorm=False
 
-# ellenlinear
-# set decoder_type=ellenlinear above; poslinear flags are ignored
+# cond
+# set decoder_type=cond above; multi flags are ignored
 
 # ===
 

@@ -100,17 +100,17 @@ FLAGS_DEF = define_flags_with_default(
     # e.g. latentsweep: shared sweep dir / W&B group for beta×latent_dim grids (see submit_train_vae_grid.bash)
     sweep_folder_tag="",
     # === decoder args
-    decoder_type="poslinear",  # poslinear | ellenlinear | slotlinear | odinlinear
-    # poslinear
+    decoder_type="multi",  # multi | cond | slot | odin
+    # multi
     decoder_sparsity_weight=0.0,  # L1 on theta(s) feature activations (training loss weight)
     decoder_sparsity_mode="elementwise",  # elementwise (L1) | group (lasso over heads)
     decoder_softplus_beta=1.0,  # softplus beta on theta = softplus(w(h))
     decoder_trunk_layernorm=False,  # LayerNorm on trunk h before w_head
-    # ellenlinear
-    # slotlinear
+    # cond
+    # slot
     decoder_gate_temperature=1.0,  # softmax routing temperature
     decoder_slot_routing="softmax",  # softmax | sum
-    # odinlinear
+    # odin
     decoder_orth_weight=0.0,  # row-orth penalty on z_head.weight (training loss weight)
     # ===
     encode_labels=True,  # pair encoder: concat y into pair_mlp input (q(z|s1,s2,y))
@@ -224,13 +224,13 @@ def main(_):
         run_tags.append(f"wd={FLAGS.weight_decay}")
     dec_tag = f"dec={FLAGS.decoder_type}"
     run_tags.append(dec_tag)
-    if str(FLAGS.decoder_type).lower() == "poslinear":
+    if str(FLAGS.decoder_type).lower() == "multi":
         spar_mode = str(FLAGS.decoder_sparsity_mode).lower()
         spar_abbr = "ele" if spar_mode == "elementwise" else spar_mode
         run_tags.append(f"l1={spar_abbr}{FLAGS.decoder_sparsity_weight}")
-    if str(FLAGS.decoder_type).lower() == "slotlinear":
+    if str(FLAGS.decoder_type).lower() == "slot":
         run_tags.append(f"slotr={FLAGS.decoder_slot_routing}")
-    if str(FLAGS.decoder_type).lower() == "odinlinear":
+    if str(FLAGS.decoder_type).lower() == "odin":
         run_tags.append(f"orthw={FLAGS.decoder_orth_weight}")
     run_tags.append(f"encY={_flag_bool(FLAGS.encode_labels)}")
     run_tags.append(f"encS={_flag_bool(FLAGS.encode_sources)}")
@@ -257,13 +257,13 @@ def main(_):
         if FLAGS.model_type == "QLAE":
             sweep_scope_tags.append(f"nv={FLAGS.num_quantized_values}")
         sweep_scope_tags.append(dec_tag)
-        if str(FLAGS.decoder_type).lower() == "poslinear":
+        if str(FLAGS.decoder_type).lower() == "multi":
             spar_mode = str(FLAGS.decoder_sparsity_mode).lower()
             spar_abbr = "ele" if spar_mode == "elementwise" else spar_mode
             sweep_scope_tags.append(f"l1={spar_abbr}{FLAGS.decoder_sparsity_weight}")
-        if str(FLAGS.decoder_type).lower() == "slotlinear":
+        if str(FLAGS.decoder_type).lower() == "slot":
             sweep_scope_tags.append(f"slotr={FLAGS.decoder_slot_routing}")
-        if str(FLAGS.decoder_type).lower() == "odinlinear":
+        if str(FLAGS.decoder_type).lower() == "odin":
             sweep_scope_tags.append(f"orthw={FLAGS.decoder_orth_weight}")
         sweep_scope_tags.append(f"encY={_flag_bool(FLAGS.encode_labels)}")
         sweep_scope_tags.append(f"encS={_flag_bool(FLAGS.encode_sources)}")

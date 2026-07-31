@@ -51,7 +51,7 @@ class QLAE(nn.Module):
         assert loss_aggregation in ("sum", "mean")
         if decoder_config is None:
             decoder_config = RewardDecoderConfig.from_train(
-                decoder_type="poslinear",
+                decoder_type="multi",
                 obs_dim=obs_dim,
                 latent_dim=latent_dim,
                 hidden_dim=hidden_dim,
@@ -242,7 +242,7 @@ class QLAE(nn.Module):
 def _qlae_uses_weight_decay(*, name: str, model: nn.Module) -> bool:
     if name.startswith("quantizer.") or name.endswith(".bias"):
         return False
-    # if getattr(model, "decoder_type", None) == "slotlinear" and name.startswith(
+    # if getattr(model, "decoder_type", None) == "slot" and name.startswith(
     #     "decoder.obs_trunk."
     # ):
     #     return False

@@ -47,7 +47,7 @@ class VAEModel(nn.Module):
         assert loss_aggregation in ("sum", "mean")
         if decoder_config is None:
             decoder_config = RewardDecoderConfig.from_train(
-                decoder_type="poslinear",
+                decoder_type="multi",
                 obs_dim=obs_dim,
                 latent_dim=latent_dim,
                 hidden_dim=hidden_dim,
