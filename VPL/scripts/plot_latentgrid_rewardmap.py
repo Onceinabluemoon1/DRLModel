@@ -34,6 +34,7 @@ if str(_SCRIPT_DIR) not in sys.path:
 import plot_infomec as plt_infomec  # noqa: E402
 from pref_learn.models.nets import decoder_sums_latent_heads  # noqa: E402
 from pref_learn.models.qlae import QLAE  # noqa: E402
+from pref_learn.models.utils import logvar_to_std  # noqa: E402
 from pref_learn.models.vae import VAEModel  # noqa: E402
 from pref_learn.utils.disentangle_sweep import (  # noqa: E402
     discover_sweep_subruns,
@@ -99,11 +100,12 @@ def rewardmap_run_dir_tag(
     plot_xy: RewardMapPlotXY,
     btl_logit_scaling: BtlLogitScaling,
 ) -> str:
-    """``<timestamp>_btlUnit=…_xy=…_btlLogitScaling=…_<prefix>=<value>``."""
+    """``<timestamp>_<prefix>=<value>_btlUnit=…_xy=…_btlLogitScaling=…``."""
     prefix = sweep_param_filename_prefix(sweep_param_name=sweep_param_name)
     return (
-        f"{ts}_btlUnit={btl_unit.value}_xy={plot_xy.value}_"
-        f"btlLogitScaling={btl_logit_scaling.value}_{prefix}={sweep_param_value:g}"
+        f"{ts}_{prefix}={sweep_param_value:g}_"
+        f"btlUnit={btl_unit.value}_xy={plot_xy.value}_"
+        f"btlLogitScaling={btl_logit_scaling.value}"
     )
 
 
@@ -265,7 +267,7 @@ class LatentGridRewardMapCLI:
     """Auto HP: row survives if any cell has ``recon_loss`` ≤ threshold; top-k ranks by mean recon over passing cells only; InfoM tie-break uses passing cells."""
 
     outdir: Optional[Path] = None
-    """Default ``<input_dir>/evals_rewardmap/<ts>_btlUnit=…_xy=…_<prefix>=<value>/``."""
+    """Default ``<input_dir>/evals_rewardmap/<ts>_<prefix>=<value>_btlUnit=…_xy=…/``."""
 
     reward_mode: RewardMapMode = RewardMapMode.both
     """``raw``: decoder head output; ``btl``: BTL preference using one head only."""
@@ -399,12 +401,33 @@ def load_latentgrid_metrics_rows(*, csv_path: Path) -> list[dict[str, str]]:
 
 
 def load_latentgrid_recon_loss_by_run_dir(*, csv_path: Path) -> dict[str, float]:
-    """``run_dir`` (resolved) -> train ``recon_loss`` from latentgrid metrics CSV."""
+    """Lookup train ``recon_loss`` by resolved ``run_dir`` and by subrun basename."""
     lookup: dict[str, float] = {}
     for row in load_latentgrid_metrics_rows(csv_path=csv_path):
         run_dir = Path(row["run_dir"]).expanduser().resolve()
-        lookup[str(run_dir)] = float(row["recon_loss"])
+        recon = float(row["recon_loss"])
+        lookup[str(run_dir)] = recon
+        #* basename / comment: same keying as InfoMEC cache (survives moved sweep roots)
+        lookup[run_dir.name] = recon
+        comment = str(row.get("comment", "")).strip()
+        if comment:
+            lookup[comment] = recon
     return lookup
+
+
+def lookup_latentgrid_recon_loss(
+    *,
+    recon_by_run_dir: dict[str, float],
+    run_dir: Path,
+) -> float | None:
+    """Resolve recon for a subrun; prefer absolute path, then folder name."""
+    resolved = str(run_dir.expanduser().resolve())
+    if resolved in recon_by_run_dir:
+        return float(recon_by_run_dir[resolved])
+    name = run_dir.name
+    if name in recon_by_run_dir:
+        return float(recon_by_run_dir[name])
+    return None
 
 
 def _hp_row_stats(
@@ -633,7 +656,7 @@ def load_subrun_metadata(*, run_dir: Path) -> dict[str, Any]:
     sweep_param_name, sweep_param_value, sweep_param_label = sweep_from_variant(
         variant=variant
     )
-    decoder_type = str(variant.get("decoder_type", "mlp")).lower()
+    decoder_type = str(variant.get("decoder_type", "poslinear")).lower()
     return {
         "run_dir": run_dir.resolve(),
         "comment": str(variant.get("comment", run_dir.name)),
@@ -745,6 +768,58 @@ def encode_query_latents(
         return z_q
     mean, _ = model.encode(obs1, obs2, labels, **enc_kw)
     return mean
+
+
+@torch.no_grad()
+def batched_per_head_elbo_stats(
+    *,
+    model: VAEModel,
+    obs1: np.ndarray,
+    obs2: np.ndarray,
+    labels: np.ndarray,
+    batch_size: int,
+    device: torch.device,
+    source: np.ndarray | None = None,
+) -> dict[str, np.ndarray]:
+    """Full-split mean per-head KL and stds. ``kl/prior_std/post_std`` each ``(Z,)``."""
+    import torch.distributions as D
+
+    q_n = int(len(obs1))
+    z_dim = int(model.latent_dim)
+    kl_sum = torch.zeros(z_dim, device=device)
+    post_std_sum = torch.zeros(z_dim, device=device)
+    n_total = 0
+    prior_std = model.prior_std().to(device=device)  # (Z,)
+    prior_mean = model.prior_mean.to(device=device)  # (Z,)
+
+    for start in range(0, q_n, batch_size):
+        end = min(start + batch_size, q_n)
+        o1 = torch.from_numpy(obs1[start:end]).float().to(device)
+        o2 = torch.from_numpy(obs2[start:end]).float().to(device)
+        y = torch.from_numpy(labels[start:end]).float().to(device)
+        enc_kw: dict[str, torch.Tensor] = {}
+        if plt_infomec.model_encode_sources(model=model):
+            if source is None:
+                raise ValueError("Model has encode_sources=True but source is None.")
+            enc_kw["source"] = (
+                torch.from_numpy(source[start:end]).long().to(device)
+            )
+        mean, logvar = model.encode(o1, o2, y, **enc_kw)  # (B, Z), (B, Z)
+        post_std = logvar_to_std(logvar)
+        q_z = D.Normal(mean, post_std)
+        p_z = D.Normal(prior_mean, prior_std)
+        kl = D.kl_divergence(q_z, p_z)  # (B, Z)
+        b_n = int(mean.shape[0])
+        kl_sum = kl_sum + kl.sum(dim=0)
+        post_std_sum = post_std_sum + post_std.sum(dim=0)
+        n_total += b_n
+
+    assert n_total > 0
+    return {
+        "kl_per_head": (kl_sum / n_total).detach().cpu().numpy(),
+        "prior_std": prior_std.detach().cpu().numpy(),
+        "post_std": (post_std_sum / n_total).detach().cpu().numpy(),
+    }
 
 
 def resolve_btl_logit_scaling(
@@ -1229,14 +1304,23 @@ def append_summed_head_reward_panel(
     return len(panel_titles) - 1
 
 
-def head_panel_titles(*, latent_dim: int, n_panels: int = MAX_HEAD_PANELS) -> list[str]:
+def head_panel_titles(
+    *,
+    latent_dim: int,
+    n_panels: int = MAX_HEAD_PANELS,
+    kl_per_head: np.ndarray | None = None,
+) -> list[str]:
     n_active = min(int(latent_dim), MAX_HEAD_PANELS)
     compact = int(n_panels) < MAX_HEAD_PANELS
     n_show = min(n_active, int(n_panels)) if compact else MAX_HEAD_PANELS
+    kl = None if kl_per_head is None else np.asarray(kl_per_head, dtype=np.float64).reshape(-1)
     titles: list[str] = []
     for head_idx in range(n_show):
         if head_idx < n_active:
-            titles.append(f"$z_{head_idx}$")
+            if kl is not None and head_idx < kl.shape[0]:
+                titles.append(f"$z_{head_idx}$ (KL={kl[head_idx]:.3g})")
+            else:
+                titles.append(f"$z_{head_idx}$")
         else:
             titles.append(f"$z_{head_idx}$ (inactive)")
     return titles
@@ -1308,6 +1392,9 @@ def save_per_head_reward_figure(
     include_summed_head_panel: bool = False,
     summed_rewards: np.ndarray | None = None,
     recon_loss: float | None = None,
+    elbo_kl_per_head: np.ndarray | None = None,
+    elbo_prior_std: np.ndarray | None = None,
+    elbo_post_std: np.ndarray | None = None,
 ) -> None:
     nz = int(meta["latent_dim"])
     layout = resolve_reward_map_layout(
@@ -1322,7 +1409,11 @@ def save_per_head_reward_figure(
         scatter_t_idx=scatter_t_idx,
         n_panels=n_panels,
     )
-    panel_titles = head_panel_titles(latent_dim=nz, n_panels=n_panels)
+    panel_titles = head_panel_titles(
+        latent_dim=nz,
+        n_panels=n_panels,
+        kl_per_head=elbo_kl_per_head,
+    )
     highlight_panel_indices: list[int] | None = None
     if include_summed_head_panel:
         n_active = min(nz, MAX_HEAD_PANELS)
@@ -1362,6 +1453,8 @@ def save_per_head_reward_figure(
         vmin = reward_vmin
         vmax = reward_vmax
     ncols = min(HEAD_GRID_NCOLS, max(len(per_head_obs), 1))
+    #* slightly larger than layout default so ``z_i (KL=…)`` stays readable
+    title_fontsize = int(layout["title_fontsize"]) + 2
     fig = plot_observation_rewards_by_annotator_mode(
         per_head_obs,
         per_head_r,
@@ -1386,10 +1479,13 @@ def save_per_head_reward_figure(
         invert_yaxis=bool(layout.get("invert_yaxis", False)),
         xlim=xlim,
         ylim=ylim,
-        title_fontsize=int(layout["title_fontsize"]),
+        title_fontsize=title_fontsize,
         reward_vmin=vmin,
         reward_vmax=vmax,
         highlight_panel_indices=highlight_panel_indices,
+        elbo_kl_per_head=elbo_kl_per_head,
+        elbo_prior_std=elbo_prior_std,
+        elbo_post_std=elbo_post_std,
     )
     out_png.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_png, dpi=dpi, bbox_inches="tight", pad_inches=0.12)
@@ -1430,7 +1526,7 @@ def main() -> None:
     if not decoder_sums_latent_heads(decoder_type=decoder_type):
         raise RuntimeError(
             f"decoder_type={decoder_type!r} does not sum per-latent heads; "
-            f"choose one of linear / odinlinear / slotlinear / ellenlinear / offsetlinear."
+            f"choose one of poslinear / ellenlinear / odinlinear / slotlinear."
         )
     for row in rows[1:]:
         if str(row["decoder_type"]) != decoder_type:
@@ -1606,7 +1702,10 @@ def main() -> None:
             infomec_root=infomec_root,
             run_dir=run_dir,
         )
-        recon_loss = recon_by_run_dir.get(str(run_dir.resolve()))
+        recon_loss = lookup_latentgrid_recon_loss(
+            recon_by_run_dir=recon_by_run_dir,
+            run_dir=run_dir,
+        )
         ckpt_path, ckpt_label, selected_epoch, model_selection_tag = (
             plt_infomec.resolve_run_checkpoint(
                 run_dir, model_selection=args.model_selection
@@ -1620,6 +1719,19 @@ def main() -> None:
                 "expected VAEModel or QLAE."
             )
 
+        #* full-split ELBO head stats (shared across every mode / aggregate PNG)
+        elbo_stats: dict[str, np.ndarray] | None = None
+        if isinstance(model, VAEModel):
+            elbo_stats = batched_per_head_elbo_stats(
+                model=model,
+                obs1=obs1,
+                obs2=obs2,
+                labels=labels,
+                batch_size=batch_size,
+                device=device,
+                source=query_source,
+            )
+
         entry: dict[str, Any] = {
             "run_dir": str(run_dir),
             "comment": row["comment"],
@@ -1629,6 +1741,12 @@ def main() -> None:
             "model_selection": model_selection_tag,
             "pngs": {},
         }
+        if elbo_stats is not None:
+            entry["elbo_head_stats"] = {
+                "kl_per_head": elbo_stats["kl_per_head"].tolist(),
+                "prior_std": elbo_stats["prior_std"].tolist(),
+                "post_std": elbo_stats["post_std"].tolist(),
+            }
         if stratify_pref_mode:
             entry["stratified_pngs"] = {}
         if infomec is not None:
@@ -1668,6 +1786,10 @@ def main() -> None:
                 recon_loss=recon_loss,
                 n_panels=nz,
             )
+            if elbo_stats is not None:
+                save_kw["elbo_kl_per_head"] = elbo_stats["kl_per_head"]
+                save_kw["elbo_prior_std"] = elbo_stats["prior_std"]
+                save_kw["elbo_post_std"] = elbo_stats["post_std"]
 
             if not stratify_pref_mode:
                 png_path = rewardmap_out_png(

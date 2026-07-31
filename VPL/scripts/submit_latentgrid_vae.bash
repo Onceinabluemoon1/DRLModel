@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=train_vae_grid
 #SBATCH --gres=shard:12
-#SBATCH --array=0-41%7
+#SBATCH --array=0-29%6
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=16G
 #SBATCH --output=/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/logs_slurm/train_vae_grid/train_vae_grid_%A_%a.out
@@ -30,8 +30,8 @@ BETAS=(
     0.01
     0.1
     0.3
-    1.0
-    3.0
+    # 1.0
+    # 3.0
 )
 LATENT_DIMS=(
     2
@@ -49,19 +49,28 @@ set_size=16  # -1 = use full S from dataset; else truncate preference sets to th
 
 loss_aggregation=mean  # sum | mean
 normalize_kl=True
-learned_prior=False
+learned_prior=True
+# original: logvar = (-8,4) -> std (0.01, 7.3)
+# new: logvar = (-6,1) -> std (0.05, 1.64)
+prior_logvar_min=-6.0  # learned_prior ARD: clamp prior_logvar
+prior_logvar_max=1.0
 use_annealing=False
-
-decoder_type=poslinear
-decoder_gate_temperature=1.0  # slotlinear softmax: lower ⇒ peakier α_j
-decoder_slot_routing=sum   # slotlinear only: softmax | sum (direct Σ r_j)
-decoder_orth_weight=0.0  # odinlinear only; no-op for other decoders
-decoder_sparsity_weight=0.001  # poslinear only: L1 on theta(s); no-op for other decoders
-decoder_sparsity_mode=group  # poslinear only: elementwise (L1, parts-biased) | group (lasso over heads, axes-biased)
-decoder_softplus_beta=2.0  # poslinear only: softplus beta on theta=softplus(w(h))
-
 encode_labels=True  # pair encoder: cncat y into pair_mlp (q(z|s1,s2,y))
 encode_sources=False  # pair encoder: one-hot GT source_variable after set pool (InfoMEC)
+
+# * === decoder args
+decoder_type=poslinear  # poslinear | ellenlinear | slotlinear | odinlinear
+
+# poslinear
+decoder_sparsity_weight=0.001  # L1 on theta(s)
+decoder_sparsity_mode=group  # elementwise (L1, parts-biased) | group (lasso over heads, axes-biased)
+decoder_softplus_beta=2.0  # softplus beta on theta = softplus(w(h))
+decoder_trunk_layernorm=True  # LayerNorm on trunk h before w_head
+
+# ellenlinear
+# set decoder_type=ellenlinear above; poslinear flags are ignored
+
+# * === end decoder args
 
 # * 2 goals
 # pref_dataset="sort_2goals_T=1_Q=5000"
@@ -123,17 +132,17 @@ run_train_grid() {
     --loss_aggregation=${loss_aggregation} \
     --normalize_kl=${normalize_kl} \
     --learned_prior=${learned_prior} \
+    --prior_logvar_min=${prior_logvar_min} \
+    --prior_logvar_max=${prior_logvar_max} \
     --use_annealing=${use_annealing} \
     --seed=42 \
     --batch_size=${batch_size} \
     --set_size=${set_size} \
     --decoder_type="${decoder_type}" \
-    --decoder_gate_temperature="${decoder_gate_temperature}" \
-    --decoder_slot_routing="${decoder_slot_routing}" \
-    --decoder_orth_weight="${decoder_orth_weight}" \
     --decoder_sparsity_weight="${decoder_sparsity_weight}" \
     --decoder_sparsity_mode="${decoder_sparsity_mode}" \
     --decoder_softplus_beta="${decoder_softplus_beta}" \
+    --decoder_trunk_layernorm="${decoder_trunk_layernorm}" \
     --encode_labels="${encode_labels}" \
     --encode_sources="${encode_sources}" \
     --n_epochs=500 \

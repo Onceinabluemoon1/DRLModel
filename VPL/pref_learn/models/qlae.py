@@ -11,6 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from pref_learn.models.nets import (
     PairEncoder,
+    RewardDecoderConfig,
     make_reward_decoder,
     reward_decoder_column_orth_penalty,
     reward_decoder_theta_sparsity,
@@ -39,19 +40,23 @@ class QLAE(nn.Module):
         num_quantized_values: int = 10,
         reward_scaling: float = 1.0,
         loss_aggregation: str = "mean",
-        decoder_type: str = "mlp",
-        decoder_gate_temperature: float = 1.0,
-        decoder_slot_routing: str = "softmax",
+        decoder_config: RewardDecoderConfig | None = None,
         encode_labels: bool = True,
         encode_sources: bool = False,
         source_dims: list[int] | None = None,
         decoder_orth_weight: float = 0.0,
         decoder_sparsity_weight: float = 0.0,
-        decoder_sparsity_mode: str = "elementwise",
-        decoder_softplus_beta: float = 1.0,
     ):
         super().__init__()
         assert loss_aggregation in ("sum", "mean")
+        if decoder_config is None:
+            decoder_config = RewardDecoderConfig.from_train(
+                decoder_type="poslinear",
+                obs_dim=obs_dim,
+                latent_dim=latent_dim,
+                hidden_dim=hidden_dim,
+                decoder_input=decoder_input,
+            )
         self.encode_labels = bool(encode_labels)
         self.encode_sources = bool(encode_sources)
         self.encoder = PairEncoder(
@@ -68,19 +73,9 @@ class QLAE(nn.Module):
             num_latents=latent_dim,
             num_values_per_latent=num_quantized_values,
         )
-        self.decoder = make_reward_decoder(
-            decoder_type=decoder_type,
-            obs_dim=obs_dim,
-            latent_dim=latent_dim,
-            hidden_dim=hidden_dim,
-            output_dim=1,
-            decoder_input=decoder_input,
-            gate_temperature=decoder_gate_temperature,
-            slot_routing=decoder_slot_routing,
-            sparsity_mode=decoder_sparsity_mode,
-            softplus_beta=decoder_softplus_beta,
-        )
-        self.decoder_type = str(decoder_type).lower()
+        self.decoder = make_reward_decoder(config=decoder_config)
+        self.decoder_config = decoder_config
+        self.decoder_type = str(decoder_config.decoder_type).lower()
         self.decoder_orth_weight = float(decoder_orth_weight)
         self.decoder_sparsity_weight = float(decoder_sparsity_weight)
         self.latent_dim = latent_dim

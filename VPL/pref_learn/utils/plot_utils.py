@@ -87,6 +87,49 @@ def observation_xy_limits(
     return (x_min - x_pad, x_max + x_pad), (y_min - y_pad, y_max + y_pad)
 
 
+def _draw_per_head_kl_bars(
+    ax,
+    *,
+    kl_per_head: np.ndarray,
+    title_fontsize: int,
+) -> None:
+    kl = np.asarray(kl_per_head, dtype=np.float64).reshape(-1)
+    x = np.arange(kl.shape[0])
+    ax.bar(x, kl, color="steelblue", width=0.7)
+    ax.set_xticks(x)
+    ax.set_xticklabels([f"$z_{j}$" for j in x], fontsize=8)
+    ax.set_ylabel(r"$\mathrm{KL}$", fontsize=8)
+    ax.set_title(r"per-head $\mathrm{KL}(q\|p)$", fontsize=title_fontsize)
+    ax.set_ylim(bottom=0.0)
+    ax.tick_params(axis="y", labelsize=8)
+    ax.grid(axis="y", alpha=0.25)
+
+
+def _draw_per_head_std_bars(
+    ax,
+    *,
+    prior_std: np.ndarray,
+    post_std: np.ndarray,
+    title_fontsize: int,
+) -> None:
+    prior = np.asarray(prior_std, dtype=np.float64).reshape(-1)
+    post = np.asarray(post_std, dtype=np.float64).reshape(-1)
+    assert prior.shape == post.shape
+    x = np.arange(prior.shape[0])
+    w = 0.35
+    ax.bar(x - w / 2, prior, width=w, label="prior", color="coral")
+    ax.bar(x + w / 2, post, width=w, label="posterior", color="seagreen")
+    ax.set_xticks(x)
+    ax.set_xticklabels([f"$z_{j}$" for j in x], fontsize=8)
+    ax.set_ylabel(r"$\sigma$", fontsize=8)
+    ax.set_title(r"per-head $\sigma$ (prior | posterior)", fontsize=title_fontsize)
+    ymax = float(max(float(np.max(prior)), float(np.max(post)), 1e-6)) * 1.15
+    ax.set_ylim(0.0, ymax)
+    ax.tick_params(axis="y", labelsize=8)
+    ax.legend(fontsize=7, loc="best")
+    ax.grid(axis="y", alpha=0.25)
+
+
 def plot_observation_rewards_by_annotator_mode(
     per_mode_obs: list,
     per_mode_r: list,
@@ -110,6 +153,9 @@ def plot_observation_rewards_by_annotator_mode(
     invert_yaxis: bool = True,
     title_fontsize: int = 10,
     highlight_panel_indices: list[int] | None = None,
+    elbo_kl_per_head: np.ndarray | None = None,
+    elbo_prior_std: np.ndarray | None = None,
+    elbo_post_std: np.ndarray | None = None,
 ):
     """
     One scatter panel per annotator mode; each uses only (obs, r) from that mode.
@@ -118,6 +164,10 @@ def plot_observation_rewards_by_annotator_mode(
         per_mode_obs: length M; each entry (N_m, O) or empty (0, O).
         per_mode_r: length M; each (N_m,) or (N_m, 1) aligned with ``per_mode_obs``.
         mode_titles: length M subplot titles (e.g. ANNOTATOR_SPECS ``name``).
+        elbo_kl_per_head / elbo_prior_std / elbo_post_std: optional ``(Z,)`` ELBO
+            diagnostics. When set, adds KL and prior|posterior-σ bar panels. If the
+            aggregate (highlight) row has ≥2 free cells after it, bars go there;
+            otherwise they start a new row.
     """
     n_modes = len(per_mode_obs)
     assert len(per_mode_r) == n_modes == len(mode_titles), (
@@ -137,21 +187,46 @@ def plot_observation_rewards_by_annotator_mode(
     else:
         vmin, vmax = 0.0, 1.0
 
-    ncols = min(4, n_modes) if ncols is None else min(int(ncols), n_modes)
-    nrows = int(np.ceil(n_modes / ncols))
+    ncols = min(4, n_modes) if ncols is None else min(int(ncols), max(n_modes, 1))
+    map_nrows = int(np.ceil(n_modes / ncols))
+    show_elbo = elbo_kl_per_head is not None
+    kl_slot: int | None = None
+    std_slot: int | None = None
+    if show_elbo:
+        assert elbo_prior_std is not None and elbo_post_std is not None
+        #* glue KL/σ after aggregate when that row has ≥2 free cells; else new row
+        agg_idx = (
+            int(highlight_panel_indices[0])
+            if highlight_panel_indices
+            else None
+        )
+        free_after_agg = (
+            ncols - (agg_idx % ncols) - 1 if agg_idx is not None else 0
+        )
+        if agg_idx is not None and free_after_agg >= 2:
+            nrows = map_nrows
+            kl_slot = agg_idx + 1
+            std_slot = agg_idx + 2
+        else:
+            nrows = map_nrows + 1
+            kl_slot = map_nrows * ncols
+            std_slot = map_nrows * ncols + 1
+    else:
+        nrows = map_nrows
     n_suptitle_lines = (suptitle.count("\n") + 1) if suptitle else 0
     # * Last column is only for the shared colorbar so it does not overlap subplot data.
     fig_w = 4.2 * ncols + 1.25
-    suptitle_line_frac = 0.038  # figure-height fraction per suptitle line (~fontsize 9)
-    suptitle_top_margin = 0.020
+    plot_h = 4.1 * nrows
+    #* fixed-inch title band (+ clearance for first-row ax titles); grow fig so plots keep size
     if suptitle:
-        top = 1.0 - suptitle_top_margin - n_suptitle_lines * suptitle_line_frac
-        top = max(top, 0.52 + 0.04 * max(nrows - 1, 0))
-        suptitle_y = 1.0 - suptitle_top_margin
+        title_h_in = 0.22 + n_suptitle_lines * 0.165 + 0.32
+        fig_h = plot_h + title_h_in
+        top = 1.0 - title_h_in / fig_h
+        suptitle_y = 1.0 - (0.06 / fig_h)
     else:
+        fig_h = plot_h
         top = 0.92
         suptitle_y = None
-    fig_h = 4.1 * nrows
     fig = plt.figure(figsize=(fig_w, fig_h))
     gs = fig.add_gridspec(
         nrows,
@@ -231,8 +306,25 @@ def plot_observation_rewards_by_annotator_mode(
                 spine.set_edgecolor("blue")
                 spine.set_linewidth(2.5)
 
+    keep_slots = {kl_slot, std_slot}
     for k in range(n_modes, len(flat_axes)):
+        if k in keep_slots:
+            continue
         flat_axes[k].set_visible(False)
+
+    if show_elbo:
+        assert kl_slot is not None and std_slot is not None
+        _draw_per_head_kl_bars(
+            flat_axes[kl_slot],
+            kl_per_head=elbo_kl_per_head,
+            title_fontsize=title_fontsize,
+        )
+        _draw_per_head_std_bars(
+            flat_axes[std_slot],
+            prior_std=elbo_prior_std,
+            post_std=elbo_post_std,
+            title_fontsize=title_fontsize,
+        )
 
     # * Shared color scale across modes (matplotlib needs a nonempty array on the mappable).
     any_data = all_r.size > 0

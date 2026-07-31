@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from pref_learn.models.flow import Flow
 from pref_learn.models.nets import (
     PairEncoder,
+    RewardDecoderConfig,
     make_reward_decoder,
     reward_decoder_column_orth_penalty,
     reward_decoder_theta_sparsity,
@@ -33,19 +34,25 @@ class VAEModel(nn.Module):
         discrete_latents: bool = False,
         loss_aggregation: str = "mean",
         normalize_kl: bool = True,
-        decoder_type: str = "mlp",
-        decoder_gate_temperature: float = 1.0,
-        decoder_slot_routing: str = "softmax",
+        decoder_config: RewardDecoderConfig | None = None,
         encode_labels: bool = True,
         encode_sources: bool = False,
         source_dims: list[int] | None = None,
         decoder_orth_weight: float = 0.0,
         decoder_sparsity_weight: float = 0.0,
-        decoder_sparsity_mode: str = "elementwise",
-        decoder_softplus_beta: float = 1.0,
+        prior_logvar_min: float = -8.0,
+        prior_logvar_max: float = 4.0,
     ):
         super(VAEModel, self).__init__()
         assert loss_aggregation in ("sum", "mean")
+        if decoder_config is None:
+            decoder_config = RewardDecoderConfig.from_train(
+                decoder_type="poslinear",
+                obs_dim=obs_dim,
+                latent_dim=latent_dim,
+                hidden_dim=hidden_dim,
+                decoder_input=decoder_input,
+            )
         self.discrete_latents = bool(discrete_latents)
         self.encode_labels = bool(encode_labels)
         self.encode_sources = bool(encode_sources)
@@ -59,28 +66,25 @@ class VAEModel(nn.Module):
             encode_sources=encode_sources,
             source_dims=source_dims,
         )
-        self.decoder = make_reward_decoder(
-            decoder_type=decoder_type,
-            obs_dim=obs_dim,
-            latent_dim=latent_dim,
-            hidden_dim=hidden_dim,
-            output_dim=1,
-            decoder_input=decoder_input,
-            gate_temperature=decoder_gate_temperature,
-            slot_routing=decoder_slot_routing,
-            sparsity_mode=decoder_sparsity_mode,
-            softplus_beta=decoder_softplus_beta,
-        )
-        self.decoder_type = str(decoder_type).lower()
+        self.decoder = make_reward_decoder(config=decoder_config)
+        self.decoder_config = decoder_config
+        self.decoder_type = str(decoder_config.decoder_type).lower()
         self.decoder_orth_weight = float(decoder_orth_weight)
         self.decoder_sparsity_weight = float(decoder_sparsity_weight)
         self.latent_dim = latent_dim
+        #* Hardened ARD: mean fixed at 0; only per-dim prior scales are free.
+        # self.prior_mean = torch.nn.Parameter(
+        #     torch.zeros(latent_dim), requires_grad=learned_prior
+        # )
         self.prior_mean = torch.nn.Parameter(
-            torch.zeros(latent_dim), requires_grad=learned_prior
+            torch.zeros(latent_dim), requires_grad=False
         )
         self.prior_logvar = torch.nn.Parameter(
             torch.zeros(latent_dim), requires_grad=learned_prior
         )
+        self.prior_logvar_min = float(prior_logvar_min)
+        self.prior_logvar_max = float(prior_logvar_max)
+        assert self.prior_logvar_min < self.prior_logvar_max
         self.annotation_size = annotation_size
         self.segment_len = segment_len
         self.learned_prior = learned_prior
@@ -94,6 +98,18 @@ class VAEModel(nn.Module):
         self.scaling = reward_scaling
         self.loss_agg = loss_aggregation
         self.normalize_kl = normalize_kl
+
+    def clamped_prior_logvar(self) -> torch.Tensor:
+        """Learned prior log-variance, clamped for numerical / ARD stability."""
+        lo = float(getattr(self, "prior_logvar_min", -8.0))
+        hi = float(getattr(self, "prior_logvar_max", 4.0))
+        return self.prior_logvar.clamp(min=lo, max=hi)
+
+    def prior_std(self) -> torch.Tensor:
+        """``(Z,)`` prior std; ones when ``learned_prior=False``."""
+        if not self.learned_prior:
+            return torch.ones_like(self.prior_logvar)
+        return logvar_to_std(self.clamped_prior_logvar())
 
     def encode(self, s1, s2, y, source=None):
         """
@@ -238,8 +254,10 @@ class VAEModel(nn.Module):
 
         """
         # * KL(q(z|x) || p(z))
-        prior_mean = self.prior_mean if self.learned_prior else 0.0
-        prior_std = logvar_to_std(self.prior_logvar) if self.learned_prior else 1.0
+        # prior_mean = self.prior_mean if self.learned_prior else 0.0
+        # prior_std = logvar_to_std(self.prior_logvar) if self.learned_prior else 1.0
+        prior_mean = self.prior_mean  # frozen at 0
+        prior_std = self.prior_std()
         p_z = D.Normal(prior_mean, prior_std)
         q_z_giv_x = D.Normal(mean, logvar_to_std(logvar))
 
@@ -270,6 +288,25 @@ class VAEModel(nn.Module):
             "enc_mean_cross_std": mean.std(dim=0).mean().item(),
             "enc_logvar_cross_std": logvar.std(dim=0).mean().item(),
             "enc_mean_abs": mean.abs().mean().item(),
+        }
+
+    def ard_prior_metrics(
+        self, mean: torch.Tensor, logvar: torch.Tensor
+    ) -> dict[str, float]:
+        """Diagnostics for hardened learned-prior ARD. Empty if ``learned_prior=False``."""
+        if not self.learned_prior:
+            return {}
+        prior_std = self.prior_std()  # (Z,)
+        post_std = logvar_to_std(logvar)  # (B, Z)
+        #* "small" prior scale: σ < 0.1 (near-dead axis under unit-ish latents)
+        frac_small = (prior_std < 0.1).float().mean()
+        return {
+            "prior_std_mean": prior_std.mean().item(),
+            "prior_std_min": prior_std.min().item(),
+            "prior_std_max": prior_std.max().item(),
+            "prior_std_frac_small": frac_small.item(),
+            "post_std_mean": post_std.mean().item(),
+            "post_mean_abs_per_dim_max": mean.abs().mean(dim=0).max().item(),
         }
 
     def forward(self, s1, s2, y, source=None):  # (B, A, T, O), (B, A, 1)
@@ -320,6 +357,7 @@ class VAEModel(nn.Module):
             "kl_weight": kl_weight,
             "frac_recon2total": recon_loss.item() / total_loss.item(),
             **self.encoder_cross_std_metrics(mean=mean, logvar=logvar),
+            **self.ard_prior_metrics(mean=mean, logvar=logvar),
             **orth_metrics,
         }
 
@@ -329,8 +367,9 @@ class VAEModel(nn.Module):
         dev = next(self.parameters()).device
         eps = torch.randn(size, self.latent_dim).to(dev)
         if self.learned_prior:
-            std = logvar_to_std(self.prior_logvar)
-            z = eps * std + self.prior_mean
+            # std = logvar_to_std(self.prior_logvar)
+            # z = eps * std + self.prior_mean
+            z = eps * self.prior_std() + self.prior_mean
         elif self.flow_prior:
             z, _ = self.flow(eps)
         else:

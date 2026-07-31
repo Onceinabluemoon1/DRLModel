@@ -22,6 +22,7 @@ from pref_learn.models.mlp import (
     MLPClassifier,
     MLPModel,
 )
+from pref_learn.models.nets import RewardDecoderConfig
 from pref_learn.models.qlae import QLAE, build_qlae_optimizer
 from pref_learn.models.tcvae import TCVAEModel
 from pref_learn.models.utils import Annealer, EarlyStopper, get_datasets
@@ -67,6 +68,8 @@ FLAGS_DEF = define_flags_with_default(
     loss_aggregation="sum",
     normalize_kl=True,
     learned_prior=False,
+    prior_logvar_min=-8.0,  # learned_prior ARD: clamp prior_logvar (σ ∈ [e^{min/2}, e^{max/2}])
+    prior_logvar_max=4.0,
     flow_prior=False,
     use_annealing=False,
     annealer_baseline=0.0,
@@ -96,17 +99,43 @@ FLAGS_DEF = define_flags_with_default(
     run_timestamp="",
     # e.g. latentsweep: shared sweep dir / W&B group for beta×latent_dim grids (see submit_train_vae_grid.bash)
     sweep_folder_tag="",
-    # Decoder (VAE / TCVAE / QLAE); see make_reward_decoder in nets.py
+    # === decoder args
+    decoder_type="poslinear",  # poslinear | ellenlinear | slotlinear | odinlinear
+    # poslinear
+    decoder_sparsity_weight=0.0,  # L1 on theta(s) feature activations (training loss weight)
+    decoder_sparsity_mode="elementwise",  # elementwise (L1) | group (lasso over heads)
+    decoder_softplus_beta=1.0,  # softplus beta on theta = softplus(w(h))
+    decoder_trunk_layernorm=False,  # LayerNorm on trunk h before w_head
+    # ellenlinear
+    # slotlinear
+    decoder_gate_temperature=1.0,  # softmax routing temperature
+    decoder_slot_routing="softmax",  # softmax | sum
+    # odinlinear
+    decoder_orth_weight=0.0,  # row-orth penalty on z_head.weight (training loss weight)
+    # ===
     encode_labels=True,  # pair encoder: concat y into pair_mlp input (q(z|s1,s2,y))
     encode_sources=False,  # pair encoder: one-hot GT source_variable after set pool (q(z|s1,s2,y,u))
-    decoder_type="mlp",  # mlp | linear | poslinear | odinlinear | slotlinear | ellenlinear | offsetlinear
-    decoder_gate_temperature=1.0,  # slotlinear softmax: lower => sharper routing
-    decoder_slot_routing="softmax",  # slotlinear only: softmax | sum
-    decoder_orth_weight=0.0,  # odinlinear only: ODIN row orth on z_head.weight
-    decoder_sparsity_weight=0.0,  # poslinear only: L1 on theta(s) feature activations
-    decoder_sparsity_mode="elementwise",  # poslinear only: elementwise (L1) | group (lasso over heads)
-    decoder_softplus_beta=1.0,  # poslinear only: softplus beta on theta = softplus(w(h))
 )
+
+
+def decoder_config_from_flags(
+    FLAGS: absl.flags.FlagValues,
+    *,
+    obs_dim: int,
+    decoder_input: int,
+) -> RewardDecoderConfig:
+    return RewardDecoderConfig.from_train(
+        decoder_type=FLAGS.decoder_type,
+        obs_dim=obs_dim,
+        latent_dim=FLAGS.latent_dim,
+        hidden_dim=FLAGS.hidden_dim,
+        decoder_input=decoder_input,
+        sparsity_mode=FLAGS.decoder_sparsity_mode,
+        softplus_beta=FLAGS.decoder_softplus_beta,
+        trunk_layernorm=FLAGS.decoder_trunk_layernorm,
+        gate_temperature=FLAGS.decoder_gate_temperature,
+        slot_routing=FLAGS.decoder_slot_routing,
+    )
 
 
 def log_metrics(metrics, epoch, logger):
@@ -195,14 +224,14 @@ def main(_):
         run_tags.append(f"wd={FLAGS.weight_decay}")
     dec_tag = f"dec={FLAGS.decoder_type}"
     run_tags.append(dec_tag)
+    if str(FLAGS.decoder_type).lower() == "poslinear":
+        spar_mode = str(FLAGS.decoder_sparsity_mode).lower()
+        spar_abbr = "ele" if spar_mode == "elementwise" else spar_mode
+        run_tags.append(f"l1={spar_abbr}{FLAGS.decoder_sparsity_weight}")
     if str(FLAGS.decoder_type).lower() == "slotlinear":
         run_tags.append(f"slotr={FLAGS.decoder_slot_routing}")
     if str(FLAGS.decoder_type).lower() == "odinlinear":
         run_tags.append(f"orthw={FLAGS.decoder_orth_weight}")
-    if str(FLAGS.decoder_type).lower() == "poslinear":
-        run_tags.append(f"sparw={FLAGS.decoder_sparsity_weight}")
-        if str(FLAGS.decoder_sparsity_mode).lower() != "elementwise":
-            run_tags.append(f"sparm={FLAGS.decoder_sparsity_mode}")
     run_tags.append(f"encY={_flag_bool(FLAGS.encode_labels)}")
     run_tags.append(f"encS={_flag_bool(FLAGS.encode_sources)}")
     run_tag_str = "_".join(run_tags)
@@ -228,14 +257,14 @@ def main(_):
         if FLAGS.model_type == "QLAE":
             sweep_scope_tags.append(f"nv={FLAGS.num_quantized_values}")
         sweep_scope_tags.append(dec_tag)
+        if str(FLAGS.decoder_type).lower() == "poslinear":
+            spar_mode = str(FLAGS.decoder_sparsity_mode).lower()
+            spar_abbr = "ele" if spar_mode == "elementwise" else spar_mode
+            sweep_scope_tags.append(f"l1={spar_abbr}{FLAGS.decoder_sparsity_weight}")
         if str(FLAGS.decoder_type).lower() == "slotlinear":
             sweep_scope_tags.append(f"slotr={FLAGS.decoder_slot_routing}")
         if str(FLAGS.decoder_type).lower() == "odinlinear":
             sweep_scope_tags.append(f"orthw={FLAGS.decoder_orth_weight}")
-        if str(FLAGS.decoder_type).lower() == "poslinear":
-            sweep_scope_tags.append(f"sparw={FLAGS.decoder_sparsity_weight}")
-            if str(FLAGS.decoder_sparsity_mode).lower() != "elementwise":
-                sweep_scope_tags.append(f"sparm={FLAGS.decoder_sparsity_mode}")
         sweep_scope_tags.append(f"encY={_flag_bool(FLAGS.encode_labels)}")
         sweep_scope_tags.append(f"encS={_flag_bool(FLAGS.encode_sources)}")
         sweep_scope_tag = "_".join(sweep_scope_tags)
@@ -365,16 +394,18 @@ def main(_):
             reward_scaling=FLAGS.reward_scaling,
             loss_aggregation=FLAGS.loss_aggregation,
             normalize_kl=FLAGS.normalize_kl,
-            decoder_type=FLAGS.decoder_type,
-            decoder_gate_temperature=FLAGS.decoder_gate_temperature,
-            decoder_slot_routing=FLAGS.decoder_slot_routing,
+            decoder_config=decoder_config_from_flags(
+                FLAGS,
+                obs_dim=obs_dim,
+                decoder_input=obs_dim + FLAGS.latent_dim,
+            ),
             encode_labels=FLAGS.encode_labels,
             encode_sources=FLAGS.encode_sources,
             source_dims=source_dims,
             decoder_orth_weight=FLAGS.decoder_orth_weight,
             decoder_sparsity_weight=FLAGS.decoder_sparsity_weight,
-            decoder_sparsity_mode=FLAGS.decoder_sparsity_mode,
-            decoder_softplus_beta=FLAGS.decoder_softplus_beta,
+            prior_logvar_min=FLAGS.prior_logvar_min,
+            prior_logvar_max=FLAGS.prior_logvar_max,
         )
     elif FLAGS.model_type == "VAE" or FLAGS.model_type == "VAEClassifier":
         annealer = None
@@ -406,16 +437,18 @@ def main(_):
             reward_scaling=FLAGS.reward_scaling,
             loss_aggregation=FLAGS.loss_aggregation,
             normalize_kl=FLAGS.normalize_kl,
-            decoder_type=FLAGS.decoder_type,
-            decoder_gate_temperature=FLAGS.decoder_gate_temperature,
-            decoder_slot_routing=FLAGS.decoder_slot_routing,
+            decoder_config=decoder_config_from_flags(
+                FLAGS,
+                obs_dim=obs_dim,
+                decoder_input=decoder_input,
+            ),
             encode_labels=FLAGS.encode_labels,
             encode_sources=FLAGS.encode_sources,
             source_dims=source_dims,
             decoder_orth_weight=FLAGS.decoder_orth_weight,
             decoder_sparsity_weight=FLAGS.decoder_sparsity_weight,
-            decoder_sparsity_mode=FLAGS.decoder_sparsity_mode,
-            decoder_softplus_beta=FLAGS.decoder_softplus_beta,
+            prior_logvar_min=FLAGS.prior_logvar_min,
+            prior_logvar_max=FLAGS.prior_logvar_max,
         )
     elif FLAGS.model_type == "MLPClassifier":
         reward_model = MLPClassifier(obs_dim, FLAGS.hidden_dim)
@@ -431,16 +464,16 @@ def main(_):
             num_quantized_values=FLAGS.num_quantized_values,
             reward_scaling=FLAGS.reward_scaling,
             loss_aggregation=FLAGS.loss_aggregation,
-            decoder_type=FLAGS.decoder_type,
-            decoder_gate_temperature=FLAGS.decoder_gate_temperature,
-            decoder_slot_routing=FLAGS.decoder_slot_routing,
+            decoder_config=decoder_config_from_flags(
+                FLAGS,
+                obs_dim=obs_dim,
+                decoder_input=obs_dim + FLAGS.latent_dim,
+            ),
             encode_labels=FLAGS.encode_labels,
             encode_sources=FLAGS.encode_sources,
             source_dims=source_dims,
             decoder_orth_weight=FLAGS.decoder_orth_weight,
             decoder_sparsity_weight=FLAGS.decoder_sparsity_weight,
-            decoder_sparsity_mode=FLAGS.decoder_sparsity_mode,
-            decoder_softplus_beta=FLAGS.decoder_softplus_beta,
         )
     else:
         raise NotImplementedError

@@ -31,7 +31,10 @@ class FSQQuantizer(nn.Module):
             ``z_q``: STE-quantized latents in ``[-1, 1]`` on a fixed grid.
             ``z_bins``: integer bin indices in ``{0, ..., V-1}``.
         """
-        z_c = torch.tanh(z)
+        # ? ---- activation bounding ----
+        z_c = torch.tanh(z)  # FSQ. `*3` is added on, need to change below.
+        # z_c = 2.0 * torch.sigmoid(1.6 * z) - 1.0  # iFSQ
+        # ? ---- activation bounding ----
         v = self.num_values_per_latent
         z_bins = ((z_c + 1.0) / 2.0) * (v - 1)
         z_bins = round_ste(z_bins)

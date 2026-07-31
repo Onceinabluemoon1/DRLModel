@@ -53,6 +53,8 @@ set_size=16  # -1 = use full S from dataset; else truncate preference sets to th
 loss_aggregation=mean  # sum | mean
 normalize_kl=True
 learned_prior=False
+prior_logvar_min=-8.0  # learned_prior ARD: clamp prior_logvar
+prior_logvar_max=4.0
 use_annealing=False   # ramp tc_weight 0 -> target over n_epochs / annealer_cycles
 annealer_cycles=1
 annealer_type=cosine
@@ -107,6 +109,8 @@ run_train_tc() {
     --loss_aggregation=${loss_aggregation} \
     --normalize_kl=${normalize_kl} \
     --learned_prior=${learned_prior} \
+    --prior_logvar_min=${prior_logvar_min} \
+    --prior_logvar_max=${prior_logvar_max} \
     --use_annealing=${use_annealing} \
     --annealer_cycles=${annealer_cycles} \
     --annealer_type=${annealer_type} \

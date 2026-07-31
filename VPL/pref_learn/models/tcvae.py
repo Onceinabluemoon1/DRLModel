@@ -4,6 +4,7 @@ import einops as ei
 import torch
 import torch.distributions as D
 from pref_learn.models.nets import (
+    RewardDecoderConfig,
     reward_decoder_column_orth_penalty,
     reward_decoder_theta_sparsity,
 )
@@ -41,16 +42,14 @@ class TCVAEModel(VAEModel):
         discrete_latents: bool = False,
         loss_aggregation: str = "mean",
         normalize_kl: bool = True,
-        decoder_type: str = "mlp",
-        decoder_gate_temperature: float = 1.0,
-        decoder_slot_routing: str = "softmax",
+        decoder_config: RewardDecoderConfig | None = None,
         encode_labels: bool = True,
         encode_sources: bool = False,
         source_dims: list[int] | None = None,
         decoder_orth_weight: float = 0.0,
         decoder_sparsity_weight: float = 0.0,
-        decoder_sparsity_mode: str = "elementwise",
-        decoder_softplus_beta: float = 1.0,
+        prior_logvar_min: float = -8.0,
+        prior_logvar_max: float = 4.0,
     ):
         if flow_prior:
             raise NotImplementedError("TCVAEModel does not support flow_prior.")
@@ -70,16 +69,14 @@ class TCVAEModel(VAEModel):
             discrete_latents=discrete_latents,
             loss_aggregation=loss_aggregation,
             normalize_kl=normalize_kl,
-            decoder_type=decoder_type,
-            decoder_gate_temperature=decoder_gate_temperature,
-            decoder_slot_routing=decoder_slot_routing,
+            decoder_config=decoder_config,
             encode_labels=encode_labels,
             encode_sources=encode_sources,
             source_dims=source_dims,
             decoder_orth_weight=decoder_orth_weight,
             decoder_sparsity_weight=decoder_sparsity_weight,
-            decoder_sparsity_mode=decoder_sparsity_mode,
-            decoder_softplus_beta=decoder_softplus_beta,
+            prior_logvar_min=prior_logvar_min,
+            prior_logvar_max=prior_logvar_max,
         )
         self.dataset_size = int(dataset_size)
         self.tc_weight = tc_weight
@@ -107,8 +104,10 @@ class TCVAEModel(VAEModel):
 
     def log_p_z(self, z: torch.Tensor) -> torch.Tensor:
         """``log p(z)`` summed over dims; ``(B, D)`` -> ``(B,)``."""
-        prior_mean = self.prior_mean if self.learned_prior else 0.0
-        prior_std = logvar_to_std(self.prior_logvar) if self.learned_prior else 1.0
+        # prior_mean = self.prior_mean if self.learned_prior else 0.0
+        # prior_std = logvar_to_std(self.prior_logvar) if self.learned_prior else 1.0
+        prior_mean = self.prior_mean
+        prior_std = self.prior_std()
         p_z = D.Normal(prior_mean, prior_std)
         return p_z.log_prob(z).sum(-1)
 

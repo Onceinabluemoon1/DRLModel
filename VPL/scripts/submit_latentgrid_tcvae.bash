@@ -50,23 +50,29 @@ set_size=16  # -1 = use full S from dataset; else truncate preference sets to th
 loss_aggregation=mean  # sum | mean
 normalize_kl=True
 learned_prior=False
+prior_logvar_min=-8.0  # learned_prior ARD: clamp prior_logvar
+prior_logvar_max=4.0
 use_annealing=False   # ramp tc_weight 0 -> target over n_epochs / annealer_cycles
 annealer_cycles=1
 annealer_type=cosine
 mi_weight=1.0
 dwkl_weight=1.0
-
-decoder_type=poslinear
-decoder_gate_temperature=1.0  # slotlinear softmax: lower ⇒ peakier α_j
-decoder_slot_routing=sum   # slotlinear only: softmax | sum (direct Σ r_j)
-decoder_orth_weight=0.0  # odinlinear only; no-op for other decoders
-decoder_sparsity_weight=0.0  # poslinear only: L1 on theta(s); no-op for other decoders
-decoder_sparsity_mode=elementwise  # poslinear only: elementwise (L1, parts-biased) | group (lasso over heads, axes-biased)
-decoder_softplus_beta=1.0  # poslinear only: softplus beta on theta=softplus(w(h))
-
 encode_labels=True  # pair encoder: concat y into pair_mlp (q(z|s1,s2,y))
 encode_sources=False  # pair encoder: one-hot GT source_variable (InfoMEC; relabelled dataset)
 
+# === decoder args
+decoder_type=poslinear  # poslinear | ellenlinear | slotlinear | odinlinear
+
+# poslinear
+decoder_sparsity_weight=0.0  # L1 on theta(s)
+decoder_sparsity_mode=elementwise  # elementwise (L1, parts-biased) | group (lasso over heads, axes-biased)
+decoder_softplus_beta=1.0  # softplus beta on theta = softplus(w(h))
+decoder_trunk_layernorm=False
+
+# ellenlinear
+# set decoder_type=ellenlinear above; poslinear flags are ignored
+
+# ===
 
 # * 2 goals
 # pref_dataset="sort_2goals_T=1_Q=5000"
@@ -129,6 +135,8 @@ run_train_grid() {
     --loss_aggregation=${loss_aggregation} \
     --normalize_kl=${normalize_kl} \
     --learned_prior=${learned_prior} \
+    --prior_logvar_min=${prior_logvar_min} \
+    --prior_logvar_max=${prior_logvar_max} \
     --use_annealing=${use_annealing} \
     --annealer_cycles=${annealer_cycles} \
     --annealer_type=${annealer_type} \
@@ -136,12 +144,10 @@ run_train_grid() {
     --batch_size=${batch_size} \
     --set_size=${set_size} \
     --decoder_type="${decoder_type}" \
-    --decoder_gate_temperature="${decoder_gate_temperature}" \
-    --decoder_slot_routing="${decoder_slot_routing}" \
-    --decoder_orth_weight="${decoder_orth_weight}" \
     --decoder_sparsity_weight="${decoder_sparsity_weight}" \
     --decoder_sparsity_mode="${decoder_sparsity_mode}" \
     --decoder_softplus_beta="${decoder_softplus_beta}" \
+    --decoder_trunk_layernorm="${decoder_trunk_layernorm}" \
     --encode_labels="${encode_labels}" \
     --encode_sources="${encode_sources}" \
     --n_epochs=500 \
