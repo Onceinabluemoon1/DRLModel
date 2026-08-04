@@ -22,6 +22,7 @@ from pref_learn.models.mlp import (
     MLPClassifier,
     MLPModel,
 )
+from pref_learn.models.decoders import normalize_decoder_type
 from pref_learn.models.nets import RewardDecoderConfig
 from pref_learn.models.qlae import QLAE, build_qlae_optimizer
 from pref_learn.models.tcvae import TCVAEModel
@@ -100,13 +101,21 @@ FLAGS_DEF = define_flags_with_default(
     # e.g. latentsweep: shared sweep dir / W&B group for beta×latent_dim grids (see submit_train_vae_grid.bash)
     sweep_folder_tag="",
     # === decoder args
-    decoder_type="multi",  # multi | cond | slot | odin
+    decoder_type="condsig",  # multi | cond | condsig | condsp | condcat | slot | odin
     # multi
-    decoder_sparsity_weight=0.0,  # L1 on theta(s) feature activations (training loss weight)
-    decoder_sparsity_mode="elementwise",  # elementwise (L1) | group (lasso over heads)
+    decoder_sparsity_weight=0.0,  # head sparsity loss weight (0 = off)
+    decoder_sparsity_mode="elementwise",  # multi only: elementwise | group
+    # cond*: group L1 on per-head r_j (sparsity_mode ignored)
     decoder_softplus_beta=1.0,  # softplus beta on theta = softplus(w(h))
     decoder_trunk_layernorm=False,  # LayerNorm on trunk h before w_head
     # cond
+    # condsig
+    # condsp
+    # condcat
+    decoder_use_rhead_film=False,  # SPL-style FiLM head on (z_j, j) instead of concat MLP
+    decoder_r_max=3.0,  # per-head cap: condsig / condcat positive bins in [0, R_max]
+    # condcat
+    decoder_n_bins=11,  # condcat: K bins; index 0 is explicit zero reward
     # slot
     decoder_gate_temperature=1.0,  # softmax routing temperature
     decoder_slot_routing="softmax",  # softmax | sum
@@ -133,6 +142,9 @@ def decoder_config_from_flags(
         sparsity_mode=FLAGS.decoder_sparsity_mode,
         softplus_beta=FLAGS.decoder_softplus_beta,
         trunk_layernorm=FLAGS.decoder_trunk_layernorm,
+        use_rhead_film=FLAGS.decoder_use_rhead_film,
+        r_max=FLAGS.decoder_r_max,
+        n_bins=FLAGS.decoder_n_bins,
         gate_temperature=FLAGS.decoder_gate_temperature,
         slot_routing=FLAGS.decoder_slot_routing,
     )
@@ -181,6 +193,13 @@ def _flag_bool(value: bool) -> str:
     return "T" if value else "F"
 
 
+def _sparsity_run_tag(*, weight: float, mode: str = "group") -> str:
+    """Compact L1 tag: group -> ``g0.01``, elementwise -> ``e0.01``."""
+    spar_mode = str(mode).lower()
+    prefix = "e" if spar_mode == "elementwise" else "g"
+    return f"{prefix}{weight:g}"
+
+
 def batch_source(*, batch, device, encode_sources: bool):
     if not encode_sources:
         return None
@@ -217,20 +236,32 @@ def main(_):
     run_tags = [nz_tag]
     if FLAGS.model_type != "QLAE":
         run_tags.append(learned_prior_tag)
-    if "VAE" in FLAGS.model_type:
-        run_tags.append(f"anneal={_flag_bool(FLAGS.use_annealing)}")
     if FLAGS.model_type == "QLAE":
         run_tags.append(f"V={FLAGS.num_quantized_values}")
         run_tags.append(f"wd={FLAGS.weight_decay}")
-    dec_tag = f"dec={FLAGS.decoder_type}"
+    dec_kind = normalize_decoder_type(decoder_type=FLAGS.decoder_type)
+    dec_tag = f"dec={dec_kind}"
     run_tags.append(dec_tag)
-    if str(FLAGS.decoder_type).lower() == "multi":
-        spar_mode = str(FLAGS.decoder_sparsity_mode).lower()
-        spar_abbr = "ele" if spar_mode == "elementwise" else spar_mode
-        run_tags.append(f"l1={spar_abbr}{FLAGS.decoder_sparsity_weight}")
-    if str(FLAGS.decoder_type).lower() == "slot":
+    _cond_decoders = ("cond", "condsig", "condsp", "condcat")
+    if dec_kind == "multi":
+        run_tags.append(
+            _sparsity_run_tag(
+                weight=FLAGS.decoder_sparsity_weight,
+                mode=FLAGS.decoder_sparsity_mode,
+            )
+        )
+    if dec_kind in _cond_decoders:
+        if FLAGS.decoder_sparsity_weight > 0.0:
+            run_tags.append(_sparsity_run_tag(weight=FLAGS.decoder_sparsity_weight))
+        if FLAGS.decoder_use_rhead_film:
+            run_tags.append("rfilm=T")
+    if dec_kind in ("condsig", "condcat"):
+        run_tags.append(f"R={FLAGS.decoder_r_max:g}")
+    if dec_kind == "condcat":
+        run_tags.append(f"nbins={FLAGS.decoder_n_bins}")
+    if dec_kind == "slot":
         run_tags.append(f"slotr={FLAGS.decoder_slot_routing}")
-    if str(FLAGS.decoder_type).lower() == "odin":
+    if dec_kind == "odin":
         run_tags.append(f"orthw={FLAGS.decoder_orth_weight}")
     run_tags.append(f"encY={_flag_bool(FLAGS.encode_labels)}")
     run_tags.append(f"encS={_flag_bool(FLAGS.encode_sources)}")
@@ -252,18 +283,30 @@ def main(_):
         )
         if FLAGS.model_type != "QLAE":
             sweep_scope_tags.append(learned_prior_tag)
-        if "VAE" in FLAGS.model_type:
-            sweep_scope_tags.append(f"anneal={_flag_bool(FLAGS.use_annealing)}")
         if FLAGS.model_type == "QLAE":
             sweep_scope_tags.append(f"nv={FLAGS.num_quantized_values}")
         sweep_scope_tags.append(dec_tag)
-        if str(FLAGS.decoder_type).lower() == "multi":
-            spar_mode = str(FLAGS.decoder_sparsity_mode).lower()
-            spar_abbr = "ele" if spar_mode == "elementwise" else spar_mode
-            sweep_scope_tags.append(f"l1={spar_abbr}{FLAGS.decoder_sparsity_weight}")
-        if str(FLAGS.decoder_type).lower() == "slot":
+        if dec_kind == "multi":
+            sweep_scope_tags.append(
+                _sparsity_run_tag(
+                    weight=FLAGS.decoder_sparsity_weight,
+                    mode=FLAGS.decoder_sparsity_mode,
+                )
+            )
+        if dec_kind in _cond_decoders:
+            if FLAGS.decoder_sparsity_weight > 0.0:
+                sweep_scope_tags.append(
+                    _sparsity_run_tag(weight=FLAGS.decoder_sparsity_weight)
+                )
+            if FLAGS.decoder_use_rhead_film:
+                sweep_scope_tags.append("rfilm=T")
+        if dec_kind in ("condsig", "condcat"):
+            sweep_scope_tags.append(f"R={FLAGS.decoder_r_max:g}")
+        if dec_kind == "condcat":
+            sweep_scope_tags.append(f"nbins={FLAGS.decoder_n_bins}")
+        if dec_kind == "slot":
             sweep_scope_tags.append(f"slotr={FLAGS.decoder_slot_routing}")
-        if str(FLAGS.decoder_type).lower() == "odin":
+        if dec_kind == "odin":
             sweep_scope_tags.append(f"orthw={FLAGS.decoder_orth_weight}")
         sweep_scope_tags.append(f"encY={_flag_bool(FLAGS.encode_labels)}")
         sweep_scope_tags.append(f"encS={_flag_bool(FLAGS.encode_sources)}")
@@ -288,16 +331,13 @@ def main(_):
             )
     else:
         FLAGS.logging.group = FLAGS.logging.experiment_id
-    anneal_tag = ""
-    if "VAE" in FLAGS.model_type:
-        anneal_tag = f"_anneal={_flag_bool(FLAGS.use_annealing)}"
     ts_for_dir = _run_dir_timestamp(ts=timestamp)
     if sweep_folder_tag:
         run_subdir = f"{ts_for_dir}_{sweep_scope_tag}" if ts_for_dir else sweep_scope_tag
     else:
         run_subdir = (
             f"{ts_for_dir}_nz={FLAGS.latent_dim}_pz={_flag_bool(FLAGS.learned_prior)}_"
-            f"agg={FLAGS.loss_aggregation}{anneal_tag}"
+            f"agg={FLAGS.loss_aggregation}"
         )
     sweep_root = (
         Path(FLAGS.logging.output_dir) / run_label / str(FLAGS.model_type) / run_subdir

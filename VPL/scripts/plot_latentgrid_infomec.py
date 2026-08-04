@@ -77,6 +77,8 @@ SWEEP_METRICS: list[tuple[str, str, bool]] = VAE_WANDB_METRICS + INFOMEC_METRICS
 
 WANDEB_METRICS = VAE_WANDB_METRICS
 
+RECON_LOSS_VMAX = 0.4
+
 
 @dataclass
 class LatentSweepHeatmapCLI:
@@ -445,10 +447,10 @@ def _norm_for_grid(
     if field == "frac_recon2total" or field in {"infom", "infoe", "infoc"}:
         return Normalize(vmin=0.0, vmax=1.0)
     if field == "recon_loss":
-        vmax = float(np.max(finite))
-        if vmax <= 0.0:
-            vmax = 1.0
-        return Normalize(vmin=0.0, vmax=vmax)
+        # vmax = float(np.max(finite))
+        # if vmax <= 0.0:
+        #     vmax = 1.0
+        return Normalize(vmin=0.0, vmax=RECON_LOSS_VMAX)
     vmin = float(np.min(finite))
     vmax = float(np.max(finite))
     if log_scale:
@@ -614,7 +616,9 @@ def save_metrics_figure(
             "vmin": 0.0
             if field == "recon_loss"
             else (float(np.min(finite)) if finite.size else None),
-            "vmax": float(np.max(finite)) if finite.size else None,
+            "vmax": RECON_LOSS_VMAX
+            if field == "recon_loss"
+            else (float(np.max(finite)) if finite.size else None),
         }
 
     for col_i, (field, title, log_scale) in enumerate(INFOMEC_METRICS):
@@ -634,7 +638,9 @@ def save_metrics_figure(
             "vmin": 0.0
             if field == "recon_loss"
             else (float(np.min(finite)) if finite.size else None),
-            "vmax": float(np.max(finite)) if finite.size else None,
+            "vmax": RECON_LOSS_VMAX
+            if field == "recon_loss"
+            else (float(np.max(finite)) if finite.size else None),
         }
 
     for col_i in range(len(INFOMEC_METRICS), ncols):

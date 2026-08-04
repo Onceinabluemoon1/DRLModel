@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=train_vae_grid
 #SBATCH --gres=shard:12
-#SBATCH --array=0-29%6
-#SBATCH --cpus-per-task=8
+#SBATCH --array=0-19%7
+#SBATCH --cpus-per-task=4
 #SBATCH --mem=16G
+#SBATCH --qos=scavenger
+#SBATCH --requeue
 #SBATCH --output=/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/logs_slurm/train_vae_grid/train_vae_grid_%A_%a.out
 #
 # Grid search over kl_weight (beta) × latent_dim.
@@ -25,7 +27,7 @@ conda activate drl
 
 
 BETAS=(
-    0.0001
+    # 0.0001
     0.001
     0.01
     0.1
@@ -38,7 +40,7 @@ LATENT_DIMS=(
     4
     6
     8
-    10
+    # 10
     16
 )
 model_type=VAE
@@ -50,25 +52,34 @@ set_size=16  # -1 = use full S from dataset; else truncate preference sets to th
 loss_aggregation=mean  # sum | mean
 normalize_kl=True
 learned_prior=True
-# original: logvar = (-8,4) -> std (0.01, 7.3)
-# new: logvar = (-6,1) -> std (0.05, 1.64)
+# sqrt(exp(logvar)) = std
+# (-6,1) -> std (0.05, 1.64)
 prior_logvar_min=-6.0  # learned_prior ARD: clamp prior_logvar
-prior_logvar_max=1.0
+prior_logvar_max=0
 use_annealing=False
 encode_labels=True  # pair encoder: cncat y into pair_mlp (q(z|s1,s2,y))
 encode_sources=False  # pair encoder: one-hot GT source_variable after set pool (InfoMEC)
 
 # * === decoder args
-decoder_type=multi  # multi | cond | slot | odin
+decoder_type=multi  # multi | cond | condsig | condsp | condcat | slot | odin
+
+# head sparsity (training loss; 0 = off)
+decoder_sparsity_weight=0.01
+# multi only: elementwise (L1 on theta) | group (lasso over heads)
+decoder_sparsity_mode=group
+# cond | condsig | condsp | condcat: always group L1 on per-head r_j (mode ignored)
 
 # multi
-decoder_sparsity_weight=0.001  # L1 on theta(s)
-decoder_sparsity_mode=group  # elementwise (L1, parts-biased) | group (lasso over heads, axes-biased)
-decoder_softplus_beta=2.0  # softplus beta on theta = softplus(w(h))
-decoder_trunk_layernorm=True  # LayerNorm on trunk h before w_head
+decoder_softplus_beta=2.0  # softplus beta: multi theta / condsp r_j
+decoder_trunk_layernorm=False  # LayerNorm on trunk h before w_head
 
-# cond
-# set decoder_type=cond above; multi flags are ignored
+# cond | condsig | condsp | condcat
+decoder_use_rhead_film=False  # SPL-style FiLM head on (z_j, j) instead of concat MLP
+# condsig | condcat
+decoder_r_max=4.0  # per-head cap in [0, R_max] (condsig / condcat)
+# condcat
+decoder_n_bins=11  # K bins; index 0 is explicit zero reward
+# set decoder_type above; unused flags are ignored by train.py
 
 # * === end decoder args
 
@@ -143,6 +154,9 @@ run_train_grid() {
     --decoder_sparsity_mode="${decoder_sparsity_mode}" \
     --decoder_softplus_beta="${decoder_softplus_beta}" \
     --decoder_trunk_layernorm="${decoder_trunk_layernorm}" \
+    --decoder_use_rhead_film="${decoder_use_rhead_film}" \
+    --decoder_r_max="${decoder_r_max}" \
+    --decoder_n_bins="${decoder_n_bins}" \
     --encode_labels="${encode_labels}" \
     --encode_sources="${encode_sources}" \
     --n_epochs=500 \

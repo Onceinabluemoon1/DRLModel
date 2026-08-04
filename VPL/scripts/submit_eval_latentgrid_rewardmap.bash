@@ -1,29 +1,32 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=plot_latentgrid_rewardmap
+#SBATCH --job-name=rewardmap_latentgrid
 #SBATCH --gres=shard:24
-#SBATCH --array=0-1
+#SBATCH --array=0
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=16G
+#SBATCH --qos=scavenger
 #SBATCH --output=/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/logs_slurm/eval_latentgrid_rewardmap/eval_latentgrid_rewardmap_%A_%a.out
 #
 # Slurm array: one latentsweep root per task → scripts/plot_latentgrid_rewardmap.py
 #
 # Local (no Slurm): copy-paste block below (conda activate drl first if needed).
 : <<'LOCAL_CUDA_RUN'
-GPU=4; cd /scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/VPL
+GPU=0; cd /scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/VPL
 INPUT_DIRS=(
-  "/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/outputs/sort_4goals_obs=15_T=1_Q=20000_A=16/VAE/20260727_144208_VAEgrid_pz=F_anneal=F_dec=poslinear_sparw=0.001_sparm=group_encY=T_encS=F"
+"/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/outputs/sort_4goals_obs=15_T=1_Q=20000_A=16/VAE/20260729_202338_VAEgrid_pz=F_anneal=F_dec=poslinear_l1=group0.001_encY=T_encS=F"
 )
 for d in "${INPUT_DIRS[@]}"; do
   CUDA_VISIBLE_DEVICES=$GPU python scripts/plot_latentgrid_rewardmap.py \
     --input-dir="$d" \
     --recon-top-k=4 \
-    --recon-loss-threshold=0.1 \
+    --recon-loss-threshold=0.1 \ #optional
+    --sweep-param-value=0.01 \ #optional
     --plot-xy=ee \
     --reward-mode=btl \
     --btl-unit=traj \
     --btl-traj-scatter=random \
     --btl-logit-scaling=train \
+    --raw-reward-standardize \
     --viz-data-frac=0.6 \
     --model-selection=final \
     --split=all \
@@ -36,22 +39,23 @@ source ~/miniconda3/etc/profile.d/conda.sh
 cd /scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/VPL
 conda activate drl
 
-#* latentsweep roots (sum-over-Z decoders only: linear / odinlinear / slotlinear / ellenlinear / offsetlinear)
+#* latentsweep roots (sum-over-Z decoders only: multi / cond / slot / odin)
 INPUT_DIRS=(
-"/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/outputs/sort_4goals_obs=15_T=1_Q=20000_A=16/VAE/20260726_043422_VAEgrid_pz=F_anneal=F_dec=poslinear_sparw=0.001_sparm=group_encY=T_encS=F"
+/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/outputs/sort_4goals_obs=15_T=25_Q=20000_A=16/VAE/20260804_015609_VAEgrid_pz=F_dec=multi_g0.01_encY=T_encS=F
 )
 
 #* sweep HP auto-selected from latest evals_latentgrid/ metrics:
 #*   rows: any cell with recon_loss <= threshold; top-k lowest mean recon over passing cells
 #*   tie-break: max InfoM over passing cells (not whole-row max)
-#* override: sweep_param_value=0.01  (pass --sweep-param-value)
+#* override: sweep_param_value=0.01  (unset = auto-select from evals_latentgrid metrics)
 
 #* outputs (sort-easy): evals_rewardmap/<ts>_…/btl_rewards/nz=<nz>_recon=…_M=…_E=…_C=…/
 #*   nz=<nz>_00left.png … nz=<nz>_07bottom_right.png, nz=<nz>_08aggregate.png
 
 #* plot_latentgrid_rewardmap CLI
 topk=4  # among HP rows with ≥1 passing cell, keep up to this many lowest mean passing recon
-recon_loss_threshold=0.1  # row filter (any cell) + top-k/mean recon + InfoM tie-break on passing cells
+recon_loss_threshold=0.1  # optional; row filter + top-k/mean recon + InfoM tie-break on passing cells
+sweep_param_value=0.01  # ! optional override; unset = auto from evals_latentgrid metrics
 reward_mode=btl  # raw | btl | both
 model_selection=final  # best | final
 split=all  # all | train | eval
@@ -70,6 +74,9 @@ btl_traj_scatter=random  # last | random (frame pick for xy / frame-BTL s_A)
 #*              train / (T · nz)      if btl_unit=frame
 #*   (training BTL uses summed heads; per_head downscales single-head logits)
 btl_logit_scaling=train  # train | per_head
+#* raw_reward_standardize: raw stratified maps only — (r-mean)/std per pref-mode subset;
+#*   aggregate panel uses full-dataset mean/std (ignored for btl)
+raw_reward_standardize=true
 #* sort-easy: always stratify by GT pref mode (no CLI flag)
 
 num_inputs=${#INPUT_DIRS[@]}
@@ -86,12 +93,21 @@ recon_loss_threshold_args=()
 if [ -n "${recon_loss_threshold:-}" ]; then
   recon_loss_threshold_args=(--recon-loss-threshold="${recon_loss_threshold}")
 fi
+sweep_param_value_args=()
+if [ -n "${sweep_param_value:-}" ]; then
+  sweep_param_value_args=(--sweep-param-value="${sweep_param_value}")
+fi
+raw_reward_standardize_args=()
+if [ "${raw_reward_standardize}" = true ]; then
+  raw_reward_standardize_args=(--raw-reward-standardize)
+fi
 
-echo "=== [${idx}/${last_input_idx}] plot_latentgrid_rewardmap: ${input_dir} (auto sweep HP, topk=${topk}${recon_loss_threshold:+, recon_loss_threshold=${recon_loss_threshold}}) ==="
+echo "=== [${idx}/${last_input_idx}] plot_latentgrid_rewardmap: ${input_dir} (auto sweep HP, topk=${topk}${recon_loss_threshold:+, recon_loss_threshold=${recon_loss_threshold}}${sweep_param_value:+, sweep_param_value=${sweep_param_value}}) ==="
 python scripts/plot_latentgrid_rewardmap.py \
   --input-dir="${input_dir}" \
   --recon-top-k="${topk}" \
   "${recon_loss_threshold_args[@]}" \
+  "${sweep_param_value_args[@]}" \
   --reward-mode="${reward_mode}" \
   --model-selection="${model_selection}" \
   --split="${split}" \
@@ -104,4 +120,5 @@ python scripts/plot_latentgrid_rewardmap.py \
   --plot-xy="${plot_xy}" \
   --btl-unit="${btl_unit}" \
   --btl-traj-scatter="${btl_traj_scatter}" \
-  --btl-logit-scaling="${btl_logit_scaling}"
+  --btl-logit-scaling="${btl_logit_scaling}" \
+  "${raw_reward_standardize_args[@]}"

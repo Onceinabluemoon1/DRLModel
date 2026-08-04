@@ -32,6 +32,7 @@ if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
 import plot_infomec as plt_infomec  # noqa: E402
+from pref_learn.models.decoders import MultiplicativeDecoder  # noqa: E402
 from pref_learn.models.nets import (  # noqa: E402
     decoder_sums_latent_heads,
     normalize_decoder_type,
@@ -44,6 +45,7 @@ from pref_learn.utils.disentangle_sweep import (  # noqa: E402
     sweep_from_variant,
 )
 from pref_learn.utils.plot_utils import (  # noqa: E402
+    latent_index_latex,
     observation_xy_limits,
     plot_observation_rewards_by_annotator_mode,
 )
@@ -235,6 +237,57 @@ def aligned_pref_mode_labels(
     return out
 
 
+def raw_reward_standardization_values(
+    *,
+    rewards: np.ndarray,
+    summed_rewards: np.ndarray,
+    latent_dim: int,
+) -> np.ndarray:
+    """Pooled per-head + summed-head scalars for raw mean/std (matches ``global_raw_reward_limits``)."""
+    n_active = min(int(latent_dim), MAX_HEAD_PANELS)
+    if rewards.size == 0 or n_active <= 0:
+        return np.empty((0,), dtype=np.float64)
+    flat = rewards.reshape(-1, rewards.shape[-1])[:, :n_active]
+    summed = np.asarray(summed_rewards, dtype=np.float64).reshape(-1)
+    return np.concatenate([flat.reshape(-1), summed], axis=0)
+
+
+def raw_reward_standardization_stats(
+    *,
+    rewards: np.ndarray,
+    summed_rewards: np.ndarray,
+    latent_dim: int,
+) -> tuple[float, float]:
+    """Mean/std over active head outputs and summed-head rewards in ``rewards`` / ``summed_rewards``."""
+    vals = raw_reward_standardization_values(
+        rewards=rewards,
+        summed_rewards=summed_rewards,
+        latent_dim=latent_dim,
+    )
+    if vals.size == 0:
+        return 0.0, 1.0
+    mean = float(np.mean(vals))
+    std = float(np.std(vals))
+    if std <= 0.0 or not np.isfinite(std):
+        std = 1.0
+    return mean, std
+
+
+def standardize_raw_reward_arrays(
+    *,
+    rewards: np.ndarray,
+    summed_rewards: np.ndarray,
+    mean: float,
+    std: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """``(r - mean) / std`` on per-head rewards and summed-head panel values."""
+    scale = float(std)
+    if scale <= 0.0 or not np.isfinite(scale):
+        scale = 1.0
+    shift = float(mean)
+    return (rewards - shift) / scale, (summed_rewards - shift) / scale
+
+
 def global_raw_reward_limits(
     *,
     rewards: np.ndarray,
@@ -316,6 +369,9 @@ class LatentGridRewardMapCLI:
 
     btl_logit_scaling: BtlLogitScaling = BtlLogitScaling.train
     """``train``: model ``reward_scaling``; ``per_head``: divide by ``nz`` (traj) or ``T·nz`` (frame)."""
+
+    raw_reward_standardize: bool = False
+    """Raw stratified maps: ``(r-mean)/std`` per pref-mode subset; aggregate uses full-dataset mean/std."""
 
     dpi: int = 150
 
@@ -786,14 +842,13 @@ def batched_per_head_elbo_stats(
     device: torch.device,
     source: np.ndarray | None = None,
 ) -> dict[str, np.ndarray]:
-    """Full-split mean per-head KL and stds. ``kl/prior_std/post_std`` each ``(Z,)``."""
+    """Per-head KL plus strata mean/std of encoder ``μ``; arrays ``(Z,)``."""
     import torch.distributions as D
 
     q_n = int(len(obs1))
     z_dim = int(model.latent_dim)
     kl_sum = torch.zeros(z_dim, device=device)
-    post_std_sum = torch.zeros(z_dim, device=device)
-    n_total = 0
+    mean_chunks: list[torch.Tensor] = []
     prior_std = model.prior_std().to(device=device)  # (Z,)
     prior_mean = model.prior_mean.to(device=device)  # (Z,)
 
@@ -814,17 +869,120 @@ def batched_per_head_elbo_stats(
         q_z = D.Normal(mean, post_std)
         p_z = D.Normal(prior_mean, prior_std)
         kl = D.kl_divergence(q_z, p_z)  # (B, Z)
-        b_n = int(mean.shape[0])
         kl_sum = kl_sum + kl.sum(dim=0)
-        post_std_sum = post_std_sum + post_std.sum(dim=0)
-        n_total += b_n
+        mean_chunks.append(mean)
 
+    assert mean_chunks
+    means = torch.cat(mean_chunks, dim=0)  # (Q, Z)
+    n_total = int(means.shape[0])
     assert n_total > 0
+    post_mean = means.mean(dim=0)
+    if n_total > 1:
+        post_mean_std = means.std(dim=0, unbiased=True)
+    else:
+        post_mean_std = torch.zeros(z_dim, device=device)
     return {
         "kl_per_head": (kl_sum / n_total).detach().cpu().numpy(),
         "prior_std": prior_std.detach().cpu().numpy(),
-        "post_std": (post_std_sum / n_total).detach().cpu().numpy(),
+        "post_mean": post_mean.detach().cpu().numpy(),
+        "post_mean_std": post_mean_std.detach().cpu().numpy(),
     }
+
+
+def std_post_mean_across_strata(
+    *,
+    per_strata_post_mean: list[np.ndarray],
+) -> np.ndarray | None:
+    """Std of per-strata ``\bar{\mu}_j`` across pref modes; ``(Z,)``."""
+    if not per_strata_post_mean:
+        return None
+    stacked = np.stack(
+        [np.asarray(m, dtype=np.float64).reshape(-1) for m in per_strata_post_mean],
+        axis=0,
+    )  # (S, Z)
+    if stacked.shape[0] == 1:
+        return np.zeros(stacked.shape[1], dtype=np.float64)
+    return stacked.std(axis=0, ddof=1)
+
+
+@torch.no_grad()
+def batched_per_head_theta_on_obs1(
+    *,
+    decoder: MultiplicativeDecoder,
+    obs1: np.ndarray,
+    batch_size: int,
+    device: torch.device,
+    btl_unit: RewardMapBtlUnit,
+    scatter_t_idx: np.ndarray | None = None,
+) -> np.ndarray:
+    """Per-head ``theta(s)=softplus(w(h))`` on ``obs1``; shape matches reward-map layout."""
+    q_n = int(len(obs1))
+    s_n = int(obs1.shape[1])
+    t_n = int(obs1.shape[2])
+    z_dim = int(decoder.latent_dim)
+    n_heads = min(z_dim, MAX_HEAD_PANELS)
+    traj_mode = btl_unit == RewardMapBtlUnit.traj
+    frame_scatter = btl_unit == RewardMapBtlUnit.frame and scatter_t_idx is not None
+    segment_theta = traj_mode or frame_scatter
+    if segment_theta:
+        thetas = np.full((q_n, s_n, n_heads), np.nan, dtype=np.float64)
+    else:
+        thetas = np.full((q_n, s_n, t_n, n_heads), np.nan, dtype=np.float64)
+
+    for start in range(0, q_n, batch_size):
+        end = min(start + batch_size, q_n)
+        o1 = torch.from_numpy(obs1[start:end]).float().to(device)  # (B, S, T, O)
+        b_n = end - start
+        theta = decoder.theta_from_obs(o1)  # (B, S, T, Z)
+        if traj_mode:
+            thetas[start:end, :, :n_heads] = (
+                theta[..., :n_heads].sum(dim=-2).detach().cpu().numpy()
+            )
+            continue
+        if frame_scatter:
+            assert scatter_t_idx is not None
+            b_idx = torch.arange(b_n, device=device)[:, None]
+            s_idx = torch.arange(s_n, device=device)[None, :]
+            t_idx = (
+                torch.from_numpy(scatter_t_idx[start:end])
+                .long()
+                .to(device=device)
+            )
+            theta_pick = theta[b_idx, s_idx, t_idx, :n_heads]  # (B, S, Z)
+            thetas[start:end, :, :n_heads] = theta_pick.detach().cpu().numpy()
+            continue
+        thetas[start:end, :, :, :n_heads] = theta[..., :n_heads].detach().cpu().numpy()
+    return thetas
+
+
+@torch.no_grad()
+def batched_mean_theta_per_head(
+    *,
+    decoder: MultiplicativeDecoder,
+    obs1: np.ndarray,
+    batch_size: int,
+    device: torch.device,
+) -> np.ndarray:
+    """Mean ``softplus(w(h))`` per head over all ``(Q,S,T)`` in ``obs1``; ``(Z,)``."""
+    q_n = int(len(obs1))
+    z_dim = int(decoder.latent_dim)
+    n_heads = min(z_dim, MAX_HEAD_PANELS)
+    theta_sum = torch.zeros(n_heads, device=device)
+    n_total = 0
+
+    for start in range(0, q_n, batch_size):
+        end = min(start + batch_size, q_n)
+        o1 = torch.from_numpy(obs1[start:end]).float().to(device)  # (B, S, T, O)
+        theta = decoder.theta_from_obs(o1)  # (B, S, T, Z)
+        b_n, s_n, t_n, _ = theta.shape
+        theta_sum = theta_sum + theta[..., :n_heads].sum(dim=(0, 1, 2))
+        n_total += b_n * s_n * t_n
+
+    assert n_total > 0
+    mean_active = (theta_sum / float(n_total)).detach().cpu().numpy()
+    out = np.full(z_dim, np.nan, dtype=np.float64)
+    out[:n_heads] = mean_active
+    return out
 
 
 def resolve_btl_logit_scaling(
@@ -1006,6 +1164,7 @@ def batched_per_head_rewards_on_obs1(
     prob_comp_chunk_size: int = 64,
     source: np.ndarray | None = None,
     scatter_t_idx: np.ndarray | None = None,
+    precomputed_theta: np.ndarray | None = None,
 ) -> np.ndarray:
     """Per-head rewards on ``obs1``; ``(Q,S,Z)`` if traj/sampled-frame prob else ``(Q,S,T,Z)`` or ``(Q,S,Z)`` raw traj."""
     q_n = int(len(obs1))
@@ -1065,16 +1224,44 @@ def batched_per_head_rewards_on_obs1(
             )  # (B, Z)
             z = ei.repeat(z_q, "B Z -> B S T Z", S=s_n, T=t_n)
             if reward_mode == "raw":
-                x = torch.cat([o1, z], dim=-1)  # (B, S, T, O+Z)
-                r_heads = model.decoder(x, vector_rewards=True)
-                if traj_mode:
-                    rewards[start:end, :, :n_heads] = (
-                        r_heads[..., :n_heads].sum(dim=-2).detach().cpu().numpy()
+                dec = model.decoder
+                if precomputed_theta is not None:
+                    theta_t = (
+                        torch.from_numpy(np.asarray(precomputed_theta)[start:end])
+                        .float()
+                        .to(device)
                     )
+                    if theta_t.ndim == 3:
+                        z_seg = ei.repeat(z_q[:, :n_heads], "B Z -> B S Z", S=s_n)
+                        r_seg = theta_t[..., :n_heads] * z_seg  # (B, S, Z)
+                        rewards[start:end, :, :n_heads] = r_seg.detach().cpu().numpy()
+                    else:
+                        r_heads = theta_t[..., :n_heads] * z[..., :n_heads]
+                        rewards[start:end, :, :, :n_heads] = (
+                            r_heads.detach().cpu().numpy()
+                        )
+                elif isinstance(dec, MultiplicativeDecoder):
+                    theta = dec.theta_from_obs(o1)  # (B, S, T, Z)
+                    r_heads = theta[..., :n_heads] * z[..., :n_heads]
+                    if traj_mode:
+                        rewards[start:end, :, :n_heads] = (
+                            r_heads.sum(dim=-2).detach().cpu().numpy()
+                        )
+                    else:
+                        rewards[start:end, :, :, :n_heads] = (
+                            r_heads.detach().cpu().numpy()
+                        )
                 else:
-                    rewards[start:end, :, :, :n_heads] = (
-                        r_heads[..., :n_heads].detach().cpu().numpy()
-                    )
+                    x = torch.cat([o1, z], dim=-1)  # (B, S, T, O+Z)
+                    r_heads = dec(x, vector_rewards=True)
+                    if traj_mode:
+                        rewards[start:end, :, :n_heads] = (
+                            r_heads[..., :n_heads].sum(dim=-2).detach().cpu().numpy()
+                        )
+                    else:
+                        rewards[start:end, :, :, :n_heads] = (
+                            r_heads[..., :n_heads].detach().cpu().numpy()
+                        )
                 continue
 
             assert comp_t is not None
@@ -1247,6 +1434,47 @@ def batched_summed_reward_on_obs1(
     return rewards
 
 
+def head_order_by_kl_desc(
+    *,
+    kl_per_head: np.ndarray | None,
+    head_indices: list[int],
+) -> list[int]:
+    """Sort ``head_indices`` by descending per-head KL (stable tie-break on index)."""
+    if kl_per_head is None or not head_indices:
+        return list(head_indices)
+    kl = np.asarray(kl_per_head, dtype=np.float64).reshape(-1)
+
+    def sort_key(h: int) -> tuple[float, int]:
+        if h < kl.shape[0]:
+            return (-float(kl[h]), h)
+        return (0.0, h)
+
+    return sorted(head_indices, key=sort_key)
+
+
+def scatter_head_order(
+    *,
+    kl_per_head: np.ndarray | None,
+    n_active: int,
+    n_show: int,
+) -> list[int]:
+    """Panel order for reward scatters: active heads by descending KL, then inactive."""
+    active = [h for h in range(n_show) if h < n_active]
+    inactive = [h for h in range(n_show) if h >= n_active]
+    return head_order_by_kl_desc(kl_per_head=kl_per_head, head_indices=active) + inactive
+
+
+def elbo_bar_head_order(*, kl_per_head: np.ndarray | None) -> list[int] | None:
+    """Panel order for ELBO bar plots: all heads by descending KL."""
+    if kl_per_head is None:
+        return None
+    kl = np.asarray(kl_per_head, dtype=np.float64).reshape(-1)
+    return head_order_by_kl_desc(
+        kl_per_head=kl_per_head,
+        head_indices=list(range(kl.shape[0])),
+    )
+
+
 def flatten_obs_and_head_rewards(
     *,
     obs1: np.ndarray,
@@ -1254,6 +1482,7 @@ def flatten_obs_and_head_rewards(
     latent_dim: int,
     scatter_t_idx: np.ndarray | None = None,
     n_panels: int = MAX_HEAD_PANELS,
+    head_order: list[int] | None = None,
 ) -> tuple[list[np.ndarray], list[np.ndarray]]:
     """Build per-head panel lists: shared obs, per-head scalar reward."""
     use_scatter_frame = scatter_t_idx is not None and rewards.ndim == 3
@@ -1266,9 +1495,10 @@ def flatten_obs_and_head_rewards(
     n_active = min(int(latent_dim), MAX_HEAD_PANELS)
     compact = int(n_panels) < MAX_HEAD_PANELS
     n_show = min(n_active, int(n_panels)) if compact else MAX_HEAD_PANELS
+    order = head_order if head_order is not None else list(range(n_show))
     per_head_obs: list[np.ndarray] = []
     per_head_r: list[np.ndarray] = []
-    for head_idx in range(n_show):
+    for head_idx in order:
         if head_idx < n_active:
             per_head_obs.append(obs_flat)
             per_head_r.append(rw_flat[:, head_idx : head_idx + 1])
@@ -1314,20 +1544,23 @@ def head_panel_titles(
     latent_dim: int,
     n_panels: int = MAX_HEAD_PANELS,
     kl_per_head: np.ndarray | None = None,
+    head_order: list[int] | None = None,
 ) -> list[str]:
     n_active = min(int(latent_dim), MAX_HEAD_PANELS)
     compact = int(n_panels) < MAX_HEAD_PANELS
     n_show = min(n_active, int(n_panels)) if compact else MAX_HEAD_PANELS
     kl = None if kl_per_head is None else np.asarray(kl_per_head, dtype=np.float64).reshape(-1)
+    order = head_order if head_order is not None else list(range(n_show))
     titles: list[str] = []
-    for head_idx in range(n_show):
+    for head_idx in order:
         if head_idx < n_active:
+            z_label = latent_index_latex(head_idx=head_idx)
             if kl is not None and head_idx < kl.shape[0]:
-                titles.append(f"$z_{head_idx}$ (KL={kl[head_idx]:.3g})")
+                titles.append(f"{z_label} (KL={kl[head_idx]:.3g})")
             else:
-                titles.append(f"$z_{head_idx}$")
+                titles.append(z_label)
         else:
-            titles.append(f"$z_{head_idx}$ (inactive)")
+            titles.append(f"{latent_index_latex(head_idx=head_idx)} (inactive)")
     return titles
 
 
@@ -1356,6 +1589,8 @@ def format_reward_map_suptitle(
     pref_mode_name: str | None = None,
     n_queries: int | None = None,
     recon_loss: float | None = None,
+    raw_reward_standardize: bool = False,
+    raw_standardize_scope: Literal["subset", "global"] | None = None,
 ) -> str:
     param_label = meta["sweep_param_label"]
     param_val = meta["sweep_param_value"]
@@ -1368,6 +1603,13 @@ def format_reward_map_suptitle(
     if pref_mode_name is not None:
         q_msg = f", n_queries={n_queries}" if n_queries is not None else ""
         lines.append(f"pref_mode={pref_mode_name} (segment A only{q_msg})")
+    if reward_mode == "raw" and raw_reward_standardize:
+        scope_msg = (
+            "full dataset"
+            if raw_standardize_scope == "global"
+            else "pref-mode subset"
+        )
+        lines.append(f"raw standardized: (r-mean)/std ({scope_msg} stats)")
     if infomec is not None:
         lines.append(
             format_infomec_suptitle_suffix(infomec=infomec, recon_loss=recon_loss)
@@ -1398,8 +1640,12 @@ def save_per_head_reward_figure(
     summed_rewards: np.ndarray | None = None,
     recon_loss: float | None = None,
     elbo_kl_per_head: np.ndarray | None = None,
-    elbo_prior_std: np.ndarray | None = None,
-    elbo_post_std: np.ndarray | None = None,
+    elbo_post_mean: np.ndarray | None = None,
+    elbo_post_mean_std: np.ndarray | None = None,
+    elbo_post_mean_std_across_strata: np.ndarray | None = None,
+    theta_mean_per_head: np.ndarray | None = None,
+    raw_reward_standardize: bool = False,
+    raw_standardize_scope: Literal["subset", "global"] | None = None,
 ) -> None:
     nz = int(meta["latent_dim"])
     layout = resolve_reward_map_layout(
@@ -1407,17 +1653,28 @@ def save_per_head_reward_figure(
         plot_xy=plot_xy,
         obs_dim=int(obs1.shape[-1]),
     )
+    n_active = min(nz, MAX_HEAD_PANELS)
+    compact = int(n_panels) < MAX_HEAD_PANELS
+    n_show = min(n_active, int(n_panels)) if compact else MAX_HEAD_PANELS
+    scatter_order = scatter_head_order(
+        kl_per_head=elbo_kl_per_head,
+        n_active=n_active,
+        n_show=n_show,
+    )
+    bar_order = elbo_bar_head_order(kl_per_head=elbo_kl_per_head)
     per_head_obs, per_head_r = flatten_obs_and_head_rewards(
         obs1=obs1,
         rewards=rewards,
         latent_dim=nz,
         scatter_t_idx=scatter_t_idx,
         n_panels=n_panels,
+        head_order=scatter_order,
     )
     panel_titles = head_panel_titles(
         latent_dim=nz,
         n_panels=n_panels,
         kl_per_head=elbo_kl_per_head,
+        head_order=scatter_order,
     )
     highlight_panel_indices: list[int] | None = None
     if include_summed_head_panel:
@@ -1474,6 +1731,8 @@ def save_per_head_reward_figure(
             pref_mode_name=pref_mode_name,
             n_queries=n_queries,
             recon_loss=recon_loss,
+            raw_reward_standardize=raw_reward_standardize,
+            raw_standardize_scope=raw_standardize_scope,
         ),
         scatter_s=float(layout["scatter_s"]),
         ncols=ncols,
@@ -1489,8 +1748,11 @@ def save_per_head_reward_figure(
         reward_vmax=vmax,
         highlight_panel_indices=highlight_panel_indices,
         elbo_kl_per_head=elbo_kl_per_head,
-        elbo_prior_std=elbo_prior_std,
-        elbo_post_std=elbo_post_std,
+        elbo_post_mean=elbo_post_mean,
+        elbo_post_mean_std=elbo_post_mean_std,
+        elbo_post_mean_std_across_strata=elbo_post_mean_std_across_strata,
+        theta_mean_per_head=theta_mean_per_head,
+        elbo_head_order=bar_order,
     )
     out_png.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_png, dpi=dpi, bbox_inches="tight", pad_inches=0.12)
@@ -1602,7 +1864,8 @@ def main() -> None:
         f"training dataset={dataset_path} ({q_n} queries, "
         f"{n_scatter} scatter pts, btl_unit={args.btl_unit.value}, "
         f"viz_data_frac={args.viz_data_frac:g}, plot_xy={args.plot_xy.value}, "
-        f"btl_logit_scaling={args.btl_logit_scaling.value}"
+        f"btl_logit_scaling={args.btl_logit_scaling.value}, "
+        f"raw_reward_standardize={args.raw_reward_standardize}"
         f"{scatter_frame_msg}) | device={device}"
     )
 
@@ -1685,6 +1948,7 @@ def main() -> None:
         "btl_traj_scatter": (
             args.btl_traj_scatter.value if (traj_mode or frame_mode) else None
         ),
+        "raw_reward_standardize": bool(args.raw_reward_standardize),
         "n_scatter_points": int(n_scatter),
         "stratify_pref_mode": bool(stratify_pref_mode),
         "n_pref_modes": int(n_pref_modes) if stratify_pref_mode else None,
@@ -1737,6 +2001,18 @@ def main() -> None:
                 source=query_source,
             )
 
+        full_thetas: np.ndarray | None = None
+        multi_decoder = isinstance(model.decoder, MultiplicativeDecoder)
+        if multi_decoder:
+            full_thetas = batched_per_head_theta_on_obs1(
+                decoder=model.decoder,
+                obs1=obs1,
+                batch_size=batch_size,
+                device=device,
+                btl_unit=args.btl_unit,
+                scatter_t_idx=scatter_t_idx,
+            )
+
         entry: dict[str, Any] = {
             "run_dir": str(run_dir),
             "comment": row["comment"],
@@ -1750,12 +2026,26 @@ def main() -> None:
             entry["elbo_head_stats"] = {
                 "kl_per_head": elbo_stats["kl_per_head"].tolist(),
                 "prior_std": elbo_stats["prior_std"].tolist(),
-                "post_std": elbo_stats["post_std"].tolist(),
+                "post_mean": elbo_stats["post_mean"].tolist(),
+                "post_mean_std": elbo_stats["post_mean_std"].tolist(),
             }
         if stratify_pref_mode:
             entry["stratified_pngs"] = {}
         if infomec is not None:
             entry["infomec"] = infomec
+
+        path_metrics = infomec_path_metrics(
+            infomec=infomec,
+            recon_loss=recon_loss,
+        )
+        global_theta_mean: np.ndarray | None = None
+        if multi_decoder:
+            global_theta_mean = batched_mean_theta_per_head(
+                decoder=model.decoder,
+                obs1=obs1,
+                batch_size=batch_size,
+                device=device,
+            )
 
         for mode in modes:
             rewards = batched_per_head_rewards_on_obs1(
@@ -1774,10 +2064,7 @@ def main() -> None:
                 prob_comp_chunk_size=args.prob_comp_chunk_size,
                 source=query_source,
                 scatter_t_idx=scatter_t_idx,
-            )
-            path_metrics = infomec_path_metrics(
-                infomec=infomec,
-                recon_loss=recon_loss,
+                precomputed_theta=full_thetas if mode == "raw" else None,
             )
             save_kw: dict[str, Any] = dict(
                 meta=row,
@@ -1793,8 +2080,10 @@ def main() -> None:
             )
             if elbo_stats is not None:
                 save_kw["elbo_kl_per_head"] = elbo_stats["kl_per_head"]
-                save_kw["elbo_prior_std"] = elbo_stats["prior_std"]
-                save_kw["elbo_post_std"] = elbo_stats["post_std"]
+                save_kw["elbo_post_mean"] = elbo_stats["post_mean"]
+                save_kw["elbo_post_mean_std"] = elbo_stats["post_mean_std"]
+            if global_theta_mean is not None:
+                save_kw["theta_mean_per_head"] = global_theta_mean
 
             if not stratify_pref_mode:
                 png_path = rewardmap_out_png(
@@ -1820,14 +2109,25 @@ def main() -> None:
             assert pref_mode_labels is not None
             assert pref_mode_names is not None
             n_active = min(nz, MAX_HEAD_PANELS)
+            global_raw_mean: float | None = None
+            global_raw_std: float | None = None
             if mode == "raw":
                 summed_rewards = rewards[..., :n_active].sum(axis=-1)
-                raw_vmin, raw_vmax = global_raw_reward_limits(
-                    rewards=rewards,
-                    latent_dim=nz,
-                )
-                save_kw["reward_vmin"] = raw_vmin
-                save_kw["reward_vmax"] = raw_vmax
+                if args.raw_reward_standardize:
+                    global_raw_mean, global_raw_std = raw_reward_standardization_stats(
+                        rewards=rewards,
+                        summed_rewards=summed_rewards,
+                        latent_dim=nz,
+                    )
+                    save_kw.pop("reward_vmin", None)
+                    save_kw.pop("reward_vmax", None)
+                else:
+                    raw_vmin, raw_vmax = global_raw_reward_limits(
+                        rewards=rewards,
+                        latent_dim=nz,
+                    )
+                    save_kw["reward_vmin"] = raw_vmin
+                    save_kw["reward_vmax"] = raw_vmax
             else:
                 summed_rewards = batched_summed_reward_on_obs1(
                     model=model,
@@ -1847,15 +2147,32 @@ def main() -> None:
                 save_kw["reward_vmax"] = 1.0
             save_kw["include_summed_head_panel"] = True
 
-            panels: list[tuple[int, str, np.ndarray, np.ndarray, np.ndarray | None, np.ndarray, int]] = []
+            panels: list[
+                tuple[
+                    int,
+                    str,
+                    np.ndarray,
+                    np.ndarray,
+                    np.ndarray,
+                    np.ndarray | None,
+                    np.ndarray,
+                    np.ndarray | None,
+                    np.ndarray,
+                    int,
+                ]
+            ] = []
             for pref_mode in range(n_pref_modes):
                 mask = np.asarray(pref_mode_labels).reshape(-1) == int(pref_mode)
                 scatter_m = None if scatter_t_idx is None else scatter_t_idx[mask]
+                source_m = None if query_source is None else query_source[mask]
                 panels.append(
                     (
                         pref_mode,
                         str(pref_mode_names[pref_mode]),
                         obs1[mask],
+                        obs2[mask],
+                        labels[mask],
+                        source_m,
                         rewards[mask],
                         scatter_m,
                         summed_rewards[mask],
@@ -1867,6 +2184,9 @@ def main() -> None:
                     n_pref_modes,
                     "aggregate",
                     obs1,
+                    obs2,
+                    labels,
+                    query_source,
                     rewards,
                     scatter_t_idx,
                     summed_rewards,
@@ -1875,7 +2195,19 @@ def main() -> None:
             )
 
             stratified: dict[str, Any] = {}
-            for panel_idx, panel_name, obs_p, rew_p, scatter_p, sum_p, n_q_p in panels:
+            strata_post_means: list[np.ndarray] = []
+            for (
+                panel_idx,
+                panel_name,
+                obs_p,
+                obs2_p,
+                labels_p,
+                source_p,
+                rew_p,
+                scatter_p,
+                sum_p,
+                n_q_p,
+            ) in panels:
                 stem = sort_easy_panel_stem(
                     latent_dim=nz,
                     panel_idx=panel_idx,
@@ -1888,23 +2220,93 @@ def main() -> None:
                     stem=stem,
                     **path_metrics,
                 )
+                rew_plot = rew_p
+                sum_plot = sum_p
+                panel_save_kw = dict(save_kw)
+                raw_standardize_scope: Literal["subset", "global"] | None = None
+                panel_elbo: dict[str, np.ndarray] | None = None
+                if mode == "raw" and args.raw_reward_standardize:
+                    assert global_raw_mean is not None
+                    assert global_raw_std is not None
+                    if panel_name == "aggregate":
+                        mean = global_raw_mean
+                        std = global_raw_std
+                        raw_standardize_scope = "global"
+                    else:
+                        mean, std = raw_reward_standardization_stats(
+                            rewards=rew_p,
+                            summed_rewards=sum_p,
+                            latent_dim=nz,
+                        )
+                        raw_standardize_scope = "subset"
+                    rew_plot, sum_plot = standardize_raw_reward_arrays(
+                        rewards=rew_p,
+                        summed_rewards=sum_p,
+                        mean=mean,
+                        std=std,
+                    )
+                    panel_save_kw.pop("reward_vmin", None)
+                    panel_save_kw.pop("reward_vmax", None)
+                    panel_save_kw["raw_reward_standardize"] = True
+                    panel_save_kw["raw_standardize_scope"] = raw_standardize_scope
+                if elbo_stats is not None and isinstance(model, VAEModel) and n_q_p > 0:
+                    if panel_name == "aggregate":
+                        across = std_post_mean_across_strata(
+                            per_strata_post_mean=strata_post_means,
+                        )
+                        if across is not None:
+                            panel_save_kw["elbo_post_mean_std_across_strata"] = across
+                            panel_save_kw.pop("elbo_post_mean", None)
+                            panel_save_kw.pop("elbo_post_mean_std", None)
+                    else:
+                        panel_elbo = batched_per_head_elbo_stats(
+                            model=model,
+                            obs1=obs_p,
+                            obs2=obs2_p,
+                            labels=labels_p,
+                            batch_size=batch_size,
+                            device=device,
+                            source=source_p,
+                        )
+                        panel_save_kw["elbo_post_mean"] = panel_elbo["post_mean"]
+                        panel_save_kw["elbo_post_mean_std"] = panel_elbo["post_mean_std"]
+                        strata_post_means.append(panel_elbo["post_mean"])
+                elif elbo_stats is not None:
+                    panel_save_kw.pop("elbo_kl_per_head", None)
+                    panel_save_kw.pop("elbo_post_mean", None)
+                    panel_save_kw.pop("elbo_post_mean_std", None)
+                    panel_save_kw.pop("elbo_post_mean_std_across_strata", None)
+                if multi_decoder and n_q_p > 0:
+                    panel_save_kw["theta_mean_per_head"] = batched_mean_theta_per_head(
+                        decoder=model.decoder,
+                        obs1=obs_p,
+                        batch_size=batch_size,
+                        device=device,
+                    )
+                elif multi_decoder:
+                    panel_save_kw.pop("theta_mean_per_head", None)
                 save_per_head_reward_figure(
                     obs1=obs_p,
-                    rewards=rew_p,
+                    rewards=rew_plot,
                     out_png=png_path,
                     scatter_t_idx=scatter_p,
                     pref_mode_name=panel_name,
                     n_queries=n_q_p,
-                    summed_rewards=sum_p,
-                    **save_kw,
+                    summed_rewards=sum_plot,
+                    **panel_save_kw,
                 )
                 rel = str(png_path.relative_to(outdir))
-                stratified[stem] = {
+                stratified_entry: dict[str, Any] = {
                     "path": rel,
                     "pref_mode": int(panel_idx),
                     "pref_mode_name": panel_name,
                     "n_queries": int(n_q_p),
                 }
+                if mode == "raw" and args.raw_reward_standardize:
+                    stratified_entry["raw_standardize_scope"] = raw_standardize_scope
+                    stratified_entry["raw_standardize_mean"] = float(mean)
+                    stratified_entry["raw_standardize_std"] = float(std)
+                stratified[stem] = stratified_entry
                 tqdm.write(f"{row['comment']}: saved {rel} (n_queries={n_q_p})")
             entry["stratified_pngs"][mode] = stratified
             agg_stem = sort_easy_panel_stem(

@@ -53,16 +53,25 @@ encode_labels=True  # pair encoder: concat y into pair_mlp (q(z|s1,s2,y))
 encode_sources=False  # pair encoder: one-hot GT source_variable (InfoMEC; relabelled dataset)
 
 # === decoder args
-decoder_type=multi  # multi | cond | slot | odin
+decoder_type=multi  # multi | cond | condsig | condsp | condcat | slot | odin
+
+# head sparsity (training loss; 0 = off)
+decoder_sparsity_weight=0.0
+# multi only: elementwise (L1 on theta) | group (lasso over heads)
+decoder_sparsity_mode=elementwise
+# cond | condsig | condsp | condcat: always group L1 on per-head r_j (mode ignored)
 
 # multi
-decoder_sparsity_weight=0.0  # L1 on theta(s)
-decoder_sparsity_mode=elementwise  # elementwise (L1, parts-biased) | group (lasso over heads, axes-biased)
-decoder_softplus_beta=1.0  # softplus beta on theta = softplus(w(h))
+decoder_softplus_beta=1.0  # softplus beta: multi theta / condsp r_j
 decoder_trunk_layernorm=True
 
-# cond
-# set decoder_type=cond above; multi flags are ignored
+# cond | condsig | condsp | condcat
+decoder_use_rhead_film=False  # SPL-style FiLM head on (z_j, j) instead of concat MLP
+# condsig | condcat
+decoder_r_max=1.0  # per-head cap in [0, R_max] (condsig / condcat)
+# condcat
+decoder_n_bins=11  # K bins; index 0 is explicit zero reward
+# set decoder_type above; unused flags are ignored by train.py
 
 # ===
 
@@ -120,6 +129,9 @@ run_train_beta() {
     --decoder_sparsity_mode="${decoder_sparsity_mode}" \
     --decoder_softplus_beta="${decoder_softplus_beta}" \
     --decoder_trunk_layernorm="${decoder_trunk_layernorm}" \
+    --decoder_use_rhead_film="${decoder_use_rhead_film}" \
+    --decoder_r_max="${decoder_r_max}" \
+    --decoder_n_bins="${decoder_n_bins}" \
     --encode_labels="${encode_labels}" \
     --encode_sources="${encode_sources}" \
     --n_epochs=500 \

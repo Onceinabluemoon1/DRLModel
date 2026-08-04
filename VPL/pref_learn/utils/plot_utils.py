@@ -87,46 +87,151 @@ def observation_xy_limits(
     return (x_min - x_pad, x_max + x_pad), (y_min - y_pad, y_max + y_pad)
 
 
+def latent_index_latex(head_idx: int) -> str:
+    """Matplotlib-safe latent index label, e.g. ``$z_{13}$`` (not ``$z_13$``)."""
+    return rf"$z_{{{int(head_idx)}}}$"
+
+
 def _draw_per_head_kl_bars(
     ax,
     *,
     kl_per_head: np.ndarray,
     title_fontsize: int,
+    head_order: list[int] | None = None,
 ) -> None:
     kl = np.asarray(kl_per_head, dtype=np.float64).reshape(-1)
-    x = np.arange(kl.shape[0])
-    ax.bar(x, kl, color="steelblue", width=0.7)
+    order = list(range(kl.shape[0])) if head_order is None else list(head_order)
+    order_arr = np.asarray(order, dtype=np.int64)
+    kl_ord = kl[order_arr]
+    x = np.arange(len(order))
+    ax.bar(x, kl_ord, color="steelblue", width=0.7)
     ax.set_xticks(x)
-    ax.set_xticklabels([f"$z_{j}$" for j in x], fontsize=8)
+    ax.set_xticklabels([latent_index_latex(j) for j in order], fontsize=8)
     ax.set_ylabel(r"$\mathrm{KL}$", fontsize=8)
     ax.set_title(r"per-head $\mathrm{KL}(q\|p)$", fontsize=title_fontsize)
     ax.set_ylim(bottom=0.0)
     ax.tick_params(axis="y", labelsize=8)
     ax.grid(axis="y", alpha=0.25)
+    # if kl_per_head_strata is not None:
+    #     kl_strata = np.asarray(kl_per_head_strata, dtype=np.float64).reshape(-1)
+    #     ...
 
 
-def _draw_per_head_std_bars(
+# def _draw_per_head_std_bars(
+#     ax,
+#     *,
+#     prior_std: np.ndarray,
+#     post_std: np.ndarray,
+#     title_fontsize: int,
+#     head_order: list[int] | None = None,
+# ) -> None:
+#     prior = np.asarray(prior_std, dtype=np.float64).reshape(-1)
+#     post = np.asarray(post_std, dtype=np.float64).reshape(-1)
+#     assert prior.shape == post.shape
+#     order = list(range(prior.shape[0])) if head_order is None else list(head_order)
+#     order_arr = np.asarray(order, dtype=np.int64)
+#     prior_ord = prior[order_arr]
+#     post_ord = post[order_arr]
+#     x = np.arange(len(order))
+#     w = 0.35
+#     ax.bar(x - w / 2, prior_ord, width=w, label="prior", color="coral")
+#     ax.bar(x + w / 2, post_ord, width=w, label="posterior", color="seagreen")
+#     ax.set_xticks(x)
+#     ax.set_xticklabels([latent_index_latex(j) for j in order], fontsize=8)
+#     ax.set_ylabel(r"$\sigma$", fontsize=8)
+#     ax.set_title(r"per-head $\sigma$ (prior | posterior)", fontsize=title_fontsize)
+#     ymax = float(max(float(np.max(prior)), float(np.max(post)), 1e-6)) * 1.15
+#     ax.set_ylim(0.0, ymax)
+#     ax.tick_params(axis="y", labelsize=8)
+#     ax.legend(fontsize=7, loc="best")
+#     ax.grid(axis="y", alpha=0.25)
+
+
+def _draw_per_head_mean_std(
     ax,
     *,
-    prior_std: np.ndarray,
-    post_std: np.ndarray,
+    post_mean: np.ndarray,
+    post_mean_std: np.ndarray,
     title_fontsize: int,
+    head_order: list[int] | None = None,
 ) -> None:
-    prior = np.asarray(prior_std, dtype=np.float64).reshape(-1)
-    post = np.asarray(post_std, dtype=np.float64).reshape(-1)
-    assert prior.shape == post.shape
-    x = np.arange(prior.shape[0])
-    w = 0.35
-    ax.bar(x - w / 2, prior, width=w, label="prior", color="coral")
-    ax.bar(x + w / 2, post, width=w, label="posterior", color="seagreen")
+    mu = np.asarray(post_mean, dtype=np.float64).reshape(-1)
+    mu_std = np.asarray(post_mean_std, dtype=np.float64).reshape(-1)
+    assert mu.shape == mu_std.shape
+    order = list(range(mu.shape[0])) if head_order is None else list(head_order)
+    order_arr = np.asarray(order, dtype=np.int64)
+    mu_ord = mu[order_arr]
+    mu_std_ord = mu_std[order_arr]
+    x = np.arange(len(order))
+    ax.errorbar(
+        x,
+        mu_ord,
+        yerr=mu_std_ord,
+        fmt="o",
+        color="seagreen",
+        ecolor="seagreen",
+        elinewidth=1.2,
+        capsize=3,
+        markersize=5,
+    )
+    ax.axhline(0.0, color="gray", linestyle="--", linewidth=0.8, alpha=0.7)
     ax.set_xticks(x)
-    ax.set_xticklabels([f"$z_{j}$" for j in x], fontsize=8)
-    ax.set_ylabel(r"$\sigma$", fontsize=8)
-    ax.set_title(r"per-head $\sigma$ (prior | posterior)", fontsize=title_fontsize)
-    ymax = float(max(float(np.max(prior)), float(np.max(post)), 1e-6)) * 1.15
-    ax.set_ylim(0.0, ymax)
+    ax.set_xticklabels([latent_index_latex(j) for j in order], fontsize=8)
+    ax.set_ylabel(r"$\bar{\mu} \pm \mathrm{std}(\mu)$", fontsize=8)
+    ax.set_title(r"per-head $\bar{\mu} \pm \mathrm{std}_q(\mu)$", fontsize=title_fontsize)
+    y_abs = float(np.max(np.abs(mu_ord) + mu_std_ord)) if mu_ord.size > 0 else 1.0
+    y_pad = max(y_abs * 0.15, 1e-3)
+    ax.set_ylim(-y_abs - y_pad, y_abs + y_pad)
     ax.tick_params(axis="y", labelsize=8)
-    ax.legend(fontsize=7, loc="best")
+    ax.grid(axis="y", alpha=0.25)
+
+
+def _draw_per_head_post_mean_std_across_strata_bars(
+    ax,
+    *,
+    post_mean_std_across_strata: np.ndarray,
+    title_fontsize: int,
+    head_order: list[int] | None = None,
+) -> None:
+    sig = np.asarray(post_mean_std_across_strata, dtype=np.float64).reshape(-1)
+    order = list(range(sig.shape[0])) if head_order is None else list(head_order)
+    order_arr = np.asarray(order, dtype=np.int64)
+    sig_ord = sig[order_arr]
+    x = np.arange(len(order))
+    ax.bar(x, sig_ord, color="seagreen", width=0.7)
+    ax.set_xticks(x)
+    ax.set_xticklabels([latent_index_latex(j) for j in order], fontsize=8)
+    ax.set_ylabel(r"$\mathrm{std}_{\mathrm{strata}}(\bar{\mu})$", fontsize=8)
+    ax.set_title(
+        r"per-head $\mathrm{std}_{\mathrm{strata}}(\bar{\mu})$",
+        fontsize=title_fontsize,
+    )
+    ymax = float(np.nanmax(sig_ord)) if sig_ord.size > 0 else 1.0
+    ax.set_ylim(0.0, max(ymax * 1.15, 1e-6))
+    ax.tick_params(axis="y", labelsize=8)
+    ax.grid(axis="y", alpha=0.25)
+
+
+def _draw_per_head_theta_bars(
+    ax,
+    *,
+    theta_mean_per_head: np.ndarray,
+    title_fontsize: int,
+    head_order: list[int] | None = None,
+) -> None:
+    theta = np.asarray(theta_mean_per_head, dtype=np.float64).reshape(-1)
+    order = list(range(theta.shape[0])) if head_order is None else list(head_order)
+    order_arr = np.asarray(order, dtype=np.int64)
+    theta_ord = theta[order_arr]
+    x = np.arange(len(order))
+    ax.bar(x, theta_ord, color="mediumpurple", width=0.7)
+    ax.set_xticks(x)
+    ax.set_xticklabels([latent_index_latex(j) for j in order], fontsize=8)
+    ax.set_ylabel(r"$\mathbb{E}[\theta]$", fontsize=8)
+    ax.set_title(r"per-head mean $\theta(s)$", fontsize=title_fontsize)
+    ymax = float(np.nanmax(theta_ord)) if theta_ord.size > 0 else 1.0
+    ax.set_ylim(0.0, max(ymax * 1.15, 1e-6))
+    ax.tick_params(axis="y", labelsize=8)
     ax.grid(axis="y", alpha=0.25)
 
 
@@ -154,8 +259,12 @@ def plot_observation_rewards_by_annotator_mode(
     title_fontsize: int = 10,
     highlight_panel_indices: list[int] | None = None,
     elbo_kl_per_head: np.ndarray | None = None,
-    elbo_prior_std: np.ndarray | None = None,
-    elbo_post_std: np.ndarray | None = None,
+    elbo_post_mean: np.ndarray | None = None,
+    elbo_post_mean_std: np.ndarray | None = None,
+    elbo_post_mean_std_across_strata: np.ndarray | None = None,
+    theta_mean_per_head: np.ndarray | None = None,
+    elbo_head_order: list[int] | None = None,
+    colorbar_label: str = "r(s)",
 ):
     """
     One scatter panel per annotator mode; each uses only (obs, r) from that mode.
@@ -164,10 +273,15 @@ def plot_observation_rewards_by_annotator_mode(
         per_mode_obs: length M; each entry (N_m, O) or empty (0, O).
         per_mode_r: length M; each (N_m,) or (N_m, 1) aligned with ``per_mode_obs``.
         mode_titles: length M subplot titles (e.g. ANNOTATOR_SPECS ``name``).
-        elbo_kl_per_head / elbo_prior_std / elbo_post_std: optional ``(Z,)`` ELBO
-            diagnostics. When set, adds KL and prior|posterior-σ bar panels. If the
-            aggregate (highlight) row has ≥2 free cells after it, bars go there;
-            otherwise they start a new row.
+        elbo_kl_per_head: optional ``(Z,)`` global KL (bar heights + head ordering).
+        elbo_post_mean / elbo_post_mean_std: optional ``(Z,)`` within-strata encoder-μ
+            mean and cross-query std of μ (strata panels). elbo_post_mean_std_across_strata:
+            optional ``(Z,)`` std of per-strata ``\bar{\mu}`` across pref modes (aggregate
+            panel only). theta_mean_per_head: optional ``(Z,)`` strata mean
+            ``softplus(w(h))`` (multi only). When set with ``elbo_kl_per_head``, adds KL,
+            μ diagnostic, and θ bar panels after the aggregate (highlight) panel when
+            that row has enough free cells; else they start a new row.
+        elbo_head_order: optional head indices (descending global KL) for bar-panel x order.
     """
     n_modes = len(per_mode_obs)
     assert len(per_mode_r) == n_modes == len(mode_titles), (
@@ -190,11 +304,18 @@ def plot_observation_rewards_by_annotator_mode(
     ncols = min(4, n_modes) if ncols is None else min(int(ncols), max(n_modes, 1))
     map_nrows = int(np.ceil(n_modes / ncols))
     show_elbo = elbo_kl_per_head is not None
+    show_theta = theta_mean_per_head is not None
     kl_slot: int | None = None
-    std_slot: int | None = None
+    mean_std_slot: int | None = None
+    theta_slot: int | None = None
     if show_elbo:
-        assert elbo_prior_std is not None and elbo_post_std is not None
-        #* glue KL/σ after aggregate when that row has ≥2 free cells; else new row
+        has_within_strata_mu = (
+            elbo_post_mean is not None and elbo_post_mean_std is not None
+        )
+        has_across_strata_mu_std = elbo_post_mean_std_across_strata is not None
+        assert has_within_strata_mu or has_across_strata_mu_std
+        n_diag_panels = 2 + int(show_theta)
+        #* glue KL / μ±σ / θ after aggregate when that row has enough free cells
         agg_idx = (
             int(highlight_panel_indices[0])
             if highlight_panel_indices
@@ -203,14 +324,16 @@ def plot_observation_rewards_by_annotator_mode(
         free_after_agg = (
             ncols - (agg_idx % ncols) - 1 if agg_idx is not None else 0
         )
-        if agg_idx is not None and free_after_agg >= 2:
+        if agg_idx is not None and free_after_agg >= n_diag_panels:
             nrows = map_nrows
             kl_slot = agg_idx + 1
-            std_slot = agg_idx + 2
+            mean_std_slot = agg_idx + 2
+            theta_slot = agg_idx + 3 if show_theta else None
         else:
             nrows = map_nrows + 1
             kl_slot = map_nrows * ncols
-            std_slot = map_nrows * ncols + 1
+            mean_std_slot = map_nrows * ncols + 1
+            theta_slot = map_nrows * ncols + 2 if show_theta else None
     else:
         nrows = map_nrows
     n_suptitle_lines = (suptitle.count("\n") + 1) if suptitle else 0
@@ -306,31 +429,50 @@ def plot_observation_rewards_by_annotator_mode(
                 spine.set_edgecolor("blue")
                 spine.set_linewidth(2.5)
 
-    keep_slots = {kl_slot, std_slot}
+    keep_slots = {kl_slot, mean_std_slot, theta_slot}
     for k in range(n_modes, len(flat_axes)):
         if k in keep_slots:
             continue
         flat_axes[k].set_visible(False)
 
     if show_elbo:
-        assert kl_slot is not None and std_slot is not None
+        assert kl_slot is not None and mean_std_slot is not None
         _draw_per_head_kl_bars(
             flat_axes[kl_slot],
             kl_per_head=elbo_kl_per_head,
             title_fontsize=title_fontsize,
+            head_order=elbo_head_order,
         )
-        _draw_per_head_std_bars(
-            flat_axes[std_slot],
-            prior_std=elbo_prior_std,
-            post_std=elbo_post_std,
-            title_fontsize=title_fontsize,
-        )
+        if elbo_post_mean_std_across_strata is not None:
+            _draw_per_head_post_mean_std_across_strata_bars(
+                flat_axes[mean_std_slot],
+                post_mean_std_across_strata=elbo_post_mean_std_across_strata,
+                title_fontsize=title_fontsize,
+                head_order=elbo_head_order,
+            )
+        else:
+            assert elbo_post_mean is not None and elbo_post_mean_std is not None
+            _draw_per_head_mean_std(
+                flat_axes[mean_std_slot],
+                post_mean=elbo_post_mean,
+                post_mean_std=elbo_post_mean_std,
+                title_fontsize=title_fontsize,
+                head_order=elbo_head_order,
+            )
+        if show_theta:
+            assert theta_slot is not None and theta_mean_per_head is not None
+            _draw_per_head_theta_bars(
+                flat_axes[theta_slot],
+                theta_mean_per_head=theta_mean_per_head,
+                title_fontsize=title_fontsize,
+                head_order=elbo_head_order,
+            )
 
     # * Shared color scale across modes (matplotlib needs a nonempty array on the mappable).
     any_data = all_r.size > 0
     if any_data:
         mappable.set_array(np.linspace(vmin, vmax, 256))
-        cb = fig.colorbar(mappable, cax=cax, label="r(s)")
+        cb = fig.colorbar(mappable, cax=cax, label=colorbar_label)
         cb.ax.tick_params(labelsize=8)
     else:
         cax.set_visible(False)
