@@ -65,15 +65,9 @@ encode_labels=True  # pair encoder: concat y into pair_mlp (q(z|s1,s2,y))
 encode_sources=False  # pair encoder: one-hot GT source_variable (InfoMEC; relabelled dataset)
 
 # * 2 goals
-# pref_dataset="sort_2goals_T=1_Q=5000"
-# pref_dataset="sort_2goals_T=10_Q=5000"
-# pref_dataset="sort_2goals_T=24_Q=5000"
 # pref_dataset="sort_2goals_obs=15_T=1_Q=20000"
 # pref_dataset="sort_2goals_obs=15_T=25_Q=20000"
 # * 4 goals
-# pref_dataset="sort_4goals_T=1_Q=20000"
-# pref_dataset="sort_4goals_T=10_Q=20000"
-# pref_dataset="sort_4goals_T=25_Q=20000"
 # pref_dataset="sort_4goals_obs=15_T=1_Q=20000"
 pref_dataset="sort_4goals_obs=15_T=25_Q=20000"
 

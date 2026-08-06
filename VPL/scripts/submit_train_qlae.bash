@@ -60,15 +60,9 @@ decoder_n_bins=11  # K bins; index 0 is explicit zero reward
 # ===
 
 # * 2 goals
-# pref_dataset="sort_2goals_T=1_Q=5000"
-# pref_dataset="sort_2goals_T=10_Q=5000"
-# pref_dataset="sort_2goals_T=24_Q=5000"
 # pref_dataset="sort_2goals_obs=15_T=1_Q=20000"
 # pref_dataset="sort_2goals_obs=15_T=25_Q=20000"
 # * 4 goals
-# pref_dataset="sort_4goals_T=1_Q=20000"
-# pref_dataset="sort_4goals_T=10_Q=20000"
-# pref_dataset="sort_4goals_T=25_Q=20000"
 # pref_dataset="sort_4goals_obs=15_T=1_Q=20000"
 pref_dataset="sort_4goals_obs=15_T=25_Q=20000"
 
