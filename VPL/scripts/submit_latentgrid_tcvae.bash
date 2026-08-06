@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=train_tcvae_grid
 #SBATCH --gres=shard:12
-#SBATCH --array=0-47%8
+#SBATCH --array=0-34%8
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=16G
 #SBATCH --output=/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/logs_slurm/train_tcvae_grid/train_tcvae_grid_%A_%a.out
@@ -36,10 +36,10 @@ TC_WEIGHTS=(
 LATENT_DIMS=(
     2
     4
+    6
     8
-    10
+    # 10
     16
-    24
 )
 model_type=TCVAE
 sweep_folder_tag=latentgrid
@@ -192,7 +192,7 @@ fi
 
 : <<'EOF'
 # Slurm array (parallel; one (ld, tc_weight) pair per task; shared RUN_TIMESTAMP):
-# Update #SBATCH --array=0-N to N=(num_tc_weights * num_latent_dims - 1); default 8×6=48 → 0-47.
+# Update #SBATCH --array=0-N to N=(num_tc_weights * num_latent_dims - 1); default 7×5=35 → 0-34.
 sbatch --export=ALL,RUN_TIMESTAMP=$(date +%Y%m%d_%H%M%S) scripts/submit_train_tcvae_grid.bash
 
 # Serial loop (one GPU; full grid in order; shared W&B group):

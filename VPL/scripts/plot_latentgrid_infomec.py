@@ -56,9 +56,9 @@ TCVAE_WANDB_METRICS: list[tuple[str, str, bool]] = [
 
 QLAE_WANDB_METRICS: WandbMetricRow = [
     ("recon_loss", "train/recon_loss", False),
+    ("frac_recon2total", "train/frac_recon2total", False),
     ("enc_zc_cross_std", "train/enc_zc_cross_std", True),
     ("enc_zq_cross_std", "train/enc_zq_cross_std", True),
-    ("enc_zq_unique_mean", "train/enc_zq_unique_mean", False),
 ]
 
 INFOMEC_METRICS: list[tuple[str, str, bool]] = [
@@ -510,8 +510,15 @@ def plot_heatmap_ax_raw(
     xlabel: str | None = None,
 ) -> plt.cm.ScalarMappable:
     norm = _norm_for_grid(grid, field=field, log_scale=log_scale)
+    plot_grid = grid
+    if log_scale:
+        plot_grid = np.array(grid, copy=True, dtype=np.float64)
+        vmin = float(getattr(norm, "vmin", 1e-12))
+        # LogNorm marks non-positive values invalid; clamp for display only.
+        pos_finite = np.isfinite(plot_grid) & (plot_grid > 0.0)
+        plot_grid = np.where(pos_finite, plot_grid, np.where(np.isfinite(plot_grid), vmin, np.nan))
     im = ax.imshow(
-        grid,
+        plot_grid,
         origin="lower",
         aspect="auto",
         cmap="viridis",

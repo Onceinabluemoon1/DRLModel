@@ -38,6 +38,7 @@ from pref_learn.models.nets import (  # noqa: E402
     normalize_decoder_type,
 )
 from pref_learn.models.qlae import QLAE  # noqa: E402
+from pref_learn.models.quantizer import fsq_per_head_bin_entropy  # noqa: E402
 from pref_learn.models.utils import logvar_to_std  # noqa: E402
 from pref_learn.models.vae import VAEModel  # noqa: E402
 from pref_learn.utils.disentangle_sweep import (  # noqa: E402
@@ -47,6 +48,7 @@ from pref_learn.utils.disentangle_sweep import (  # noqa: E402
 from pref_learn.utils.plot_utils import (  # noqa: E402
     latent_index_latex,
     observation_xy_limits,
+    per_head_l_nuisance,
     plot_observation_rewards_by_annotator_mode,
 )
 
@@ -889,20 +891,76 @@ def batched_per_head_elbo_stats(
     }
 
 
-def std_post_mean_across_strata(
+@torch.no_grad()
+def batched_per_head_zq_std(
     *,
-    per_strata_post_mean: list[np.ndarray],
-) -> np.ndarray | None:
-    """Std of per-strata ``\bar{\mu}_j`` across pref modes; ``(Z,)``."""
-    if not per_strata_post_mean:
-        return None
-    stacked = np.stack(
-        [np.asarray(m, dtype=np.float64).reshape(-1) for m in per_strata_post_mean],
-        axis=0,
-    )  # (S, Z)
-    if stacked.shape[0] == 1:
-        return np.zeros(stacked.shape[1], dtype=np.float64)
-    return stacked.std(axis=0, ddof=1)
+    model: QLAE,
+    obs1: np.ndarray,
+    obs2: np.ndarray,
+    labels: np.ndarray,
+    batch_size: int,
+    device: torch.device,
+    source: np.ndarray | None = None,
+) -> dict[str, np.ndarray]:
+    """Per-head ``z_q`` std and FSQ bin entropy over full query split; ``(Z,)``."""
+    q_n = int(len(obs1))
+    z_dim = int(model.latent_dim)
+    zq_chunks: list[torch.Tensor] = []
+    z_bins_chunks: list[torch.Tensor] = []
+
+    for start in range(0, q_n, batch_size):
+        end = min(start + batch_size, q_n)
+        o1 = torch.from_numpy(obs1[start:end]).float().to(device)
+        o2 = torch.from_numpy(obs2[start:end]).float().to(device)
+        y = torch.from_numpy(labels[start:end]).float().to(device)
+        enc_kw: dict[str, torch.Tensor] = {}
+        if plt_infomec.model_encode_sources(model=model):
+            if source is None:
+                raise ValueError("Model has encode_sources=True but source is None.")
+            enc_kw["source"] = (
+                torch.from_numpy(source[start:end]).long().to(device)
+            )
+        z_c = model.encode_continuous(o1, o2, y, **enc_kw)  # (B, Z)
+        quant = model.quantize(z_c)
+        z_q = quant["z_q"]
+        z_bins = quant["z_bins"]
+        zq_chunks.append(z_q)
+        z_bins_chunks.append(z_bins)
+
+    assert zq_chunks
+    z_q_all = torch.cat(zq_chunks, dim=0)  # (Q, Z)
+    z_bins_all = torch.cat(z_bins_chunks, dim=0)  # (Q, Z)
+    n_total = int(z_q_all.shape[0])
+    zq_mean = z_q_all.mean(dim=0)
+    if n_total > 1:
+        zq_std = z_q_all.std(dim=0, unbiased=False)
+    else:
+        zq_std = torch.zeros(z_dim, device=device)
+    zq_bin_entropy = fsq_per_head_bin_entropy(
+        z_bins_all,
+        num_bins=int(model.num_quantized_values),
+    )
+    return {
+        "zq_std_per_head": zq_std.detach().cpu().numpy(),
+        "zq_mean_per_head": zq_mean.detach().cpu().numpy(),
+        "zq_bin_entropy_per_head": zq_bin_entropy.detach().cpu().numpy(),
+    }
+
+
+# def std_post_mean_across_strata(
+#     *,
+#     per_strata_post_mean: list[np.ndarray],
+# ) -> np.ndarray | None:
+#     """Std of per-strata ``\bar{\mu}_j`` across pref modes; ``(Z,)``."""
+#     if not per_strata_post_mean:
+#         return None
+#     stacked = np.stack(
+#         [np.asarray(m, dtype=np.float64).reshape(-1) for m in per_strata_post_mean],
+#         axis=0,
+#     )  # (S, Z)
+#     if stacked.shape[0] == 1:
+#         return np.zeros(stacked.shape[1], dtype=np.float64)
+#     return stacked.std(axis=0, ddof=1)
 
 
 @torch.no_grad()
@@ -1544,6 +1602,7 @@ def head_panel_titles(
     latent_dim: int,
     n_panels: int = MAX_HEAD_PANELS,
     kl_per_head: np.ndarray | None = None,
+    score_panel_prefix: str = "KL",
     head_order: list[int] | None = None,
 ) -> list[str]:
     n_active = min(int(latent_dim), MAX_HEAD_PANELS)
@@ -1556,7 +1615,7 @@ def head_panel_titles(
         if head_idx < n_active:
             z_label = latent_index_latex(head_idx=head_idx)
             if kl is not None and head_idx < kl.shape[0]:
-                titles.append(f"{z_label} (KL={kl[head_idx]:.3g})")
+                titles.append(f"{z_label} ({score_panel_prefix}={kl[head_idx]:.3g})")
             else:
                 titles.append(z_label)
         else:
@@ -1640,9 +1699,14 @@ def save_per_head_reward_figure(
     summed_rewards: np.ndarray | None = None,
     recon_loss: float | None = None,
     elbo_kl_per_head: np.ndarray | None = None,
+    head_order_score_ylabel: str | None = None,
+    head_order_score_title: str | None = None,
+    head_order_score_panel_prefix: str | None = None,
+    qlae_bin_entropy_per_head: np.ndarray | None = None,
     elbo_post_mean: np.ndarray | None = None,
     elbo_post_mean_std: np.ndarray | None = None,
-    elbo_post_mean_std_across_strata: np.ndarray | None = None,
+    # elbo_post_mean_std_across_strata: np.ndarray | None = None,
+    elbo_l_nuisance_per_head: np.ndarray | None = None,
     theta_mean_per_head: np.ndarray | None = None,
     raw_reward_standardize: bool = False,
     raw_standardize_scope: Literal["subset", "global"] | None = None,
@@ -1674,6 +1738,11 @@ def save_per_head_reward_figure(
         latent_dim=nz,
         n_panels=n_panels,
         kl_per_head=elbo_kl_per_head,
+        score_panel_prefix=(
+            head_order_score_panel_prefix
+            if head_order_score_panel_prefix is not None
+            else "KL"
+        ),
         head_order=scatter_order,
     )
     highlight_panel_indices: list[int] | None = None
@@ -1748,9 +1817,14 @@ def save_per_head_reward_figure(
         reward_vmax=vmax,
         highlight_panel_indices=highlight_panel_indices,
         elbo_kl_per_head=elbo_kl_per_head,
+        head_order_score_ylabel=head_order_score_ylabel,
+        head_order_score_title=head_order_score_title,
+        head_order_score_panel_prefix=head_order_score_panel_prefix,
+        qlae_bin_entropy_per_head=qlae_bin_entropy_per_head,
         elbo_post_mean=elbo_post_mean,
         elbo_post_mean_std=elbo_post_mean_std,
-        elbo_post_mean_std_across_strata=elbo_post_mean_std_across_strata,
+        # elbo_post_mean_std_across_strata=elbo_post_mean_std_across_strata,
+        elbo_l_nuisance_per_head=elbo_l_nuisance_per_head,
         theta_mean_per_head=theta_mean_per_head,
         elbo_head_order=bar_order,
     )
@@ -1988,10 +2062,21 @@ def main() -> None:
                 "expected VAEModel or QLAE."
             )
 
-        #* full-split ELBO head stats (shared across every mode / aggregate PNG)
+        #* full-split head-order stats (shared across every mode / aggregate PNG)
         elbo_stats: dict[str, np.ndarray] | None = None
+        qlae_head_stats: dict[str, np.ndarray] | None = None
         if isinstance(model, VAEModel):
             elbo_stats = batched_per_head_elbo_stats(
+                model=model,
+                obs1=obs1,
+                obs2=obs2,
+                labels=labels,
+                batch_size=batch_size,
+                device=device,
+                source=query_source,
+            )
+        elif isinstance(model, QLAE):
+            qlae_head_stats = batched_per_head_zq_std(
                 model=model,
                 obs1=obs1,
                 obs2=obs2,
@@ -2028,6 +2113,14 @@ def main() -> None:
                 "prior_std": elbo_stats["prior_std"].tolist(),
                 "post_mean": elbo_stats["post_mean"].tolist(),
                 "post_mean_std": elbo_stats["post_mean_std"].tolist(),
+            }
+        if qlae_head_stats is not None:
+            entry["qlae_head_stats"] = {
+                "zq_std_per_head": qlae_head_stats["zq_std_per_head"].tolist(),
+                "zq_mean_per_head": qlae_head_stats["zq_mean_per_head"].tolist(),
+                "zq_bin_entropy_per_head": qlae_head_stats[
+                    "zq_bin_entropy_per_head"
+                ].tolist(),
             }
         if stratify_pref_mode:
             entry["stratified_pngs"] = {}
@@ -2082,6 +2175,14 @@ def main() -> None:
                 save_kw["elbo_kl_per_head"] = elbo_stats["kl_per_head"]
                 save_kw["elbo_post_mean"] = elbo_stats["post_mean"]
                 save_kw["elbo_post_mean_std"] = elbo_stats["post_mean_std"]
+            if qlae_head_stats is not None:
+                save_kw["elbo_kl_per_head"] = qlae_head_stats["zq_std_per_head"]
+                save_kw["head_order_score_ylabel"] = r"$\mathrm{std}_q(z)$"
+                save_kw["head_order_score_title"] = r"per-head $\mathrm{std}_q(z_q)$"
+                save_kw["head_order_score_panel_prefix"] = "σ_q"
+                save_kw["qlae_bin_entropy_per_head"] = qlae_head_stats[
+                    "zq_bin_entropy_per_head"
+                ]
             if global_theta_mean is not None:
                 save_kw["theta_mean_per_head"] = global_theta_mean
 
@@ -2195,7 +2296,7 @@ def main() -> None:
             )
 
             stratified: dict[str, Any] = {}
-            strata_post_means: list[np.ndarray] = []
+            # strata_post_means: list[np.ndarray] = []
             for (
                 panel_idx,
                 panel_name,
@@ -2250,32 +2351,39 @@ def main() -> None:
                     panel_save_kw["raw_reward_standardize"] = True
                     panel_save_kw["raw_standardize_scope"] = raw_standardize_scope
                 if elbo_stats is not None and isinstance(model, VAEModel) and n_q_p > 0:
+                    panel_elbo = batched_per_head_elbo_stats(
+                        model=model,
+                        obs1=obs_p,
+                        obs2=obs2_p,
+                        labels=labels_p,
+                        batch_size=batch_size,
+                        device=device,
+                        source=source_p,
+                    )
+                    panel_save_kw["elbo_post_mean"] = panel_elbo["post_mean"]
+                    panel_save_kw["elbo_post_mean_std"] = panel_elbo["post_mean_std"]
+                    panel_save_kw.pop("elbo_l_nuisance_per_head", None)
                     if panel_name == "aggregate":
-                        across = std_post_mean_across_strata(
-                            per_strata_post_mean=strata_post_means,
+                        panel_save_kw["elbo_l_nuisance_per_head"] = per_head_l_nuisance(
+                            post_mean=panel_elbo["post_mean"],
+                            post_mean_std=panel_elbo["post_mean_std"],
                         )
-                        if across is not None:
-                            panel_save_kw["elbo_post_mean_std_across_strata"] = across
-                            panel_save_kw.pop("elbo_post_mean", None)
-                            panel_save_kw.pop("elbo_post_mean_std", None)
-                    else:
-                        panel_elbo = batched_per_head_elbo_stats(
-                            model=model,
-                            obs1=obs_p,
-                            obs2=obs2_p,
-                            labels=labels_p,
-                            batch_size=batch_size,
-                            device=device,
-                            source=source_p,
-                        )
-                        panel_save_kw["elbo_post_mean"] = panel_elbo["post_mean"]
-                        panel_save_kw["elbo_post_mean_std"] = panel_elbo["post_mean_std"]
-                        strata_post_means.append(panel_elbo["post_mean"])
+                    # if panel_name != "aggregate":
+                    #     strata_post_means.append(panel_elbo["post_mean"])
+                    # if panel_name == "aggregate":
+                    #     across = std_post_mean_across_strata(
+                    #         per_strata_post_mean=strata_post_means,
+                    #     )
+                    #     if across is not None:
+                    #         panel_save_kw["elbo_post_mean_std_across_strata"] = across
+                    #         panel_save_kw.pop("elbo_post_mean", None)
+                    #         panel_save_kw.pop("elbo_post_mean_std", None)
                 elif elbo_stats is not None:
                     panel_save_kw.pop("elbo_kl_per_head", None)
                     panel_save_kw.pop("elbo_post_mean", None)
                     panel_save_kw.pop("elbo_post_mean_std", None)
-                    panel_save_kw.pop("elbo_post_mean_std_across_strata", None)
+                    panel_save_kw.pop("elbo_l_nuisance_per_head", None)
+                    # panel_save_kw.pop("elbo_post_mean_std_across_strata", None)
                 if multi_decoder and n_q_p > 0:
                     panel_save_kw["theta_mean_per_head"] = batched_mean_theta_per_head(
                         decoder=model.decoder,

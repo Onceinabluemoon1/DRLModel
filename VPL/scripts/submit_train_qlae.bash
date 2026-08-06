@@ -30,6 +30,9 @@ set_size=16  # -1 = use full S from dataset; else truncate preference sets to th
 
 loss_aggregation=mean
 num_quantized_values=5
+quantizer_bound_half_width=1.0  # FSQ R: z_c, z_q in [-R, R]
+quantizer_use_ifsq=False  # True → R·(2σ(αz)-1) instead of R·tanh
+quantizer_ifsq_alpha=1.6
 encode_labels=True  # pair encoder: concat y into pair_mlp (q(z|s1,s2,y))
 encode_sources=False  # pair encoder: one-hot GT source_variable (InfoMEC; relabelled dataset)
 
@@ -95,6 +98,9 @@ run_train_qlae() {
     --latent_dim=${latent_dim} \
     --hidden_dim=${hidden_dim} \
     --num_quantized_values=${num_quantized_values} \
+    --quantizer_bound_half_width=${quantizer_bound_half_width} \
+    --quantizer_use_ifsq=${quantizer_use_ifsq} \
+    --quantizer_ifsq_alpha=${quantizer_ifsq_alpha} \
     --weight_decay=${weight_decay} \
     --loss_aggregation=${loss_aggregation} \
     --seed=42 \

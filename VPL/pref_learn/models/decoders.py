@@ -66,7 +66,7 @@ class MultiplicativeDecoder(nn.Module):
         # * trunk: (B, A, T, O) → (B, A, T, H)
         theta = self.theta_from_obs(obs)  # (B, A, T, Z)
         if self.sparsity_mode == "group":
-            head_energy = (theta**2).mean(dim=(0, 1, 2))
+            head_energy = (theta**2).mean(dim=(0, 1, 2))  # (Z,)
             self.last_w_sparsity = torch.sqrt(head_energy + 1e-12).mean()
         else:
             self.last_w_sparsity = theta.mean()

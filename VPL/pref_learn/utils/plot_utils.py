@@ -92,6 +92,30 @@ def latent_index_latex(head_idx: int) -> str:
     return rf"$z_{{{int(head_idx)}}}$"
 
 
+def _draw_per_head_score_bars(
+    ax,
+    *,
+    score_per_head: np.ndarray,
+    ylabel: str,
+    title: str,
+    title_fontsize: int,
+    head_order: list[int] | None = None,
+) -> None:
+    score = np.asarray(score_per_head, dtype=np.float64).reshape(-1)
+    order = list(range(score.shape[0])) if head_order is None else list(head_order)
+    order_arr = np.asarray(order, dtype=np.int64)
+    score_ord = score[order_arr]
+    x = np.arange(len(order))
+    ax.bar(x, score_ord, color="steelblue", width=0.7)
+    ax.set_xticks(x)
+    ax.set_xticklabels([latent_index_latex(j) for j in order], fontsize=8)
+    ax.set_ylabel(ylabel, fontsize=8)
+    ax.set_title(title, fontsize=title_fontsize)
+    ax.set_ylim(bottom=0.0)
+    ax.tick_params(axis="y", labelsize=8)
+    ax.grid(axis="y", alpha=0.25)
+
+
 def _draw_per_head_kl_bars(
     ax,
     *,
@@ -99,19 +123,14 @@ def _draw_per_head_kl_bars(
     title_fontsize: int,
     head_order: list[int] | None = None,
 ) -> None:
-    kl = np.asarray(kl_per_head, dtype=np.float64).reshape(-1)
-    order = list(range(kl.shape[0])) if head_order is None else list(head_order)
-    order_arr = np.asarray(order, dtype=np.int64)
-    kl_ord = kl[order_arr]
-    x = np.arange(len(order))
-    ax.bar(x, kl_ord, color="steelblue", width=0.7)
-    ax.set_xticks(x)
-    ax.set_xticklabels([latent_index_latex(j) for j in order], fontsize=8)
-    ax.set_ylabel(r"$\mathrm{KL}$", fontsize=8)
-    ax.set_title(r"per-head $\mathrm{KL}(q\|p)$", fontsize=title_fontsize)
-    ax.set_ylim(bottom=0.0)
-    ax.tick_params(axis="y", labelsize=8)
-    ax.grid(axis="y", alpha=0.25)
+    _draw_per_head_score_bars(
+        ax,
+        score_per_head=kl_per_head,
+        ylabel=r"$\mathrm{KL}$",
+        title=r"per-head $\mathrm{KL}(q\|p)$",
+        title_fontsize=title_fontsize,
+        head_order=head_order,
+    )
     # if kl_per_head_strata is not None:
     #     kl_strata = np.asarray(kl_per_head_strata, dtype=np.float64).reshape(-1)
     #     ...
@@ -186,28 +205,68 @@ def _draw_per_head_mean_std(
     ax.grid(axis="y", alpha=0.25)
 
 
-def _draw_per_head_post_mean_std_across_strata_bars(
+# def _draw_per_head_post_mean_std_across_strata_bars(
+#     ax,
+#     *,
+#     post_mean_std_across_strata: np.ndarray,
+#     title_fontsize: int,
+#     head_order: list[int] | None = None,
+# ) -> None:
+#     sig = np.asarray(post_mean_std_across_strata, dtype=np.float64).reshape(-1)
+#     order = list(range(sig.shape[0])) if head_order is None else list(head_order)
+#     order_arr = np.asarray(order, dtype=np.int64)
+#     sig_ord = sig[order_arr]
+#     x = np.arange(len(order))
+#     ax.bar(x, sig_ord, color="seagreen", width=0.7)
+#     ax.set_xticks(x)
+#     ax.set_xticklabels([latent_index_latex(j) for j in order], fontsize=8)
+#     ax.set_ylabel(r"$\mathrm{std}_{\mathrm{strata}}(\bar{\mu})$", fontsize=8)
+#     ax.set_title(
+#         r"per-head $\mathrm{std}_{\mathrm{strata}}(\bar{\mu})$",
+#         fontsize=title_fontsize,
+#     )
+#     ymax = float(np.nanmax(sig_ord)) if sig_ord.size > 0 else 1.0
+#     ax.set_ylim(0.0, max(ymax * 1.15, 1e-6))
+#     ax.tick_params(axis="y", labelsize=8)
+#     ax.grid(axis="y", alpha=0.25)
+
+
+def per_head_l_nuisance(
+    *,
+    post_mean: np.ndarray,
+    post_mean_std: np.ndarray,
+    eps: float = 1e-6,
+) -> np.ndarray:
+    r"""Per-head ``(\bar{\mu}_j)^2 / (\mathrm{Var}(\mu_j) + \varepsilon)``; ``(Z,)``."""
+    mu = np.asarray(post_mean, dtype=np.float64).reshape(-1)
+    std = np.asarray(post_mean_std, dtype=np.float64).reshape(-1)
+    assert mu.shape == std.shape
+    var = std * std
+    return (mu * mu) / (var + float(eps))
+
+
+def _draw_per_head_l_nuisance_bars(
     ax,
     *,
-    post_mean_std_across_strata: np.ndarray,
+    l_nuisance_per_head: np.ndarray,
     title_fontsize: int,
     head_order: list[int] | None = None,
 ) -> None:
-    sig = np.asarray(post_mean_std_across_strata, dtype=np.float64).reshape(-1)
-    order = list(range(sig.shape[0])) if head_order is None else list(head_order)
+    ln = np.asarray(l_nuisance_per_head, dtype=np.float64).reshape(-1)
+    order = list(range(ln.shape[0])) if head_order is None else list(head_order)
     order_arr = np.asarray(order, dtype=np.int64)
-    sig_ord = sig[order_arr]
+    ln_ord = ln[order_arr]
     x = np.arange(len(order))
-    ax.bar(x, sig_ord, color="seagreen", width=0.7)
+    ax.bar(x, ln_ord, color="darkorange", width=0.7)
     ax.set_xticks(x)
     ax.set_xticklabels([latent_index_latex(j) for j in order], fontsize=8)
-    ax.set_ylabel(r"$\mathrm{std}_{\mathrm{strata}}(\bar{\mu})$", fontsize=8)
+    ax.set_ylabel(r"$L_{\mathrm{nuis},j}$", fontsize=8)
     ax.set_title(
-        r"per-head $\mathrm{std}_{\mathrm{strata}}(\bar{\mu})$",
+        r"per-head $L_{\mathrm{nuis},j}=\bar{\mu}_j^2/(\mathrm{Var}(\mu_j)+\varepsilon)$",
         fontsize=title_fontsize,
     )
-    ymax = float(np.nanmax(sig_ord)) if sig_ord.size > 0 else 1.0
-    ax.set_ylim(0.0, max(ymax * 1.15, 1e-6))
+    ymax = float(np.nanmax(ln_ord)) if ln_ord.size > 0 else 1.0
+    ax.set_ylim(0.0, max(ymax * 1.15, 1.0))
     ax.tick_params(axis="y", labelsize=8)
     ax.grid(axis="y", alpha=0.25)
 
@@ -259,9 +318,14 @@ def plot_observation_rewards_by_annotator_mode(
     title_fontsize: int = 10,
     highlight_panel_indices: list[int] | None = None,
     elbo_kl_per_head: np.ndarray | None = None,
+    head_order_score_ylabel: str | None = None,
+    head_order_score_title: str | None = None,
+    head_order_score_panel_prefix: str | None = None,
+    qlae_bin_entropy_per_head: np.ndarray | None = None,
     elbo_post_mean: np.ndarray | None = None,
     elbo_post_mean_std: np.ndarray | None = None,
-    elbo_post_mean_std_across_strata: np.ndarray | None = None,
+    # elbo_post_mean_std_across_strata: np.ndarray | None = None,
+    elbo_l_nuisance_per_head: np.ndarray | None = None,
     theta_mean_per_head: np.ndarray | None = None,
     elbo_head_order: list[int] | None = None,
     colorbar_label: str = "r(s)",
@@ -273,14 +337,22 @@ def plot_observation_rewards_by_annotator_mode(
         per_mode_obs: length M; each entry (N_m, O) or empty (0, O).
         per_mode_r: length M; each (N_m,) or (N_m, 1) aligned with ``per_mode_obs``.
         mode_titles: length M subplot titles (e.g. ANNOTATOR_SPECS ``name``).
-        elbo_kl_per_head: optional ``(Z,)`` global KL (bar heights + head ordering).
-        elbo_post_mean / elbo_post_mean_std: optional ``(Z,)`` within-strata encoder-μ
-            mean and cross-query std of μ (strata panels). elbo_post_mean_std_across_strata:
-            optional ``(Z,)`` std of per-strata ``\bar{\mu}`` across pref modes (aggregate
-            panel only). theta_mean_per_head: optional ``(Z,)`` strata mean
-            ``softplus(w(h))`` (multi only). When set with ``elbo_kl_per_head``, adds KL,
-            μ diagnostic, and θ bar panels after the aggregate (highlight) panel when
-            that row has enough free cells; else they start a new row.
+        elbo_kl_per_head: optional ``(Z,)`` global head-order score (VAE: KL;
+            QLAE: ``std_q(z_q)``). Bar heights + scatter panel order.
+        head_order_score_ylabel / head_order_score_title: bar panel labels when
+            not VAE KL (defaults: KL ylabel/title).
+        head_order_score_panel_prefix: scatter subtitle prefix, e.g. ``"KL"`` or
+            ``"σ_q"`` → ``$z_j$ (σ_q=…)``.
+        qlae_bin_entropy_per_head: optional ``(Z,)`` per-head FSQ bin entropy
+            (QLAE code-utilization panel after the head-order score bar).
+        elbo_post_mean / elbo_post_mean_std: optional ``(Z,)`` encoder-μ mean and
+            cross-query std of μ over the panel's queries. elbo_l_nuisance_per_head:
+            optional ``(Z,)`` aggregate-only nuisance score from cross-modal pooled μ
+            stats; when set, adds an ``L_nuisance`` bar panel between μ and θ.
+            theta_mean_per_head: optional ``(Z,)`` mean ``softplus(w(h))`` (multi only).
+            When set with ``elbo_kl_per_head``, adds KL, μ, optional ``L_nuisance``, and θ
+            bar panels after the aggregate (highlight) panel when that row has enough free
+            cells; else they start a new row.
         elbo_head_order: optional head indices (descending global KL) for bar-panel x order.
     """
     n_modes = len(per_mode_obs)
@@ -303,19 +375,31 @@ def plot_observation_rewards_by_annotator_mode(
 
     ncols = min(4, n_modes) if ncols is None else min(int(ncols), max(n_modes, 1))
     map_nrows = int(np.ceil(n_modes / ncols))
-    show_elbo = elbo_kl_per_head is not None
+    show_head_score = elbo_kl_per_head is not None
     show_theta = theta_mean_per_head is not None
-    kl_slot: int | None = None
+    has_entropy_panel = qlae_bin_entropy_per_head is not None
+    has_mu_panel = (
+        elbo_post_mean is not None
+        and elbo_post_mean_std is not None
+    )
+    has_l_nuisance_panel = elbo_l_nuisance_per_head is not None
+    score_slot: int | None = None
+    entropy_slot: int | None = None
     mean_std_slot: int | None = None
+    l_nuisance_slot: int | None = None
     theta_slot: int | None = None
-    if show_elbo:
-        has_within_strata_mu = (
-            elbo_post_mean is not None and elbo_post_mean_std is not None
-        )
-        has_across_strata_mu_std = elbo_post_mean_std_across_strata is not None
-        assert has_within_strata_mu or has_across_strata_mu_std
-        n_diag_panels = 2 + int(show_theta)
-        #* glue KL / μ±σ / θ after aggregate when that row has enough free cells
+    if show_head_score:
+        panel_kinds: list[str] = ["score"]
+        if has_entropy_panel:
+            panel_kinds.append("entropy")
+        if has_mu_panel:
+            panel_kinds.append("mu")
+        if has_l_nuisance_panel:
+            panel_kinds.append("l_nuisance")
+        if show_theta:
+            panel_kinds.append("theta")
+        n_diag_panels = len(panel_kinds)
+        #* glue score / optional entropy|μ / θ after aggregate when row has room
         agg_idx = (
             int(highlight_panel_indices[0])
             if highlight_panel_indices
@@ -326,14 +410,27 @@ def plot_observation_rewards_by_annotator_mode(
         )
         if agg_idx is not None and free_after_agg >= n_diag_panels:
             nrows = map_nrows
-            kl_slot = agg_idx + 1
-            mean_std_slot = agg_idx + 2
-            theta_slot = agg_idx + 3 if show_theta else None
+            first_slot = agg_idx + 1
         else:
             nrows = map_nrows + 1
-            kl_slot = map_nrows * ncols
-            mean_std_slot = map_nrows * ncols + 1
-            theta_slot = map_nrows * ncols + 2 if show_theta else None
+            first_slot = map_nrows * ncols
+        #* diagnostic panels may span multiple cols (e.g. nz=2 → 4 panels, ncols=3)
+        nrows = max(
+            nrows,
+            int(np.ceil((first_slot + n_diag_panels) / ncols)),
+        )
+        for i, kind in enumerate(panel_kinds):
+            slot = first_slot + i
+            if kind == "score":
+                score_slot = slot
+            elif kind == "entropy":
+                entropy_slot = slot
+            elif kind == "mu":
+                mean_std_slot = slot
+            elif kind == "l_nuisance":
+                l_nuisance_slot = slot
+            elif kind == "theta":
+                theta_slot = slot
     else:
         nrows = map_nrows
     n_suptitle_lines = (suptitle.count("\n") + 1) if suptitle else 0
@@ -429,33 +526,57 @@ def plot_observation_rewards_by_annotator_mode(
                 spine.set_edgecolor("blue")
                 spine.set_linewidth(2.5)
 
-    keep_slots = {kl_slot, mean_std_slot, theta_slot}
+    keep_slots = {score_slot, entropy_slot, mean_std_slot, l_nuisance_slot, theta_slot}
     for k in range(n_modes, len(flat_axes)):
         if k in keep_slots:
             continue
         flat_axes[k].set_visible(False)
 
-    if show_elbo:
-        assert kl_slot is not None and mean_std_slot is not None
-        _draw_per_head_kl_bars(
-            flat_axes[kl_slot],
-            kl_per_head=elbo_kl_per_head,
+    if show_head_score:
+        assert score_slot is not None
+        score_ylabel = (
+            head_order_score_ylabel
+            if head_order_score_ylabel is not None
+            else r"$\mathrm{KL}$"
+        )
+        score_title = (
+            head_order_score_title
+            if head_order_score_title is not None
+            else r"per-head $\mathrm{KL}(q\|p)$"
+        )
+        _draw_per_head_score_bars(
+            flat_axes[score_slot],
+            score_per_head=elbo_kl_per_head,
+            ylabel=score_ylabel,
+            title=score_title,
             title_fontsize=title_fontsize,
             head_order=elbo_head_order,
         )
-        if elbo_post_mean_std_across_strata is not None:
-            _draw_per_head_post_mean_std_across_strata_bars(
-                flat_axes[mean_std_slot],
-                post_mean_std_across_strata=elbo_post_mean_std_across_strata,
+        if has_entropy_panel:
+            assert entropy_slot is not None
+            _draw_per_head_score_bars(
+                flat_axes[entropy_slot],
+                score_per_head=qlae_bin_entropy_per_head,
+                ylabel=r"$H$",
+                title=r"per-head FSQ bin entropy",
                 title_fontsize=title_fontsize,
                 head_order=elbo_head_order,
             )
-        else:
+        if has_mu_panel:
+            assert mean_std_slot is not None
             assert elbo_post_mean is not None and elbo_post_mean_std is not None
             _draw_per_head_mean_std(
                 flat_axes[mean_std_slot],
                 post_mean=elbo_post_mean,
                 post_mean_std=elbo_post_mean_std,
+                title_fontsize=title_fontsize,
+                head_order=elbo_head_order,
+            )
+        if has_l_nuisance_panel:
+            assert l_nuisance_slot is not None and elbo_l_nuisance_per_head is not None
+            _draw_per_head_l_nuisance_bars(
+                flat_axes[l_nuisance_slot],
+                l_nuisance_per_head=elbo_l_nuisance_per_head,
                 title_fontsize=title_fontsize,
                 head_order=elbo_head_order,
             )

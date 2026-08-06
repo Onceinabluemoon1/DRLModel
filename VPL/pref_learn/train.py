@@ -16,13 +16,13 @@ from tqdm import tqdm
 
 import pref_learn.utils.plot_utils as putils
 from pref_learn.configs.data_configs import get_train_vae_dataset
+from pref_learn.models.decoders import normalize_decoder_type
 from pref_learn.models.mlp import (
     CategoricalModel,
     MeanVarianceModel,
     MLPClassifier,
     MLPModel,
 )
-from pref_learn.models.decoders import normalize_decoder_type
 from pref_learn.models.nets import RewardDecoderConfig
 from pref_learn.models.qlae import QLAE, build_qlae_optimizer
 from pref_learn.models.tcvae import TCVAEModel
@@ -76,8 +76,15 @@ FLAGS_DEF = define_flags_with_default(
     annealer_baseline=0.0,
     annealer_type="cosine",
     annealer_cycles=4,
+    use_nuisance_loss=False,
+    nuisance_weight=0.01,
+    nuisance_floor=2.0,
+    nuisance_ceil=10.0,
     # QLAE (discrete latents)
     num_quantized_values=10,
+    quantizer_bound_half_width=1.0,  # FSQ R: z_c, z_q in [-R, R]
+    quantizer_use_ifsq=False,  # True → R·(2σ(αz)-1) instead of R·tanh
+    quantizer_ifsq_alpha=1.6,
     weight_decay=0.0,
     # Training
     n_epochs=500,
@@ -153,8 +160,25 @@ def decoder_config_from_flags(
 def log_metrics(metrics, epoch, logger):
     for key, val in metrics.items():
         if isinstance(val, list):
+            if len(val) == 0:
+                continue
             metrics[key] = np.mean(val)
     logger.log(metrics, step=epoch)
+
+
+def _append_prefixed_batch_metrics(
+    metrics: defaultdict,
+    batch_metrics: dict,
+    *,
+    prefix: str,
+    n_queries: int,
+    batch_size: int,
+) -> None:
+    """Log only full loader batches; still train/eval on the tail batch."""
+    if int(n_queries) != int(batch_size):
+        return
+    for key, val in prefix_metrics(batch_metrics, prefix).items():
+        metrics[key].append(val)
 
 
 def resolve_dataset_flags(FLAGS) -> None:
@@ -239,6 +263,10 @@ def main(_):
     if FLAGS.model_type == "QLAE":
         run_tags.append(f"V={FLAGS.num_quantized_values}")
         run_tags.append(f"wd={FLAGS.weight_decay}")
+        run_tags.append(f"qR={FLAGS.quantizer_bound_half_width:g}")
+        run_tags.append(f"ifsq={_flag_bool(FLAGS.quantizer_use_ifsq)}")
+        if FLAGS.quantizer_use_ifsq and FLAGS.quantizer_ifsq_alpha != 1.6:
+            run_tags.append(f"ifsqα={FLAGS.quantizer_ifsq_alpha:g}")
     dec_kind = normalize_decoder_type(decoder_type=FLAGS.decoder_type)
     dec_tag = f"dec={dec_kind}"
     run_tags.append(dec_tag)
@@ -285,6 +313,10 @@ def main(_):
             sweep_scope_tags.append(learned_prior_tag)
         if FLAGS.model_type == "QLAE":
             sweep_scope_tags.append(f"nv={FLAGS.num_quantized_values}")
+            sweep_scope_tags.append(f"qR={FLAGS.quantizer_bound_half_width:g}")
+            sweep_scope_tags.append(f"ifsq={_flag_bool(FLAGS.quantizer_use_ifsq)}")
+            if FLAGS.quantizer_use_ifsq and FLAGS.quantizer_ifsq_alpha != 1.6:
+                sweep_scope_tags.append(f"ifsqα={FLAGS.quantizer_ifsq_alpha:g}")
         sweep_scope_tags.append(dec_tag)
         if dec_kind == "multi":
             sweep_scope_tags.append(
@@ -462,6 +494,14 @@ def main(_):
         else:
             reward_model = VAEModel
             decoder_input = obs_dim + FLAGS.latent_dim
+        vae_nuisance_kw: dict[str, bool | float] = {}
+        if FLAGS.model_type == "VAE":
+            vae_nuisance_kw = {
+                "use_nuisance_loss": FLAGS.use_nuisance_loss,
+                "nuisance_weight": FLAGS.nuisance_weight,
+                "nuisance_floor": FLAGS.nuisance_floor,
+                "nuisance_ceil": FLAGS.nuisance_ceil,
+            }
         reward_model = reward_model(
             encoder_input=set_size * (2 * obs_dim * segment_len + 1),
             decoder_input=decoder_input,
@@ -489,6 +529,7 @@ def main(_):
             decoder_sparsity_weight=FLAGS.decoder_sparsity_weight,
             prior_logvar_min=FLAGS.prior_logvar_min,
             prior_logvar_max=FLAGS.prior_logvar_max,
+            **vae_nuisance_kw,
         )
     elif FLAGS.model_type == "MLPClassifier":
         reward_model = MLPClassifier(obs_dim, FLAGS.hidden_dim)
@@ -502,6 +543,9 @@ def main(_):
             segment_len=segment_len,
             obs_dim=obs_dim,
             num_quantized_values=FLAGS.num_quantized_values,
+            quantizer_bound_half_width=FLAGS.quantizer_bound_half_width,
+            quantizer_use_ifsq=FLAGS.quantizer_use_ifsq,
+            quantizer_ifsq_alpha=FLAGS.quantizer_ifsq_alpha,
             reward_scaling=FLAGS.reward_scaling,
             loss_aggregation=FLAGS.loss_aggregation,
             decoder_config=decoder_config_from_flags(
@@ -542,7 +586,7 @@ def main(_):
         optimizer = torch.optim.Adam(reward_model.parameters(), lr=FLAGS.lr)
     early_stop = EarlyStopper(FLAGS.patience, FLAGS.min_delta)
     best_criteria = None
-    for epoch in tqdm(range(FLAGS.n_epochs), desc="epochs"):
+    for epoch in tqdm(range(FLAGS.n_epochs), desc=f"{FLAGS.model_type} epoch"):
         metrics = defaultdict(list)
         metrics["epoch"] = epoch
 
@@ -565,8 +609,13 @@ def main(_):
             loss.backward()
             optimizer.step()
 
-            for key, val in prefix_metrics(batch_metrics, "train").items():
-                metrics[key].append(val)
+            _append_prefixed_batch_metrics(
+                metrics,
+                batch_metrics,
+                prefix="train",
+                n_queries=int(observations.shape[0]),
+                batch_size=int(FLAGS.batch_size),
+            )
 
         should_eval = (epoch % FLAGS.eval_freq == 0) or (epoch == FLAGS.n_epochs - 1)
         if should_eval:
@@ -587,8 +636,13 @@ def main(_):
                         source=source,
                     )
 
-                    for key, val in prefix_metrics(batch_metrics, "eval").items():
-                        metrics[key].append(val)
+                    _append_prefixed_batch_metrics(
+                        metrics,
+                        batch_metrics,
+                        prefix="eval",
+                        n_queries=int(observations.shape[0]),
+                        batch_size=int(FLAGS.batch_size),
+                    )
 
             if FLAGS.debug_plots and "maze2d" in FLAGS.env:
                 if FLAGS.model_type == "MLP":

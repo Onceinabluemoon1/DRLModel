@@ -49,6 +49,10 @@ learned_prior=False
 prior_logvar_min=-6.0  # learned_prior ARD: clamp prior_logvar
 prior_logvar_max=1.0
 use_annealing=False
+use_nuisance_loss=False  # encoder μ batch auxiliary loss (VAE only)
+nuisance_weight=0.01
+nuisance_floor=2.0
+nuisance_ceil=10.0
 encode_labels=True  # pair encoder: concat y into pair_mlp (q(z|s1,s2,y))
 encode_sources=False  # pair encoder: one-hot GT source_variable (InfoMEC; relabelled dataset)
 
@@ -121,6 +125,10 @@ run_train_beta() {
     --prior_logvar_min=${prior_logvar_min} \
     --prior_logvar_max=${prior_logvar_max} \
     --use_annealing=${use_annealing} \
+    --use_nuisance_loss=${use_nuisance_loss} \
+    --nuisance_weight=${nuisance_weight} \
+    --nuisance_floor=${nuisance_floor} \
+    --nuisance_ceil=${nuisance_ceil} \
     --seed=42 \
     --batch_size=${batch_size} \
     --set_size=${set_size} \

@@ -17,6 +17,7 @@ from pref_learn.models.nets import (
     reward_decoder_theta_sparsity,
 )
 from pref_learn.models.quantizer import FSQQuantizer
+from pref_learn.models.utils import cross_batch_std_mean
 
 
 class QLAE(nn.Module):
@@ -38,6 +39,9 @@ class QLAE(nn.Module):
         segment_len: int,
         obs_dim: int,
         num_quantized_values: int = 10,
+        quantizer_bound_half_width: float = 1.0,
+        quantizer_use_ifsq: bool = False,
+        quantizer_ifsq_alpha: float = 1.6,
         reward_scaling: float = 1.0,
         loss_aggregation: str = "mean",
         decoder_config: RewardDecoderConfig | None = None,
@@ -72,6 +76,9 @@ class QLAE(nn.Module):
         self.quantizer = FSQQuantizer(
             num_latents=latent_dim,
             num_values_per_latent=num_quantized_values,
+            bound_half_width=quantizer_bound_half_width,
+            use_ifsq=quantizer_use_ifsq,
+            ifsq_alpha=quantizer_ifsq_alpha,
         )
         self.decoder = make_reward_decoder(config=decoder_config)
         self.decoder_config = decoder_config
@@ -82,6 +89,9 @@ class QLAE(nn.Module):
         self.annotation_size = annotation_size
         self.segment_len = segment_len
         self.num_quantized_values = int(num_quantized_values)
+        self.quantizer_bound_half_width = float(quantizer_bound_half_width)
+        self.quantizer_use_ifsq = bool(quantizer_use_ifsq)
+        self.quantizer_ifsq_alpha = float(quantizer_ifsq_alpha)
         self.scaling = reward_scaling
         self.loss_agg = loss_aggregation
 
@@ -172,10 +182,10 @@ class QLAE(nn.Module):
 
     def latent_metrics(self, z_c: torch.Tensor, z_q: torch.Tensor) -> dict[str, float]:
         return {
-            "enc_zc_cross_std": z_c.std(dim=0).mean().item(),
-            "enc_zq_cross_std": z_q.std(dim=0).mean().item(),
+            "enc_zc_cross_std": cross_batch_std_mean(z_c, dim=0).item(),
+            "enc_zq_cross_std": cross_batch_std_mean(z_q, dim=0).item(),
             "enc_zc_abs": z_c.abs().mean().item(),
-            "enc_zq_unique_mean": len(torch.unique(z_q, dim=0)) / max(z_q.shape[0], 1),
+            # "enc_zq_unique_mean": len(torch.unique(z_q, dim=0)) / max(z_q.shape[0], 1),
         }
 
     def forward_btl(
@@ -223,6 +233,7 @@ class QLAE(nn.Module):
         metrics = {
             "total_loss": total_loss.item(),
             "recon_loss": recon_loss.item(),
+            "frac_recon2total": recon_loss.item() / total_loss.item(),
             "accuracy": acc.item(),
             "num_quantized_values": self.num_quantized_values,
             **self.latent_metrics(z_c=z_c, z_q=z_q),

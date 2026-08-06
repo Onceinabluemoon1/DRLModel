@@ -73,7 +73,8 @@ class WandBLogger(object):
         if self.config.random_delay > 0:
             time.sleep(np.random.uniform(0, self.config.random_delay))
 
-        self.run = wandb.init(
+        wandb_mode = "online" if self.config.online else "offline"
+        init_kwargs = dict(
             reinit=True,
             config=self._variant,
             project=self.config.project,
@@ -86,8 +87,19 @@ class WandBLogger(object):
                 start_method="thread",
                 _disable_stats=True,
             ),
-            mode="online" if self.config.online else "offline",
+            mode=wandb_mode,
         )
+        try:
+            self.run = wandb.init(**init_kwargs)
+        except wandb.errors.CommError as err:
+            if wandb_mode != "online":
+                raise
+            logging.warning(
+                "wandb online init failed (%s); falling back to offline mode.",
+                err,
+            )
+            init_kwargs["mode"] = "offline"
+            self.run = wandb.init(**init_kwargs)
 
     def log(self, *args, **kwargs):
         self.run.log(*args, **kwargs)

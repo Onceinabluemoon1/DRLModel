@@ -11,7 +11,7 @@ from pref_learn.models.nets import (
     reward_decoder_column_orth_penalty,
     reward_decoder_theta_sparsity,
 )
-from pref_learn.models.utils import Annealer, logvar_to_std
+from pref_learn.models.utils import Annealer, batch_encoder_nuisance_loss, cross_batch_std_mean, logvar_to_std
 
 
 class VAEModel(nn.Module):
@@ -42,6 +42,10 @@ class VAEModel(nn.Module):
         decoder_sparsity_weight: float = 0.0,
         prior_logvar_min: float = -8.0,
         prior_logvar_max: float = 4.0,
+        use_nuisance_loss: bool = False,
+        nuisance_weight: float = 0.01,
+        nuisance_floor: float = 2.0,
+        nuisance_ceil: float = 10.0,
     ):
         super(VAEModel, self).__init__()
         assert loss_aggregation in ("sum", "mean")
@@ -71,6 +75,10 @@ class VAEModel(nn.Module):
         self.decoder_type = str(decoder_config.decoder_type).lower()
         self.decoder_orth_weight = float(decoder_orth_weight)
         self.decoder_sparsity_weight = float(decoder_sparsity_weight)
+        self.use_nuisance_loss = bool(use_nuisance_loss)
+        self.nuisance_weight = float(nuisance_weight)
+        self.nuisance_floor = float(nuisance_floor)
+        self.nuisance_ceil = float(nuisance_ceil)
         self.latent_dim = latent_dim
         #* Hardened ARD: mean fixed at 0; only per-dim prior scales are free.
         # self.prior_mean = torch.nn.Parameter(
@@ -285,8 +293,8 @@ class VAEModel(nn.Module):
         mean, logvar: (B, D)
         """
         return {
-            "enc_mean_cross_std": mean.std(dim=0).mean().item(),
-            "enc_logvar_cross_std": logvar.std(dim=0).mean().item(),
+            "enc_mean_cross_std": cross_batch_std_mean(mean, dim=0).item(),
+            "enc_logvar_cross_std": cross_batch_std_mean(logvar, dim=0).item(),
             "enc_mean_abs": mean.abs().mean().item(),
         }
 
@@ -308,6 +316,16 @@ class VAEModel(nn.Module):
             "post_std_mean": post_std.mean().item(),
             "post_mean_abs_per_dim_max": mean.abs().mean(dim=0).max().item(),
         }
+
+    def encoder_nuisance_loss(self, mean: torch.Tensor) -> tuple[torch.Tensor, dict[str, float]]:
+        """Batch auxiliary loss on encoder μ; zero when ``use_nuisance_loss=False``."""
+        if not self.use_nuisance_loss:
+            return mean.new_zeros(()), {}
+        return batch_encoder_nuisance_loss(
+            mean=mean,
+            floor=self.nuisance_floor,
+            ceil=self.nuisance_ceil,
+        )
 
     def forward(self, s1, s2, y, source=None):  # (B, A, T, O), (B, A, 1)
         mean, logvar = self.encode(s1, s2, y, source=source)  # (B, Z), (B, Z)
@@ -347,6 +365,8 @@ class VAEModel(nn.Module):
             sparsity_loss = reward_decoder_theta_sparsity(decoder=self.decoder)
             total_loss = total_loss + self.decoder_sparsity_weight * sparsity_loss
             orth_metrics["decoder_sparsity_loss"] = sparsity_loss.item()
+        nuisance_loss_val, nuisance_metrics = self.encoder_nuisance_loss(mean=mean)
+        total_loss = total_loss + self.nuisance_weight * nuisance_loss_val
 
         acc = self.accuracy(labels, p_hat)
         metrics = {
@@ -359,6 +379,7 @@ class VAEModel(nn.Module):
             **self.encoder_cross_std_metrics(mean=mean, logvar=logvar),
             **self.ard_prior_metrics(mean=mean, logvar=logvar),
             **orth_metrics,
+            **nuisance_metrics,
         }
 
         return total_loss, metrics

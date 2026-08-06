@@ -51,12 +51,15 @@ set_size=16  # -1 = use full S from dataset; else truncate preference sets to th
 
 loss_aggregation=mean  # sum | mean
 normalize_kl=True
-learned_prior=True
-# sqrt(exp(logvar)) = std
-# (-6,1) -> std (0.05, 1.64)
+learned_prior=True # ! important 
+# sqrt(exp(logvar)) = std: (-6,1) -> (0.05, 1.64)
 prior_logvar_min=-6.0  # learned_prior ARD: clamp prior_logvar
 prior_logvar_max=0
 use_annealing=False
+use_nuisance_loss=True  # encoder μ batch auxiliary loss (VAE only)
+nuisance_weight=0.1
+nuisance_floor=0.1
+nuisance_ceil=10.0
 encode_labels=True  # pair encoder: cncat y into pair_mlp (q(z|s1,s2,y))
 encode_sources=False  # pair encoder: one-hot GT source_variable after set pool (InfoMEC)
 
@@ -64,7 +67,7 @@ encode_sources=False  # pair encoder: one-hot GT source_variable after set pool 
 decoder_type=multi  # multi | cond | condsig | condsp | condcat | slot | odin
 
 # head sparsity (training loss; 0 = off)
-decoder_sparsity_weight=0.01
+decoder_sparsity_weight=0.001 # 0.001 better: <0.1
 # multi only: elementwise (L1 on theta) | group (lasso over heads)
 decoder_sparsity_mode=group
 # cond | condsig | condsp | condcat: always group L1 on per-head r_j (mode ignored)
@@ -93,8 +96,8 @@ decoder_n_bins=11  # K bins; index 0 is explicit zero reward
 # pref_dataset="sort_4goals_T=1_Q=20000"
 # pref_dataset="sort_4goals_T=10_Q=20000"
 # pref_dataset="sort_4goals_T=25_Q=20000"
-pref_dataset="sort_4goals_obs=15_T=1_Q=20000"
-# pref_dataset="sort_4goals_obs=15_T=25_Q=20000"
+# pref_dataset="sort_4goals_obs=15_T=1_Q=20000"
+pref_dataset="sort_4goals_obs=15_T=25_Q=20000"
 
 
 output_dir="/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/outputs"
@@ -146,6 +149,10 @@ run_train_grid() {
     --prior_logvar_min=${prior_logvar_min} \
     --prior_logvar_max=${prior_logvar_max} \
     --use_annealing=${use_annealing} \
+    --use_nuisance_loss=${use_nuisance_loss} \
+    --nuisance_weight=${nuisance_weight} \
+    --nuisance_floor=${nuisance_floor} \
+    --nuisance_ceil=${nuisance_ceil} \
     --seed=42 \
     --batch_size=${batch_size} \
     --set_size=${set_size} \
