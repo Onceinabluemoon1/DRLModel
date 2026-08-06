@@ -5,7 +5,6 @@ segment_len=25 # T
 
 # * create pref dataset for 2 goals task
 env="sort-easy-2goals-v0"
-# h5_fp="/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/data/ravens/sort-easy-2goals-v0/_vpl_official/rollout_dataset.hdf5"
 h5_fp="/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/data/ravens/sort-easy-2goals-v0/20260627_005939_ntrajs=5000_obs=15/rollout_dataset.hdf5"
 python -m pref_learn.create_dataset_infomec \
   --env="${env}" \
@@ -18,7 +17,6 @@ python -m pref_learn.create_dataset_infomec \
 
 # * create pref dataset for 4 goals task
 # env="sort-easy-4goals-v0"
-# # h5_fp="/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/data/ravens/sort-easy-4goals-v0/20260517_212722_ntrajs=5000/rollout_dataset.hdf5"
 # h5_fp="/scr/yutaizho/code/p-disentangle/Disentangled_Reward_Learning/data/ravens/sort-easy-4goals-v0/20260627_005919_ntrajs=5000_obs=15/rollout_dataset.hdf5"
 # python -m pref_learn.create_dataset_infomec \
 #   --env="${env}" \

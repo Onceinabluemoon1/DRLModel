@@ -2,18 +2,20 @@
 set -euo pipefail
 
 #* --- edit these ---
-env="sort-easy-2goals-v0"
-# env="sort-easy-4goals-v0"
+# * collect rollouts 
+# env="sort-easy-2goals-v0"
+env="sort-easy-4goals-v0"
 n_trajs=5000
 max_horizon=25
 plot_random_trajs=10
 
+# for preference dataset only
+run_pref_dataset=0 # 0 = rollouts + HDF5 only
 seed=-1
 n_queries=20000 # Q
 set_size=16 # A
 segment_len=1 # T
-
-run_pref_dataset=1 # 0 = rollouts + HDF5 only
+#* --- edit these ---
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VPL_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -42,12 +44,13 @@ python "${VPL_ROOT}/utils/collect_trajs.py" \
   --no-alternate-goal-modes \
   --plot-random-trajs="${plot_random_trajs}"
 
-# * pkl → HDF5
+# * D4RL format trajectories: pkl → HDF5
 python "${VPL_ROOT}/utils/demos2dataset.py" \
   --rollouts-dir="${data_dir}/raw_rollouts" \
   --output-h5="${h5_fp}" \
   --max-horizon="${max_horizon}"
 
+# * create pref dataset (maybe run standalone, use create_pref_dataset.sh)
 if [[ "${run_pref_dataset}" == "1" ]]; then
   python -m pref_learn.create_dataset_infomec \
     --env="${env}" \
