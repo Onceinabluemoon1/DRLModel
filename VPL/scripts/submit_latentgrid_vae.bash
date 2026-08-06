@@ -56,9 +56,8 @@ learned_prior=True # ! important
 prior_logvar_min=-6.0  # learned_prior ARD: clamp prior_logvar
 prior_logvar_max=0
 use_annealing=False
-use_nuisance_loss=True  # encoder μ batch auxiliary loss (VAE only)
-nuisance_weight=0.1
-nuisance_floor=0.1
+nuisance_weight=0.001  # encoder μ batch auxiliary loss (VAE only); 0 = off
+nuisance_floor=0.15
 nuisance_ceil=10.0
 encode_labels=True  # pair encoder: cncat y into pair_mlp (q(z|s1,s2,y))
 encode_sources=False  # pair encoder: one-hot GT source_variable after set pool (InfoMEC)
@@ -143,7 +142,6 @@ run_train_grid() {
     --prior_logvar_min=${prior_logvar_min} \
     --prior_logvar_max=${prior_logvar_max} \
     --use_annealing=${use_annealing} \
-    --use_nuisance_loss=${use_nuisance_loss} \
     --nuisance_weight=${nuisance_weight} \
     --nuisance_floor=${nuisance_floor} \
     --nuisance_ceil=${nuisance_ceil} \

@@ -42,8 +42,7 @@ class VAEModel(nn.Module):
         decoder_sparsity_weight: float = 0.0,
         prior_logvar_min: float = -8.0,
         prior_logvar_max: float = 4.0,
-        use_nuisance_loss: bool = False,
-        nuisance_weight: float = 0.01,
+        nuisance_weight: float = 0.0,
         nuisance_floor: float = 2.0,
         nuisance_ceil: float = 10.0,
     ):
@@ -75,7 +74,6 @@ class VAEModel(nn.Module):
         self.decoder_type = str(decoder_config.decoder_type).lower()
         self.decoder_orth_weight = float(decoder_orth_weight)
         self.decoder_sparsity_weight = float(decoder_sparsity_weight)
-        self.use_nuisance_loss = bool(use_nuisance_loss)
         self.nuisance_weight = float(nuisance_weight)
         self.nuisance_floor = float(nuisance_floor)
         self.nuisance_ceil = float(nuisance_ceil)
@@ -318,8 +316,8 @@ class VAEModel(nn.Module):
         }
 
     def encoder_nuisance_loss(self, mean: torch.Tensor) -> tuple[torch.Tensor, dict[str, float]]:
-        """Batch auxiliary loss on encoder μ; zero when ``use_nuisance_loss=False``."""
-        if not self.use_nuisance_loss:
+        """Batch auxiliary loss on encoder μ; zero when ``nuisance_weight=0``."""
+        if self.nuisance_weight <= 0.0:
             return mean.new_zeros(()), {}
         return batch_encoder_nuisance_loss(
             mean=mean,

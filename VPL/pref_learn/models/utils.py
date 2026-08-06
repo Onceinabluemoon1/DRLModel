@@ -30,22 +30,31 @@ def batch_encoder_nuisance_loss(
     eps: float = 1e-6,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     r"""
-    mean_j max(0, min(L_j, ceil) - floor) with
+    Per-head max(0, min(L_j, ceil) - floor) with
     L_j = \bar{μ}_j² / (Var(μ_j) + ε) over batch queries.
+    Loss = mean over heads with L_j > floor only (inactive heads excluded).
 
     mean: (B, Z) encoder posterior means.
     """
     b_n = int(mean.shape[0])
     zero = mean.new_zeros(())
     if b_n <= 1:
-        return zero, {"nuisance_loss": 0.0}
+        return zero, {"nuisance_loss": 0.0, "nuisance_n_heads": 0.0}
     mu_bar = mean.mean(dim=0)  # (Z,)
     var = mean.var(dim=0, unbiased=True)  # (Z,)
     raw = (mu_bar * mu_bar) / (var + float(eps))  # (Z,)
     clipped = raw.clamp(max=float(ceil))
     penalized = (clipped - float(floor)).clamp(min=0.0)  # (Z,)
-    loss = penalized.mean()
-    return loss, {"nuisance_loss": float(loss.item())}
+    active = penalized > 0
+    n_active = int(active.sum().item())
+    if n_active > 0:
+        loss = penalized[active].mean()
+    else:
+        loss = zero
+    return loss, {
+        "nuisance_loss": float(loss.item()),
+        "nuisance_n_heads": float(n_active),
+    }
 
 def _merge_infomec_fields(
     *,

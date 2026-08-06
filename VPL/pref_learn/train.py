@@ -76,8 +76,7 @@ FLAGS_DEF = define_flags_with_default(
     annealer_baseline=0.0,
     annealer_type="cosine",
     annealer_cycles=4,
-    use_nuisance_loss=False,
-    nuisance_weight=0.01,
+    nuisance_weight=0.0,
     nuisance_floor=2.0,
     nuisance_ceil=10.0,
     # QLAE (discrete latents)
@@ -291,6 +290,8 @@ def main(_):
         run_tags.append(f"slotr={FLAGS.decoder_slot_routing}")
     if dec_kind == "odin":
         run_tags.append(f"orthw={FLAGS.decoder_orth_weight}")
+    if FLAGS.model_type == "VAE":
+        run_tags.append(f"nuis={FLAGS.nuisance_weight:g}")
     run_tags.append(f"encY={_flag_bool(FLAGS.encode_labels)}")
     run_tags.append(f"encS={_flag_bool(FLAGS.encode_sources)}")
     run_tag_str = "_".join(run_tags)
@@ -340,6 +341,8 @@ def main(_):
             sweep_scope_tags.append(f"slotr={FLAGS.decoder_slot_routing}")
         if dec_kind == "odin":
             sweep_scope_tags.append(f"orthw={FLAGS.decoder_orth_weight}")
+        if FLAGS.model_type == "VAE":
+            sweep_scope_tags.append(f"nuis={FLAGS.nuisance_weight:g}")
         sweep_scope_tags.append(f"encY={_flag_bool(FLAGS.encode_labels)}")
         sweep_scope_tags.append(f"encS={_flag_bool(FLAGS.encode_sources)}")
         sweep_scope_tag = "_".join(sweep_scope_tags)
@@ -494,10 +497,9 @@ def main(_):
         else:
             reward_model = VAEModel
             decoder_input = obs_dim + FLAGS.latent_dim
-        vae_nuisance_kw: dict[str, bool | float] = {}
+        vae_nuisance_kw: dict[str, float] = {}
         if FLAGS.model_type == "VAE":
             vae_nuisance_kw = {
-                "use_nuisance_loss": FLAGS.use_nuisance_loss,
                 "nuisance_weight": FLAGS.nuisance_weight,
                 "nuisance_floor": FLAGS.nuisance_floor,
                 "nuisance_ceil": FLAGS.nuisance_ceil,
