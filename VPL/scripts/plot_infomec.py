@@ -256,13 +256,6 @@ def eval_run_outdir(
     return input_dir / subdir / eval_timestamp
 
 
-def beta_from_variant(variant: dict) -> float:
-    """Backward-compatible alias for the swept disentanglement hyperparameter."""
-    from pref_learn.utils.disentangle_sweep import sweep_from_variant
-
-    return sweep_from_variant(variant=variant)[1]
-
-
 def infomec_run_label(input_dir: Path, variant: dict) -> str:
     comment = str(variant.get("comment", "")).strip()
     if comment:
@@ -686,32 +679,6 @@ def save_infomec_epoch_series_artifacts(
         json.dump(payload_out, f, indent=2)
 
 
-def run_epoch_checkpoint_infomec_curve(
-    run_dir: Path,
-    outdir: Path,
-    obs1: np.ndarray,
-    obs2: np.ndarray,
-    labels: np.ndarray,
-    sources: np.ndarray,
-    batch_size: int,
-    device: torch.device,
-    discrete_latents: bool,
-    source: np.ndarray | None = None,
-) -> None:
-    payload = collect_epoch_checkpoint_infomec_series(
-        run_dir,
-        obs1,
-        obs2,
-        labels,
-        sources,
-        batch_size,
-        device,
-        discrete_latents,
-        source=source,
-    )
-    save_infomec_epoch_series_artifacts(payload, outdir)
-
-
 def save_eval_artifacts_after_encode(
     outdir: Path,
     input_dir: Path,
@@ -774,14 +741,6 @@ def save_eval_artifacts_after_encode(
         active_latents=al_for_plot,
         title_fontsize=7,
     )
-    # save_heatmap(
-    #     result.nmi,
-    #     source_names,
-    #     latent_names,
-    #     title="InfoMEC normalized MI (sources x latents)",
-    #     outpath=str(outdir / "infomec_nmi_heatmap.png"),
-    #     active_latents=result.active_latents,
-    # )
 
     mode_color = source_mode_labels_for_split(dataset_path=dataset_path, split=split)
     mode_names = source_mode_names_from_dataset(dataset_path=dataset_path)
@@ -994,19 +953,19 @@ def subsample_preference_queries(
     query_source: np.ndarray | None,
     frac: float,
     seed: int = 0,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray | None]:
-    """Random query subsample; ``frac=1`` keeps all rows."""
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray | None, np.ndarray]:
+    """Random query subsample; ``frac=1`` keeps all rows. Also returns kept ``idx (K,)``."""
     frac_f = float(frac)
     if not (0.0 < frac_f <= 1.0):
         raise ValueError(f"viz_data_frac must be in (0, 1]; got {frac_f!r}")
     n = int(len(obs1))
     if frac_f >= 1.0 or n <= 1:
-        return obs1, obs2, labels, query_source
+        return obs1, obs2, labels, query_source, np.arange(n)
     k = max(1, int(round(frac_f * n)))
     rng = np.random.default_rng(seed=seed)
     idx = np.sort(rng.choice(n, size=k, replace=False))
     src_out = None if query_source is None else np.asarray(query_source)[idx]
-    return obs1[idx], obs2[idx], labels[idx], src_out
+    return obs1[idx], obs2[idx], labels[idx], src_out, idx
 
 
 def prepare_preference_eval_arrays(
@@ -1028,8 +987,12 @@ def prepare_preference_eval_arrays(
     Path,
     np.ndarray | None,
     torch.device,
+    np.ndarray,
 ]:
-    """Load **training** preference data for reward-map / viz (not InfoMEC held-out set)."""
+    """Load **training** preference data for reward-map / viz (not InfoMEC held-out set).
+
+    Last element is the kept query index ``viz_idx (K,)`` into the post-split arrays.
+    """
     run_dir = run_dir.expanduser().resolve()
     variant_path = run_dir / "variant.json"
     if not variant_path.is_file():
@@ -1048,7 +1011,7 @@ def prepare_preference_eval_arrays(
     obs2 = maybe_truncate(np.asarray(batch["observations_2"])[idx], sl)
     labels = maybe_truncate(np.asarray(batch["labels"])[idx], sl)
     query_source = slice_query_source(batch=batch, idx=idx)
-    obs1, obs2, labels, query_source = subsample_preference_queries(
+    obs1, obs2, labels, query_source, viz_idx = subsample_preference_queries(
         obs1=obs1,
         obs2=obs2,
         labels=labels,
@@ -1066,6 +1029,7 @@ def prepare_preference_eval_arrays(
         dataset_path,
         query_source,
         device,
+        viz_idx,
     )
 
 
@@ -1324,6 +1288,89 @@ def batched_encode(
             mean = encode_preference_latent_mean(model, o1, o2, y, **enc_kw)
         means.append(mean.cpu().numpy())
     return np.concatenate(means, axis=0)
+
+
+def effective_infomec_eval_settings(
+    run_dir: Path,
+    *,
+    batch_size: Optional[int],
+    set_length: Optional[int],
+) -> Tuple[str, int, int]:
+    """Resolved dataset path + batch/set sizes used for InfoMEC eval (must match across a sweep)."""
+    variant = json.loads((run_dir / "variant.json").read_text(encoding="utf-8"))[
+        "variant"
+    ]
+    dataset_path = resolve_infomec_dataset_path(run_dir, variant, override=None)
+    bs = int(variant["batch_size"]) if batch_size is None else int(batch_size)
+    sl = int(variant["set_size"]) if set_length is None else int(set_length)
+    return str(dataset_path.resolve()), bs, sl
+
+
+def assert_runs_share_infomec_eval_settings(
+    run_dirs: List[Path],
+    *,
+    batch_size: Optional[int],
+    set_length: Optional[int],
+) -> None:
+    """All sweep subruns must resolve to the same eval dataset / batch / set sizes."""
+    if len(run_dirs) <= 1:
+        return
+    ref = effective_infomec_eval_settings(
+        run_dirs[0], batch_size=batch_size, set_length=set_length
+    )
+    for run_dir in run_dirs[1:]:
+        fp = effective_infomec_eval_settings(
+            run_dir, batch_size=batch_size, set_length=set_length
+        )
+        if fp != ref:
+            raise ValueError(
+                "Sweep subruns must share infomec dataset_path, batch_size, and set_size; "
+                f"{run_dirs[0].name} has {ref!r}, {run_dir.name} has {fp!r}"
+            )
+
+
+def encode_run_checkpoint_infomec(
+    run_dir: Path,
+    *,
+    model_selection: ModelSelection,
+    obs1: np.ndarray,
+    obs2: np.ndarray,
+    labels: np.ndarray,
+    sources: np.ndarray,
+    batch_size: int,
+    device: torch.device,
+    query_source: np.ndarray | None = None,
+) -> Dict[str, Any]:
+    """Load the selected checkpoint, encode ``latents (Q, Z)``, and run InfoMEC.
+
+    Returns model / variant / discrete_latents / latents / result plus
+    ckpt_label / selected_epoch / model_selection_tag.
+    """
+    ckpt_path, ckpt_label, selected_epoch, model_selection_tag = resolve_run_checkpoint(
+        run_dir, model_selection=model_selection
+    )
+    model = torch.load(ckpt_path, map_location=device, weights_only=False).to(device)
+    model.eval()
+    variant = json.loads((run_dir / "variant.json").read_text(encoding="utf-8"))[
+        "variant"
+    ]
+    discrete_latents = resolve_discrete_latents(model=model, variant=variant)
+    latents = batched_encode(
+        model, obs1, obs2, labels, batch_size, device, source=query_source
+    )  # (Q, Z)
+    result = compute_infomec(
+        sources=sources, latents=latents, discrete_latents=discrete_latents
+    )
+    return {
+        "model": model,
+        "variant": variant,
+        "discrete_latents": discrete_latents,
+        "latents": latents,
+        "result": result,
+        "ckpt_label": ckpt_label,
+        "selected_epoch": selected_epoch,
+        "model_selection_tag": model_selection_tag,
+    }
 
 
 def batched_learned_rewards_on_obs1(
@@ -2507,60 +2554,6 @@ def maybe_save_latent_projection(
     fig.savefig(outpath, dpi=200, bbox_inches="tight", pad_inches=0.08)
     plt.close(fig)
     return {**params, **info}
-
-
-def maybe_save_tsne(
-    latents: np.ndarray,
-    y: np.ndarray,
-    outpath: str,
-    title: str,
-    *,
-    perplexity: Optional[float] = None,
-    max_iter: Optional[int] = None,
-    random_state: int = 0,
-    enabled: bool = True,
-    mode_names: Optional[List[str]] = None,
-    title_fontsize: int = 8,
-) -> Optional[Dict[str, Any]]:
-    """Backward-compatible t-SNE wrapper around :func:`maybe_save_latent_projection`."""
-    return maybe_save_latent_projection(
-        latents,
-        y,
-        outpath,
-        title,
-        method=LatentClusterMethod.tsne,
-        tsne_perplexity=perplexity,
-        tsne_max_iter=max_iter,
-        random_state=random_state,
-        enabled=enabled,
-        mode_names=mode_names,
-        title_fontsize=title_fontsize,
-    )
-
-
-def save_aggregate_tsne_sweep_grid(
-    runs: List[Dict[str, Any]],
-    outpath: Path,
-    mode_color: np.ndarray,
-    *,
-    mode_names: Optional[List[str]] = None,
-    perplexity: Optional[float] = None,
-    max_iter: Optional[int] = None,
-    title_fontsize: int = 7,
-    random_state: int = 0,
-) -> None:
-    """Backward-compatible t-SNE wrapper around :func:`save_aggregate_latent_projection_sweep_grid`."""
-    save_aggregate_latent_projection_sweep_grid(
-        runs,
-        outpath,
-        mode_color,
-        method=LatentClusterMethod.tsne,
-        mode_names=mode_names,
-        tsne_perplexity=perplexity,
-        tsne_max_iter=max_iter,
-        title_fontsize=title_fontsize,
-        random_state=random_state,
-    )
 
 
 def main(args: AnalysisCLI) -> None:

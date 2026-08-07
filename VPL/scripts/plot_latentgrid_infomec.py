@@ -8,7 +8,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Literal, Optional
+from typing import Literal, Optional
 
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
 os.environ.setdefault("NUMBA_THREADING_LAYER", "workqueue")
@@ -18,7 +18,6 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
-import torch
 import tyro
 from matplotlib.colors import LogNorm, Normalize
 from tqdm import tqdm
@@ -35,7 +34,6 @@ from pref_learn.utils.disentangle_sweep import (  # noqa: E402
     discover_sweep_subruns,
     sweep_from_variant,
 )
-from pref_learn.utils.infomec import compute_infomec  # noqa: E402
 
 WandbMetricSpec = tuple[str, str, bool] | None
 WandbMetricRow = list[WandbMetricSpec]
@@ -72,10 +70,6 @@ MODEL_WANDB_METRICS: dict[str, WandbMetricRow] = {
     "TCVAE": TCVAE_WANDB_METRICS,
     "QLAE": QLAE_WANDB_METRICS,
 }
-
-SWEEP_METRICS: list[tuple[str, str, bool]] = VAE_WANDB_METRICS + INFOMEC_METRICS
-
-WANDEB_METRICS = VAE_WANDB_METRICS
 
 RECON_LOSS_VMAX = 0.4
 
@@ -124,10 +118,6 @@ def _wandb_summary_path(run_dir: Path) -> Path:
     return run_dir / "wandb" / "latest-run" / "files" / "wandb-summary.json"
 
 
-def discover_subruns(input_dir: Path) -> list[Path]:
-    return discover_sweep_subruns(input_dir)
-
-
 def normalized_kl_weight(
     *,
     kl_weight: float,
@@ -159,7 +149,7 @@ def _active_wandb_metrics(wandb_metrics: WandbMetricRow) -> list[tuple[str, str,
 
 def load_sweep_rows(input_dir: Path) -> list[dict]:
     rows: list[dict] = []
-    for run_dir in discover_subruns(input_dir):
+    for run_dir in discover_sweep_subruns(input_dir):
         summary_path = _wandb_summary_path(run_dir=run_dir)
         if not summary_path.is_file():
             raise FileNotFoundError(f"Missing W&B summary: {summary_path}")
@@ -210,45 +200,6 @@ def load_sweep_rows(input_dir: Path) -> list[dict]:
     return rows
 
 
-def _effective_infomec_eval_settings(
-    run_dir: Path,
-    *,
-    batch_size: Optional[int],
-    set_length: Optional[int],
-) -> tuple[str, int, int]:
-    variant = json.loads((run_dir / "variant.json").read_text(encoding="utf-8"))[
-        "variant"
-    ]
-    dataset_path = plt_infomec.resolve_infomec_dataset_path(
-        run_dir, variant, override=None
-    )
-    bs = int(variant["batch_size"]) if batch_size is None else int(batch_size)
-    sl = int(variant["set_size"]) if set_length is None else int(set_length)
-    return str(dataset_path.resolve()), bs, sl
-
-
-def _assert_infomec_eval_settings_match(
-    run_dirs: list[Path],
-    *,
-    batch_size: Optional[int],
-    set_length: Optional[int],
-) -> None:
-    if len(run_dirs) <= 1:
-        return
-    ref = _effective_infomec_eval_settings(
-        run_dirs[0], batch_size=batch_size, set_length=set_length
-    )
-    for run_dir in run_dirs[1:]:
-        fp = _effective_infomec_eval_settings(
-            run_dir, batch_size=batch_size, set_length=set_length
-        )
-        if fp != ref:
-            raise ValueError(
-                "Sweep subruns must share infomec dataset_path, batch_size, and set_size; "
-                f"{run_dirs[0].name} has {ref!r}, {run_dir.name} has {fp!r}"
-            )
-
-
 def enrich_rows_with_infomec(
     rows: list[dict],
     *,
@@ -278,7 +229,7 @@ def enrich_rows_with_infomec(
         )
         raise RuntimeError(f"No subruns with {ckpt_hint} for InfoMEC eval")
 
-    _assert_infomec_eval_settings_match(
+    plt_infomec.assert_runs_share_infomec_eval_settings(
         run_dirs, batch_size=batch_size, set_length=set_length
     )
     (
@@ -313,24 +264,21 @@ def enrich_rows_with_infomec(
     infomec_root.mkdir(parents=True, exist_ok=True)
     for run_dir in tqdm(run_dirs, desc="InfoMEC runs", unit="run"):
         row = row_by_run_dir[run_dir.resolve()]
-        ckpt_path, ckpt_label, selected_epoch, model_selection_tag = (
-            plt_infomec.resolve_run_checkpoint(run_dir, model_selection=model_selection)
+        run_eval = plt_infomec.encode_run_checkpoint_infomec(
+            run_dir,
+            model_selection=model_selection,
+            obs1=obs1,
+            obs2=obs2,
+            labels=labels,
+            sources=sources,
+            batch_size=encode_batch_size,
+            device=device,
+            query_source=query_source,
         )
-        model = torch.load(ckpt_path, map_location=device, weights_only=False).to(device)
-        model.eval()
-        variant = json.loads((run_dir / "variant.json").read_text(encoding="utf-8"))[
-            "variant"
-        ]
-        discrete_latents = plt_infomec.resolve_discrete_latents(
-            model=model, variant=variant
-        )
-        latents = plt_infomec.batched_encode(
-            model, obs1, obs2, labels, encode_batch_size, device,
-            source=query_source,
-        )
-        result = compute_infomec(
-            sources=sources, latents=latents, discrete_latents=discrete_latents
-        )
+        result = run_eval["result"]
+        ckpt_label = run_eval["ckpt_label"]
+        selected_epoch = run_eval["selected_epoch"]
+        model_selection_tag = run_eval["model_selection_tag"]
         row["infom"] = float(result.infom)
         row["infoe"] = float(result.infoe)
         row["infoc"] = float(result.infoc)
@@ -476,8 +424,6 @@ def _maybe_annotate_cells(
     grid: np.ndarray,
     norm: Normalize | LogNorm,
     annotate: bool,
-    x_of: Callable[[int, int], float],
-    y_of: Callable[[int, int], float],
 ) -> None:
     if not annotate:
         return
@@ -490,8 +436,8 @@ def _maybe_annotate_cells(
             val_norm = (val - norm.vmin) / (norm.vmax - norm.vmin)  # type: ignore[attr-defined]
             txt_color = "white" if val_norm < 0.55 else "black"
             ax.text(
-                x_of(i=i, j=j),
-                y_of(i=i, j=j),
+                j,
+                i,
                 f"{val:.3g}",
                 ha="center",
                 va="center",
@@ -554,8 +500,6 @@ def plot_heatmap_ax_raw(
         grid=grid,
         norm=norm,
         annotate=annotate,
-        x_of=lambda i, j: j,
-        y_of=lambda i, j: i,
     )
     return im
 
@@ -578,6 +522,8 @@ def save_metrics_figure(
     fig_h = max(9.0, 0.45 * len(sweep_vals) * nrows)
     fig, axes = plt.subplots(nrows, ncols, figsize=(fig_w, fig_h), squeeze=False)
 
+    metric_meta: dict[str, dict] = {}
+
     def _plot_metric_ax(
         *,
         ax: plt.Axes,
@@ -586,7 +532,8 @@ def save_metrics_figure(
         log_scale: bool,
         show_xlabel: bool,
         show_ylabel: bool,
-    ) -> tuple[plt.cm.ScalarMappable, np.ndarray]:
+    ) -> None:
+        """Draw one heatmap + colorbar and record its ``metric_meta`` entry."""
         grid, _, _ = build_raw_grid(rows, value_key=field)
         finite = grid[np.isfinite(grid)]
         im = plot_heatmap_ax_raw(
@@ -602,9 +549,18 @@ def save_metrics_figure(
             show_ylabel=show_ylabel,
             annotate=annotate,
         )
-        return im, finite
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        metric_meta[field] = {
+            "wandb_key": title,
+            "log_scale": log_scale,
+            "vmin": 0.0
+            if field == "recon_loss"
+            else (float(np.min(finite)) if finite.size else None),
+            "vmax": RECON_LOSS_VMAX
+            if field == "recon_loss"
+            else (float(np.max(finite)) if finite.size else None),
+        }
 
-    metric_meta: dict[str, dict] = {}
     first_wandb_col = next(
         (col_i for col_i, metric in enumerate(wandb_metrics) if metric is not None),
         0,
@@ -615,7 +571,7 @@ def save_metrics_figure(
             ax.set_visible(False)
             continue
         field, title, log_scale = metric
-        im, finite = _plot_metric_ax(
+        _plot_metric_ax(
             ax=ax,
             field=field,
             title=title,
@@ -623,39 +579,16 @@ def save_metrics_figure(
             show_xlabel=False,
             show_ylabel=col_i == first_wandb_col,
         )
-        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-        metric_meta[field] = {
-            "wandb_key": title,
-            "log_scale": log_scale,
-            "vmin": 0.0
-            if field == "recon_loss"
-            else (float(np.min(finite)) if finite.size else None),
-            "vmax": RECON_LOSS_VMAX
-            if field == "recon_loss"
-            else (float(np.max(finite)) if finite.size else None),
-        }
 
     for col_i, (field, title, log_scale) in enumerate(INFOMEC_METRICS):
-        ax = axes[1, col_i]
-        im, finite = _plot_metric_ax(
-            ax=ax,
+        _plot_metric_ax(
+            ax=axes[1, col_i],
             field=field,
             title=title,
             log_scale=log_scale,
             show_xlabel=True,
             show_ylabel=col_i == 0,
         )
-        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-        metric_meta[field] = {
-            "wandb_key": title,
-            "log_scale": log_scale,
-            "vmin": 0.0
-            if field == "recon_loss"
-            else (float(np.min(finite)) if finite.size else None),
-            "vmax": RECON_LOSS_VMAX
-            if field == "recon_loss"
-            else (float(np.max(finite)) if finite.size else None),
-        }
 
     for col_i in range(len(INFOMEC_METRICS), ncols):
         axes[1, col_i].set_visible(False)

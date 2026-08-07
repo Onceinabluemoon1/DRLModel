@@ -133,39 +133,6 @@ def _draw_per_head_kl_bars(
         title_fontsize=title_fontsize,
         head_order=head_order,
     )
-    # if kl_per_head_strata is not None:
-    #     kl_strata = np.asarray(kl_per_head_strata, dtype=np.float64).reshape(-1)
-    #     ...
-
-
-# def _draw_per_head_std_bars(
-#     ax,
-#     *,
-#     prior_std: np.ndarray,
-#     post_std: np.ndarray,
-#     title_fontsize: int,
-#     head_order: list[int] | None = None,
-# ) -> None:
-#     prior = np.asarray(prior_std, dtype=np.float64).reshape(-1)
-#     post = np.asarray(post_std, dtype=np.float64).reshape(-1)
-#     assert prior.shape == post.shape
-#     order = list(range(prior.shape[0])) if head_order is None else list(head_order)
-#     order_arr = np.asarray(order, dtype=np.int64)
-#     prior_ord = prior[order_arr]
-#     post_ord = post[order_arr]
-#     x = np.arange(len(order))
-#     w = 0.35
-#     ax.bar(x - w / 2, prior_ord, width=w, label="prior", color="coral")
-#     ax.bar(x + w / 2, post_ord, width=w, label="posterior", color="seagreen")
-#     ax.set_xticks(x)
-#     ax.set_xticklabels([latent_index_latex(j) for j in order], fontsize=8)
-#     ax.set_ylabel(r"$\sigma$", fontsize=8)
-#     ax.set_title(r"per-head $\sigma$ (prior | posterior)", fontsize=title_fontsize)
-#     ymax = float(max(float(np.max(prior)), float(np.max(post)), 1e-6)) * 1.15
-#     ax.set_ylim(0.0, ymax)
-#     ax.tick_params(axis="y", labelsize=8)
-#     ax.legend(fontsize=7, loc="best")
-#     ax.grid(axis="y", alpha=0.25)
 
 
 def _draw_per_head_mean_std(
@@ -205,32 +172,6 @@ def _draw_per_head_mean_std(
     ax.set_ylim(-y_abs - y_pad, y_abs + y_pad)
     ax.tick_params(axis="y", labelsize=8)
     ax.grid(axis="y", alpha=0.25)
-
-
-# def _draw_per_head_post_mean_std_across_strata_bars(
-#     ax,
-#     *,
-#     post_mean_std_across_strata: np.ndarray,
-#     title_fontsize: int,
-#     head_order: list[int] | None = None,
-# ) -> None:
-#     sig = np.asarray(post_mean_std_across_strata, dtype=np.float64).reshape(-1)
-#     order = list(range(sig.shape[0])) if head_order is None else list(head_order)
-#     order_arr = np.asarray(order, dtype=np.int64)
-#     sig_ord = sig[order_arr]
-#     x = np.arange(len(order))
-#     ax.bar(x, sig_ord, color="seagreen", width=0.7)
-#     ax.set_xticks(x)
-#     ax.set_xticklabels([latent_index_latex(j) for j in order], fontsize=8)
-#     ax.set_ylabel(r"$\mathrm{std}_{\mathrm{strata}}(\bar{\mu})$", fontsize=8)
-#     ax.set_title(
-#         r"per-head $\mathrm{std}_{\mathrm{strata}}(\bar{\mu})$",
-#         fontsize=title_fontsize,
-#     )
-#     ymax = float(np.nanmax(sig_ord)) if sig_ord.size > 0 else 1.0
-#     ax.set_ylim(0.0, max(ymax * 1.15, 1e-6))
-#     ax.tick_params(axis="y", labelsize=8)
-#     ax.grid(axis="y", alpha=0.25)
 
 
 _LATENT_JITTER_Y_LO = -0.35
@@ -560,7 +501,6 @@ def plot_observation_rewards_by_annotator_mode(
     qlae_bin_entropy_per_head: np.ndarray | None = None,
     elbo_post_mean: np.ndarray | None = None,
     elbo_post_mean_std: np.ndarray | None = None,
-    # elbo_post_mean_std_across_strata: np.ndarray | None = None,
     elbo_l_nuisance_per_head: np.ndarray | None = None,
     theta_mean_per_head: np.ndarray | None = None,
     elbo_head_order: list[int] | None = None,

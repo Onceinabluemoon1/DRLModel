@@ -22,7 +22,6 @@ from matplotlib.axes import Axes
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
-import torch
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
@@ -30,7 +29,6 @@ if str(_SCRIPT_DIR) not in sys.path:
 
 import plot_infomec as plt_infomec  # noqa: E402
 from pref_learn.utils.disentangle_sweep import discover_sweep_subruns, sweep_from_variant
-from pref_learn.utils.infomec import compute_infomec  # noqa: E402
 
 
 @dataclass
@@ -205,46 +203,6 @@ def _add_active_latents_twin_beta_sweep(
     )
 
 
-def _effective_sweep_eval_settings(
-    run_dir: Path,
-    *,
-    batch_size: Optional[int],
-    set_length: Optional[int],
-) -> Tuple[str, int, int]:
-    """Resolved dataset path + batch/set sizes used for InfoMEC eval (must match across a sweep)."""
-    with open(run_dir / "variant.json", encoding="utf-8") as vf:
-        variant = json.load(vf)["variant"]
-    dataset_path = plt_infomec.resolve_infomec_dataset_path(
-        run_dir, variant, override=None
-    )
-    bs = int(variant["batch_size"]) if batch_size is None else int(batch_size)
-    sl = int(variant["set_size"]) if set_length is None else int(set_length)
-    return str(dataset_path.resolve()), bs, sl
-
-
-def assert_sweep_runs_share_eval_data(
-    run_dirs: List[Path],
-    *,
-    batch_size: Optional[int],
-    set_length: Optional[int],
-) -> None:
-    if len(run_dirs) <= 1:
-        return
-    ref = _effective_sweep_eval_settings(
-        run_dirs[0], batch_size=batch_size, set_length=set_length
-    )
-    for run_dir in run_dirs[1:]:
-        fp = _effective_sweep_eval_settings(
-            run_dir, batch_size=batch_size, set_length=set_length
-        )
-        if fp != ref:
-            raise ValueError(
-                "Sweep subruns must share infomec dataset_path, batch_size, and set_size for "
-                f"shared eval arrays; {run_dirs[0].name} has {ref!r}, "
-                f"{run_dir.name} has {fp!r}"
-            )
-
-
 def _color_log_beta_one_tick_red(ax: Axes) -> None:
     """If β=1 (10^0) appears as a major x tick, draw that label in red (log-β sweeps)."""
     for loc, tlab in zip(ax.get_xticks(), ax.get_xticklabels()):
@@ -276,7 +234,7 @@ def main(args: SweepCLI) -> None:
     ckpt_display = plt_infomec.model_selection_display_label(args.model_selection)
 
     device = plt_infomec.resolve_eval_device(args.device)
-    assert_sweep_runs_share_eval_data(
+    plt_infomec.assert_runs_share_infomec_eval_settings(
         run_dirs,
         batch_size=args.batch_size,
         set_length=args.set_length,
@@ -322,32 +280,26 @@ def main(args: SweepCLI) -> None:
         f"(device={device}, latent cluster={cluster_part}, ckpt={ckpt_display})..."
     )
     for i, run_dir in enumerate(run_dirs, start=1):
-        with open(run_dir / "variant.json", encoding="utf-8") as vf:
-            variant = json.load(vf)["variant"]
+        run_eval = plt_infomec.encode_run_checkpoint_infomec(
+            run_dir,
+            model_selection=args.model_selection,
+            obs1=obs1,
+            obs2=obs2,
+            labels=labels,
+            sources=sources,
+            batch_size=batch_size,
+            device=device,
+            query_source=query_source,
+        )
+        model = run_eval["model"]
+        variant = run_eval["variant"]
+        discrete_latents = run_eval["discrete_latents"]
+        latents = run_eval["latents"]  # (Q, Z)
+        result = run_eval["result"]
+        ckpt_label = run_eval["ckpt_label"]
+        selected_epoch = run_eval["selected_epoch"]
+        model_selection_tag = run_eval["model_selection_tag"]
         sweep_param_name, beta, sweep_param_label = sweep_from_variant(variant=variant)
-
-        ckpt_path, ckpt_label, selected_epoch, model_selection_tag = (
-            plt_infomec.resolve_run_checkpoint(
-                run_dir, model_selection=args.model_selection
-            )
-        )
-        model = torch.load(ckpt_path, map_location=device, weights_only=False).to(device)
-        model.eval()
-        discrete_latents = plt_infomec.resolve_discrete_latents(
-            model=model, variant=variant
-        )
-        latents = plt_infomec.batched_encode(
-            model,
-            obs1,
-            obs2,
-            labels,
-            batch_size,
-            device,
-            source=query_source,
-        )  # (Q, Z)
-        result = compute_infomec(
-            sources=sources, latents=latents, discrete_latents=discrete_latents
-        )
         latent_dim = int(latents.shape[1])
         latent_names = [f"z{j}" for j in range(latent_dim)]
         n_varies, n_inform, n_active, _latent_dim = (
@@ -497,15 +449,6 @@ def main(args: SweepCLI) -> None:
             title_fontsize=7,
             active_latents=al,
         )
-        # plt_infomec.plot_nmi_heatmap_on_ax(
-        #     ax,
-        #     r["nmi"],
-        #     r["source_names"],
-        #     r["latent_names"],
-        #     title,
-        #     title_fontsize=7,
-        #     active_latents=r["active_latents"],
-        # )
     for j in range(i + 1, nrows * ncols):
         row, col = divmod(j, ncols)
         axes[row][col].set_visible(False)

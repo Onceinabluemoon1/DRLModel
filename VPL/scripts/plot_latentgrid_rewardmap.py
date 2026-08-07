@@ -190,51 +190,19 @@ def sort_easy_nz_png(
     return outdir / REWARD_MODE_OUTDIR[reward_mode] / nz_dir / f"{stem}.png"
 
 
-def infomec_path_metrics(
-    *,
-    infomec: dict[str, float] | None,
-    recon_loss: float | None,
-) -> dict[str, float | None]:
-    if infomec is None:
-        return {
-            "recon_loss": recon_loss,
-            "infom": None,
-            "infoe": None,
-            "infoc": None,
-        }
-    return {
-        "recon_loss": recon_loss,
-        "infom": float(infomec["infom"]),
-        "infoe": float(infomec["infoe"]),
-        "infoc": float(infomec["infoc"]),
-    }
-
-
 def aligned_pref_mode_labels(
     *,
     dataset_path: Path,
     split: str,
+    viz_idx: np.ndarray,
     n_queries: int,
-    viz_data_frac: float,
-    viz_data_seed: int,
 ) -> np.ndarray:
-    """``source_mode`` labels aligned with ``prepare_preference_eval_arrays`` subsample."""
+    """``source_mode`` labels at the exact ``viz_idx`` kept by ``prepare_preference_eval_arrays``."""
     mode_labels = plt_infomec.source_mode_labels_for_split(
         dataset_path=dataset_path,
         split=split,
     )
-    n = int(len(mode_labels))
-    frac_f = float(viz_data_frac)
-    if frac_f >= 1.0 or n <= 1:
-        if n != n_queries:
-            raise ValueError(
-                f"mode_labels len {n} != n_queries {n_queries} without subsample"
-            )
-        return mode_labels
-    k = max(1, int(round(frac_f * n)))
-    rng = np.random.default_rng(seed=viz_data_seed)
-    idx = np.sort(rng.choice(n, size=k, replace=False))
-    out = mode_labels[idx]
+    out = mode_labels[np.asarray(viz_idx, dtype=np.int64)]
     if len(out) != n_queries:
         raise ValueError(f"mode_labels subsample len {len(out)} != n_queries {n_queries}")
     return out
@@ -385,16 +353,6 @@ class LatentGridRewardMapCLI:
     sweep_param_atol: float = 1e-8
 
 
-def sweep_param_matches(
-    *,
-    value: float,
-    target: float,
-    rtol: float,
-    atol: float,
-) -> bool:
-    return bool(np.isclose(float(value), float(target), rtol=rtol, atol=atol))
-
-
 def resolve_latentgrid_metrics_csv(
     *,
     input_dir: Path,
@@ -410,7 +368,7 @@ def resolve_latentgrid_metrics_csv(
     evals_root = input_dir / "evals_latentgrid"
     if not evals_root.is_dir():
         raise FileNotFoundError(
-            f"No evals_latentgrid/ under {input_dir}; run plot_latentgrid_heatmap.py first."
+            f"No evals_latentgrid/ under {input_dir}; run plot_latentgrid_infomec.py first."
         )
     for ts_dir in sorted(
         (p for p in evals_root.iterdir() if p.is_dir()),
@@ -422,7 +380,7 @@ def resolve_latentgrid_metrics_csv(
             return csv_path
     raise FileNotFoundError(
         f"No latentgrid_metrics_train.csv under {evals_root}; "
-        "run plot_latentgrid_heatmap.py first."
+        "run plot_latentgrid_infomec.py first."
     )
 
 
@@ -439,7 +397,7 @@ def resolve_latentgrid_infomec_root(
     infomec_root = csv_path.parent / "infomec"
     if not infomec_root.is_dir():
         raise FileNotFoundError(
-            f"Missing InfoMEC cache: {infomec_root}; run plot_latentgrid_heatmap.py first."
+            f"Missing InfoMEC cache: {infomec_root}; run plot_latentgrid_infomec.py first."
         )
     return infomec_root
 
@@ -750,11 +708,8 @@ def filter_subruns_for_sweep_value(
     rows: list[dict[str, Any]] = []
     for run_dir in discover_sweep_subruns(input_dir):
         meta = load_subrun_metadata(run_dir=run_dir)
-        if not sweep_param_matches(
-            value=meta["sweep_param_value"],
-            target=sweep_param_value,
-            rtol=rtol,
-            atol=atol,
+        if not np.isclose(
+            float(meta["sweep_param_value"]), float(sweep_param_value), rtol=rtol, atol=atol
         ):
             continue
         if not plt_infomec.run_dir_has_checkpoint(
@@ -817,26 +772,6 @@ def resolve_reward_map_layout(
     )
 
 
-def encode_query_latents(
-    *,
-    model: torch.nn.Module,
-    obs1: torch.Tensor,
-    obs2: torch.Tensor,
-    labels: torch.Tensor,
-    source: torch.Tensor | None = None,
-) -> torch.Tensor:
-    enc_kw: dict[str, torch.Tensor] = {}
-    if plt_infomec.model_encode_sources(model=model):
-        if source is None:
-            raise ValueError("Model has encode_sources=True but source is None.")
-        enc_kw["source"] = source
-    if isinstance(model, QLAE):
-        z_q, _ = model.encode(obs1, obs2, labels, **enc_kw)
-        return z_q
-    mean, _ = model.encode(obs1, obs2, labels, **enc_kw)
-    return mean
-
-
 @torch.no_grad()
 def batched_per_head_elbo_stats(
     *,
@@ -863,13 +798,9 @@ def batched_per_head_elbo_stats(
         o1 = torch.from_numpy(obs1[start:end]).float().to(device)
         o2 = torch.from_numpy(obs2[start:end]).float().to(device)
         y = torch.from_numpy(labels[start:end]).float().to(device)
-        enc_kw: dict[str, torch.Tensor] = {}
-        if plt_infomec.model_encode_sources(model=model):
-            if source is None:
-                raise ValueError("Model has encode_sources=True but source is None.")
-            enc_kw["source"] = (
-                torch.from_numpy(source[start:end]).long().to(device)
-            )
+        enc_kw = plt_infomec.encode_source_kwargs(
+            model=model, source=source, start=start, end=end, device=device
+        )
         mean, logvar = model.encode(o1, o2, y, **enc_kw)  # (B, Z), (B, Z)
         post_std = logvar_to_std(logvar)
         q_z = D.Normal(mean, post_std)
@@ -918,13 +849,9 @@ def batched_per_head_zq_std(
         o1 = torch.from_numpy(obs1[start:end]).float().to(device)
         o2 = torch.from_numpy(obs2[start:end]).float().to(device)
         y = torch.from_numpy(labels[start:end]).float().to(device)
-        enc_kw: dict[str, torch.Tensor] = {}
-        if plt_infomec.model_encode_sources(model=model):
-            if source is None:
-                raise ValueError("Model has encode_sources=True but source is None.")
-            enc_kw["source"] = (
-                torch.from_numpy(source[start:end]).long().to(device)
-            )
+        enc_kw = plt_infomec.encode_source_kwargs(
+            model=model, source=source, start=start, end=end, device=device
+        )
         z_c = model.encode_continuous(o1, o2, y, **enc_kw)  # (B, Z)
         quant = model.quantize(z_c)
         z_q = quant["z_q"]
@@ -951,22 +878,6 @@ def batched_per_head_zq_std(
         "zq_bin_entropy_per_head": zq_bin_entropy.detach().cpu().numpy(),
         "query_latents": z_q_all.detach().cpu().numpy(),
     }
-
-
-# def std_post_mean_across_strata(
-#     *,
-#     per_strata_post_mean: list[np.ndarray],
-# ) -> np.ndarray | None:
-#     """Std of per-strata ``\bar{\mu}_j`` across pref modes; ``(Z,)``."""
-#     if not per_strata_post_mean:
-#         return None
-#     stacked = np.stack(
-#         [np.asarray(m, dtype=np.float64).reshape(-1) for m in per_strata_post_mean],
-#         axis=0,
-#     )  # (S, Z)
-#     if stacked.shape[0] == 1:
-#         return np.zeros(stacked.shape[1], dtype=np.float64)
-#     return stacked.std(axis=0, ddof=1)
 
 
 @torch.no_grad()
@@ -1070,48 +981,7 @@ def resolve_btl_logit_scaling(
     return float(train_scaling) / denom
 
 
-def _probabilistic_reward_heads_chunk(
-    *,
-    model: torch.nn.Module,
-    s_a: torch.Tensor,
-    z: torch.Tensor,
-    comparison_obs: torch.Tensor,
-    scaling: float,
-    comp_chunk_size: int,
-    frame_logit_scale: float = 1.0,
-) -> torch.Tensor:
-    """``E_{s_B}[p(y=1 | s_A, s_B, z)]`` per head; one query chunk. ``(M, Z)``."""
-    s_a = model._as_batl_obs(obs=s_a)  # (M, 1, T, O)
-    s_b = model._as_batl_obs(obs=comparison_obs)  # (N, 1, T, O)
-    m_n, _, t_n, _ = s_a.shape
-    n_n = int(s_b.shape[0])
-    z_dim = int(z.shape[-1])
-    p_sum = torch.zeros((m_n, z_dim), device=s_a.device, dtype=s_a.dtype)
-    logit_scale = float(frame_logit_scale)
-
-    for n_start in range(0, n_n, comp_chunk_size):
-        n_end = min(n_start + comp_chunk_size, n_n)
-        s_b_chunk = s_b[n_start:n_end]  # (N_c, 1, T, O)
-        n_c = int(s_b_chunk.shape[0])
-
-        s_a_pair = ei.repeat(s_a, "M 1 T O -> M N T O", N=n_c)
-        s_b_pair = ei.repeat(s_b_chunk, "N 1 T O -> M N T O", M=m_n)
-        z_pair = ei.repeat(z, "M Z -> M N T Z", N=n_c, T=t_n)
-
-        x_a = torch.cat([s_a_pair, z_pair], dim=-1)  # (M, N_c, T, O+Z)
-        x_b = torch.cat([s_b_pair, z_pair], dim=-1)
-        r_a_heads = model.decoder(x_a, vector_rewards=True)  # (M, N_c, T, Z)
-        r_b_heads = model.decoder(x_b, vector_rewards=True)
-
-        r_a_j = r_a_heads.sum(dim=-2) / scaling  # (M, N_c, Z)
-        r_b_j = r_b_heads.sum(dim=-2) / scaling
-        p_pref = torch.sigmoid(logit_scale * (r_a_j - r_b_j))  # (M, N_c, Z)
-        p_sum += p_pref.sum(dim=1)  # (M, Z)
-
-    return p_sum / float(n_n)  # (M, Z)
-
-
-def _probabilistic_reward_heads_batch(
+def _probabilistic_reward_heads(
     *,
     model: torch.nn.Module,
     s_a: torch.Tensor,
@@ -1122,55 +992,41 @@ def _probabilistic_reward_heads_batch(
     comp_chunk_size: int,
     frame_logit_scale: float = 1.0,
 ) -> torch.Tensor:
-    """``E_{s_B}[p(y=1 | s_A, s_B, z)]`` for each head. ``(M, Z)``."""
-    m_n = int(s_a.shape[0])
-    if m_n <= chunk_size:
-        return _probabilistic_reward_heads_chunk(
-            model=model,
-            s_a=s_a,
-            z=z,
-            comparison_obs=comparison_obs,
-            scaling=scaling,
-            comp_chunk_size=comp_chunk_size,
-            frame_logit_scale=frame_logit_scale,
-        )
+    """``E_{s_B}[p(y=1 | s_A, s_B, z)]`` per head; chunked over queries + pool. ``(M, Z)``."""
+    s_a_all = model._as_batl_obs(obs=s_a)  # (M, 1, T, O)
+    s_b = model._as_batl_obs(obs=comparison_obs)  # (N, 1, T, O)
+    m_total, _, t_n, _ = s_a_all.shape
+    n_n = int(s_b.shape[0])
+    z_dim = int(z.shape[-1])
+    logit_scale = float(frame_logit_scale)
+    out = torch.empty((m_total, z_dim), device=s_a_all.device, dtype=s_a_all.dtype)
 
-    chunks: list[torch.Tensor] = []
-    for start in range(0, m_n, chunk_size):
-        end = min(start + chunk_size, m_n)
-        chunks.append(
-            _probabilistic_reward_heads_chunk(
-                model=model,
-                s_a=s_a[start:end],
-                z=z[start:end],
-                comparison_obs=comparison_obs,
-                scaling=scaling,
-                comp_chunk_size=comp_chunk_size,
-                frame_logit_scale=frame_logit_scale,
-            )
-        )
-    return torch.cat(chunks, dim=0)  # (M, Z)
+    for m_start in range(0, m_total, chunk_size):
+        m_end = min(m_start + chunk_size, m_total)
+        s_a_chunk = s_a_all[m_start:m_end]  # (M_c, 1, T, O)
+        z_chunk = z[m_start:m_end]  # (M_c, Z)
+        m_n = m_end - m_start
+        p_sum = torch.zeros((m_n, z_dim), device=s_a_all.device, dtype=s_a_all.dtype)
+        for n_start in range(0, n_n, comp_chunk_size):
+            n_end = min(n_start + comp_chunk_size, n_n)
+            s_b_chunk = s_b[n_start:n_end]  # (N_c, 1, T, O)
+            n_c = int(s_b_chunk.shape[0])
 
+            s_a_pair = ei.repeat(s_a_chunk, "M 1 T O -> M N T O", N=n_c)
+            s_b_pair = ei.repeat(s_b_chunk, "N 1 T O -> M N T O", M=m_n)
+            z_pair = ei.repeat(z_chunk, "M Z -> M N T Z", N=n_c, T=t_n)
 
-def last_traj_scatter_frame_indices(
-    *,
-    q_n: int,
-    s_n: int,
-    t_n: int,
-) -> np.ndarray:
-    """Last frame ``t=T-1`` per ``(q,s)``. ``(Q,S)``."""
-    return np.full((q_n, s_n), t_n - 1, dtype=np.int64)
+            x_a = torch.cat([s_a_pair, z_pair], dim=-1)  # (M, N_c, T, O+Z)
+            x_b = torch.cat([s_b_pair, z_pair], dim=-1)
+            r_a_heads = model.decoder(x_a, vector_rewards=True)  # (M, N_c, T, Z)
+            r_b_heads = model.decoder(x_b, vector_rewards=True)
 
-
-def random_traj_scatter_frame_indices(
-    *,
-    q_n: int,
-    s_n: int,
-    t_n: int,
-) -> np.ndarray:
-    """Random frame per ``(q,s)``. ``(Q,S)``."""
-    rng = np.random.default_rng()
-    return rng.integers(low=0, high=t_n, size=(q_n, s_n))
+            r_a_j = r_a_heads.sum(dim=-2) / scaling  # (M, N_c, Z)
+            r_b_j = r_b_heads.sum(dim=-2) / scaling
+            p_pref = torch.sigmoid(logit_scale * (r_a_j - r_b_j))  # (M, N_c, Z)
+            p_sum += p_pref.sum(dim=1)  # (M, Z)
+        out[m_start:m_end] = p_sum / float(n_n)
+    return out  # (M, Z)
 
 
 def resolve_btl_traj_scatter_indices(
@@ -1180,10 +1036,10 @@ def resolve_btl_traj_scatter_indices(
     t_n: int,
     mode: BtlTrajScatter,
 ) -> np.ndarray:
-    """Pick one frame index per ``(q,s)`` for traj xy or frame BTL. ``(Q,S)``."""
+    """Pick one frame index per ``(q,s)`` for traj xy or frame BTL: last or random. ``(Q,S)``."""
     if mode == BtlTrajScatter.last:
-        return last_traj_scatter_frame_indices(q_n=q_n, s_n=s_n, t_n=t_n)
-    return random_traj_scatter_frame_indices(q_n=q_n, s_n=s_n, t_n=t_n)
+        return np.full((q_n, s_n), t_n - 1, dtype=np.int64)
+    return np.random.default_rng().integers(low=0, high=t_n, size=(q_n, s_n))
 
 
 def scatter_obs_at_traj_frames(
@@ -1211,7 +1067,8 @@ def gather_obs1_at_frame_indices(
     return obs1[b_idx, s_idx, t_idx, :].reshape(b_n * s_n, o_dim)
 
 
-def batched_per_head_rewards_on_obs1(
+@torch.no_grad()
+def batched_rewards_on_obs1(
     *,
     model: torch.nn.Module,
     obs1: np.ndarray,
@@ -1220,17 +1077,22 @@ def batched_per_head_rewards_on_obs1(
     batch_size: int,
     device: torch.device,
     reward_mode: Literal["raw", "btl"],
+    per_head: bool,
     btl_unit: RewardMapBtlUnit = RewardMapBtlUnit.frame,
     btl_logit_scaling: BtlLogitScaling = BtlLogitScaling.train,
     comparison_obs: np.ndarray | None = None,
-    prob_max_comp: int = 512,
     prob_chunk_size: int = 64,
     prob_comp_chunk_size: int = 64,
     source: np.ndarray | None = None,
     scatter_t_idx: np.ndarray | None = None,
     precomputed_theta: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Per-head rewards on ``obs1``; ``(Q,S,Z)`` if traj/sampled-frame prob else ``(Q,S,T,Z)`` or ``(Q,S,Z)`` raw traj."""
+    """Rewards on ``obs1``: per-head ``(…, Z)`` or summed-head scalar ``(…,)``.
+
+    Segment-level ``(Q,S[,Z])`` if traj / sampled-frame btl, else ``(Q,S,T[,Z])``.
+    ``btl`` summed uses ``model.get_probabilistic_reward`` (sigmoid of summed logits,
+    not the sum of per-head probabilities).
+    """
     q_n = int(len(obs1))
     s_n = int(obs1.shape[1])
     t_n = int(obs1.shape[2])
@@ -1244,19 +1106,19 @@ def batched_per_head_rewards_on_obs1(
         and scatter_t_idx is not None
     )
     segment_rewards = traj_mode or frame_sampled_prob
-    if segment_rewards:
-        rewards = np.full((q_n, s_n, n_heads), np.nan, dtype=np.float64)
-    else:
-        rewards = np.full((q_n, s_n, t_n, n_heads), np.nan, dtype=np.float64)
+    base_shape = (q_n, s_n) if segment_rewards else (q_n, s_n, t_n)
+    head_shape = (n_heads,) if per_head else ()
+    rewards = np.full((*base_shape, *head_shape), np.nan, dtype=np.float64)
 
     comp_t: torch.Tensor | None = None
     if reward_mode == "btl":
         assert comparison_obs is not None
         comp_t = torch.from_numpy(comparison_obs).float().to(device)
 
+    #* per-head btl scaling only; summed btl scales inside get_probabilistic_reward
     scaling = float(getattr(model, "scaling", 1.0))
     frame_logit_scale = 1.0
-    if reward_mode == "btl":
+    if reward_mode == "btl" and per_head:
         scaling = resolve_btl_logit_scaling(
             train_scaling=scaling,
             btl_logit_scaling=btl_logit_scaling,
@@ -1273,228 +1135,87 @@ def batched_per_head_rewards_on_obs1(
         o2 = torch.from_numpy(obs2[start:end]).float().to(device)
         y = torch.from_numpy(labels[start:end]).float().to(device)
         b_n = end - start
-        u: torch.Tensor | None = None
-        if plt_infomec.model_encode_sources(model=model):
-            if source is None:
-                raise ValueError("Model has encode_sources=True but source is None.")
-            u = torch.from_numpy(source[start:end]).long().to(device)
-        with torch.no_grad():
-            z_q = encode_query_latents(
-                model=model,
-                obs1=o1,
-                obs2=o2,
-                labels=y,
-                source=u,
-            )  # (B, Z)
-            z = ei.repeat(z_q, "B Z -> B S T Z", S=s_n, T=t_n)
-            if reward_mode == "raw":
-                dec = model.decoder
-                if precomputed_theta is not None:
-                    theta_t = (
-                        torch.from_numpy(np.asarray(precomputed_theta)[start:end])
-                        .float()
-                        .to(device)
-                    )
-                    if theta_t.ndim == 3:
-                        z_seg = ei.repeat(z_q[:, :n_heads], "B Z -> B S Z", S=s_n)
-                        r_seg = theta_t[..., :n_heads] * z_seg  # (B, S, Z)
-                        rewards[start:end, :, :n_heads] = r_seg.detach().cpu().numpy()
-                    else:
-                        r_heads = theta_t[..., :n_heads] * z[..., :n_heads]
-                        rewards[start:end, :, :, :n_heads] = (
-                            r_heads.detach().cpu().numpy()
-                        )
-                elif isinstance(dec, MultiplicativeDecoder):
-                    theta = dec.theta_from_obs(o1)  # (B, S, T, Z)
-                    r_heads = theta[..., :n_heads] * z[..., :n_heads]
-                    if traj_mode:
-                        rewards[start:end, :, :n_heads] = (
-                            r_heads.sum(dim=-2).detach().cpu().numpy()
-                        )
-                    else:
-                        rewards[start:end, :, :, :n_heads] = (
-                            r_heads.detach().cpu().numpy()
-                        )
+        enc_kw = plt_infomec.encode_source_kwargs(
+            model=model, source=source, start=start, end=end, device=device
+        )
+        z_q = plt_infomec.encode_preference_latent_mean(model, o1, o2, y, **enc_kw)
+
+        if reward_mode == "raw":
+            if not per_head:
+                z = ei.repeat(z_q, "B Z -> B S T Z", S=s_n, T=t_n)
+                r = model.decoder(torch.cat([o1, z], dim=-1), vector_rewards=False)
+                if traj_mode:
+                    rewards[start:end] = r.sum(dim=-2).squeeze(-1).detach().cpu().numpy()
                 else:
-                    x = torch.cat([o1, z], dim=-1)  # (B, S, T, O+Z)
-                    r_heads = dec(x, vector_rewards=True)
-                    if traj_mode:
-                        rewards[start:end, :, :n_heads] = (
-                            r_heads[..., :n_heads].sum(dim=-2).detach().cpu().numpy()
-                        )
-                    else:
-                        rewards[start:end, :, :, :n_heads] = (
-                            r_heads[..., :n_heads].detach().cpu().numpy()
-                        )
-                continue
-
-            assert comp_t is not None
-            if traj_mode:
-                seg_flat = o1.reshape(b_n * s_n, t_n, o_dim)
-                z_flat = ei.repeat(z_q, "B Z -> (B S) Z", S=s_n)
-                r_flat = _probabilistic_reward_heads_batch(
-                    model=model,
-                    s_a=seg_flat,
-                    z=z_flat,
-                    comparison_obs=comp_t,
-                    scaling=scaling,
-                    chunk_size=prob_chunk_size,
-                    comp_chunk_size=prob_comp_chunk_size,
-                    frame_logit_scale=frame_logit_scale,
-                )  # (B*S, Z)
-                rewards[start:end, :, :n_heads] = (
-                    r_flat[:, :n_heads].reshape(b_n, s_n, n_heads).detach().cpu().numpy()
+                    rewards[start:end] = r.squeeze(-1).detach().cpu().numpy()
+            elif precomputed_theta is not None:
+                theta_t = (
+                    torch.from_numpy(np.asarray(precomputed_theta)[start:end])
+                    .float()
+                    .to(device)
                 )
-                continue
+                if theta_t.ndim == 3:  # segment theta (B, S, Z)
+                    z_seg = ei.repeat(z_q[:, :n_heads], "B Z -> B S Z", S=s_n)
+                    r_seg = theta_t[..., :n_heads] * z_seg  # (B, S, Z)
+                    rewards[start:end, :, :n_heads] = r_seg.detach().cpu().numpy()
+                else:
+                    z = ei.repeat(z_q, "B Z -> B S T Z", S=s_n, T=t_n)
+                    r_heads = theta_t[..., :n_heads] * z[..., :n_heads]
+                    rewards[start:end, :, :, :n_heads] = r_heads.detach().cpu().numpy()
+            else:
+                z = ei.repeat(z_q, "B Z -> B S T Z", S=s_n, T=t_n)
+                r_heads = model.decoder(torch.cat([o1, z], dim=-1), vector_rewards=True)
+                if traj_mode:
+                    rewards[start:end, :, :n_heads] = (
+                        r_heads[..., :n_heads].sum(dim=-2).detach().cpu().numpy()
+                    )
+                else:
+                    rewards[start:end, :, :, :n_heads] = (
+                        r_heads[..., :n_heads].detach().cpu().numpy()
+                    )
+            continue
 
-            if frame_sampled_prob:
-                assert scatter_t_idx is not None
-                o_flat = gather_obs1_at_frame_indices(
-                    obs1=o1,
-                    scatter_t_idx=scatter_t_idx[start:end],
-                )  # (B*S, O)
-                z_flat = ei.repeat(z_q, "B Z -> (B S) Z", S=s_n)
-                r_flat = _probabilistic_reward_heads_batch(
-                    model=model,
-                    s_a=o_flat,
-                    z=z_flat,
-                    comparison_obs=comp_t,
-                    scaling=scaling,
-                    chunk_size=prob_chunk_size,
-                    comp_chunk_size=prob_comp_chunk_size,
-                    frame_logit_scale=frame_logit_scale,
-                )  # (B*S, Z)
-                rewards[start:end, :, :n_heads] = (
-                    r_flat[:, :n_heads].reshape(b_n, s_n, n_heads).detach().cpu().numpy()
-                )
-                continue
-
-            o_flat = o1.reshape(b_n * s_n * t_n, o_dim)
+        #* btl: one flat (s_A, z) batch per unit (segment / sampled frame / all frames)
+        assert comp_t is not None
+        if traj_mode:
+            s_a = o1.reshape(b_n * s_n, t_n, o_dim)
+            z_flat = ei.repeat(z_q, "B Z -> (B S) Z", S=s_n)
+            out_shape: tuple[int, ...] = (b_n, s_n)
+        elif frame_sampled_prob:
+            assert scatter_t_idx is not None
+            s_a = gather_obs1_at_frame_indices(
+                obs1=o1,
+                scatter_t_idx=scatter_t_idx[start:end],
+            )  # (B*S, O)
+            z_flat = ei.repeat(z_q, "B Z -> (B S) Z", S=s_n)
+            out_shape = (b_n, s_n)
+        else:
+            s_a = o1.reshape(b_n * s_n * t_n, o_dim)
             z_flat = ei.repeat(z_q, "B Z -> (B S T) Z", S=s_n, T=t_n)
-            r_flat = _probabilistic_reward_heads_batch(
+            out_shape = (b_n, s_n, t_n)
+
+        if per_head:
+            r_flat = _probabilistic_reward_heads(
                 model=model,
-                s_a=o_flat,
+                s_a=s_a,
                 z=z_flat,
                 comparison_obs=comp_t,
                 scaling=scaling,
                 chunk_size=prob_chunk_size,
                 comp_chunk_size=prob_comp_chunk_size,
                 frame_logit_scale=frame_logit_scale,
-            )  # (B*S*T, Z)
-            rewards[start:end, :, :, :n_heads] = (
-                r_flat[:, :n_heads].reshape(b_n, s_n, t_n, n_heads).detach().cpu().numpy()
+            )  # (M, Z)
+            rewards[start:end, ..., :n_heads] = (
+                r_flat[:, :n_heads].reshape(*out_shape, n_heads).detach().cpu().numpy()
             )
-    return rewards
-
-
-def batched_summed_reward_on_obs1(
-    *,
-    model: torch.nn.Module,
-    obs1: np.ndarray,
-    obs2: np.ndarray,
-    labels: np.ndarray,
-    batch_size: int,
-    device: torch.device,
-    reward_mode: Literal["raw", "btl"],
-    btl_unit: RewardMapBtlUnit = RewardMapBtlUnit.frame,
-    comparison_obs: np.ndarray | None = None,
-    prob_chunk_size: int = 64,
-    source: np.ndarray | None = None,
-    scatter_t_idx: np.ndarray | None = None,
-) -> np.ndarray:
-    """Summed-head rewards on ``obs1``; ``(Q,S)`` if traj/sampled-frame prob else ``(Q,S,T)`` or ``(Q,S)`` raw traj."""
-    q_n = int(len(obs1))
-    s_n = int(obs1.shape[1])
-    t_n = int(obs1.shape[2])
-    o_dim = int(obs1.shape[-1])
-    traj_mode = btl_unit == RewardMapBtlUnit.traj
-    frame_sampled_prob = (
-        btl_unit == RewardMapBtlUnit.frame
-        and reward_mode == "btl"
-        and scatter_t_idx is not None
-    )
-    segment_rewards = traj_mode or frame_sampled_prob
-    if segment_rewards:
-        rewards = np.full((q_n, s_n), np.nan, dtype=np.float64)
-    else:
-        rewards = np.full((q_n, s_n, t_n), np.nan, dtype=np.float64)
-
-    comp_t: torch.Tensor | None = None
-    if reward_mode == "btl":
-        assert comparison_obs is not None
-        comp_t = torch.from_numpy(comparison_obs).float().to(device)
-
-    for start in range(0, q_n, batch_size):
-        end = min(start + batch_size, q_n)
-        o1 = torch.from_numpy(obs1[start:end]).float().to(device)  # (B, S, T, O)
-        o2 = torch.from_numpy(obs2[start:end]).float().to(device)
-        y = torch.from_numpy(labels[start:end]).float().to(device)
-        b_n = end - start
-        u: torch.Tensor | None = None
-        if plt_infomec.model_encode_sources(model=model):
-            if source is None:
-                raise ValueError("Model has encode_sources=True but source is None.")
-            u = torch.from_numpy(source[start:end]).long().to(device)
-        with torch.no_grad():
-            z_q = encode_query_latents(
-                model=model,
-                obs1=o1,
-                obs2=o2,
-                labels=y,
-                source=u,
-            )  # (B, Z)
-            z = ei.repeat(z_q, "B Z -> B S T Z", S=s_n, T=t_n)
-            if reward_mode == "raw":
-                x = torch.cat([o1, z], dim=-1)  # (B, S, T, O+Z)
-                r = model.decoder(x, vector_rewards=False)  # (B, S, T, 1)
-                if traj_mode:
-                    rewards[start:end, :] = (
-                        r.sum(dim=-2).squeeze(-1).detach().cpu().numpy()
-                    )
-                else:
-                    rewards[start:end, :, :] = r.squeeze(-1).detach().cpu().numpy()
-                continue
-
-            assert comp_t is not None
-            if traj_mode:
-                seg_flat = o1.reshape(b_n * s_n, t_n, o_dim)
-                z_flat = ei.repeat(z_q, "B Z -> (B S) Z", S=s_n)
-                r_flat = model.get_probabilistic_reward(
-                    s_a=seg_flat,
-                    z=z_flat,
-                    comparison_obs=comp_t,
-                    chunk_size=prob_chunk_size,
-                )  # (B*S, 1)
-                rewards[start:end, :] = r_flat.reshape(b_n, s_n).detach().cpu().numpy()
-                continue
-
-            if frame_sampled_prob:
-                assert scatter_t_idx is not None
-                o_flat = gather_obs1_at_frame_indices(
-                    obs1=o1,
-                    scatter_t_idx=scatter_t_idx[start:end],
-                )  # (B*S, O)
-                z_flat = ei.repeat(z_q, "B Z -> (B S) Z", S=s_n)
-                r_flat = model.get_probabilistic_reward(
-                    s_a=o_flat,
-                    z=z_flat,
-                    comparison_obs=comp_t,
-                    chunk_size=prob_chunk_size,
-                )  # (B*S, 1)
-                rewards[start:end, :] = r_flat.reshape(b_n, s_n).detach().cpu().numpy()
-                continue
-
-            o_flat = o1.reshape(b_n * s_n * t_n, o_dim)
-            z_flat = ei.repeat(z_q, "B Z -> (B S T) Z", S=s_n, T=t_n)
+        else:
             r_flat = model.get_probabilistic_reward(
-                s_a=o_flat,
+                s_a=s_a,
                 z=z_flat,
                 comparison_obs=comp_t,
                 chunk_size=prob_chunk_size,
-            )  # (B*S*T, 1)
-            rewards[start:end, :, :] = (
-                r_flat.reshape(b_n, s_n, t_n).detach().cpu().numpy()
-            )
+            )  # (M, 1)
+            rewards[start:end] = r_flat.reshape(out_shape).detach().cpu().numpy()
     return rewards
 
 
@@ -1805,7 +1526,6 @@ def save_per_head_reward_figure(
     qlae_bin_entropy_per_head: np.ndarray | None = None,
     elbo_post_mean: np.ndarray | None = None,
     elbo_post_mean_std: np.ndarray | None = None,
-    # elbo_post_mean_std_across_strata: np.ndarray | None = None,
     elbo_l_nuisance_per_head: np.ndarray | None = None,
     theta_mean_per_head: np.ndarray | None = None,
     raw_reward_standardize: bool = False,
@@ -1923,7 +1643,6 @@ def save_per_head_reward_figure(
         qlae_bin_entropy_per_head=qlae_bin_entropy_per_head,
         elbo_post_mean=elbo_post_mean,
         elbo_post_mean_std=elbo_post_mean_std,
-        # elbo_post_mean_std_across_strata=elbo_post_mean_std_across_strata,
         elbo_l_nuisance_per_head=elbo_l_nuisance_per_head,
         theta_mean_per_head=theta_mean_per_head,
         elbo_head_order=bar_order,
@@ -2002,6 +1721,7 @@ def main() -> None:
         dataset_path,
         query_source,
         device,
+        viz_idx,
     ) = plt_infomec.prepare_preference_eval_arrays(
         ref_run_dir,
         split=args.split,
@@ -2053,9 +1773,8 @@ def main() -> None:
         pref_mode_labels = aligned_pref_mode_labels(
             dataset_path=dataset_path,
             split=args.split,
+            viz_idx=viz_idx,
             n_queries=q_n,
-            viz_data_frac=args.viz_data_frac,
-            viz_data_seed=args.viz_data_seed,
         )
         raw_names = plt_infomec.source_mode_names_from_dataset(dataset_path=dataset_path)
         n_pref_modes = plt_infomec.resolve_n_annotator_modes(
@@ -2227,10 +1946,12 @@ def main() -> None:
         if infomec is not None:
             entry["infomec"] = infomec
 
-        path_metrics = infomec_path_metrics(
-            infomec=infomec,
-            recon_loss=recon_loss,
-        )
+        path_metrics = {
+            "recon_loss": recon_loss,
+            "infom": None if infomec is None else float(infomec["infom"]),
+            "infoe": None if infomec is None else float(infomec["infoe"]),
+            "infoc": None if infomec is None else float(infomec["infoc"]),
+        }
         global_theta_mean: np.ndarray | None = None
         if multi_decoder:
             global_theta_mean = batched_mean_theta_per_head(
@@ -2303,7 +2024,7 @@ def main() -> None:
                 )
 
         for mode in modes:
-            rewards = batched_per_head_rewards_on_obs1(
+            rewards = batched_rewards_on_obs1(
                 model=model,
                 obs1=obs1,
                 obs2=obs2,
@@ -2311,10 +2032,10 @@ def main() -> None:
                 batch_size=batch_size,
                 device=device,
                 reward_mode=mode,
+                per_head=True,
                 btl_unit=args.btl_unit,
                 btl_logit_scaling=args.btl_logit_scaling,
                 comparison_obs=comparison_pool,
-                prob_max_comp=args.prob_max_comp,
                 prob_chunk_size=args.prob_chunk_size,
                 prob_comp_chunk_size=args.prob_comp_chunk_size,
                 source=query_source,
@@ -2392,7 +2113,7 @@ def main() -> None:
                     save_kw["reward_vmin"] = raw_vmin
                     save_kw["reward_vmax"] = raw_vmax
             else:
-                summed_rewards = batched_summed_reward_on_obs1(
+                summed_rewards = batched_rewards_on_obs1(
                     model=model,
                     obs1=obs1,
                     obs2=obs2,
@@ -2400,6 +2121,7 @@ def main() -> None:
                     batch_size=batch_size,
                     device=device,
                     reward_mode=mode,
+                    per_head=False,
                     btl_unit=args.btl_unit,
                     comparison_obs=comparison_pool,
                     prob_chunk_size=args.prob_chunk_size,
@@ -2458,7 +2180,6 @@ def main() -> None:
             )
 
             stratified: dict[str, Any] = {}
-            # strata_post_means: list[np.ndarray] = []
             for (
                 panel_idx,
                 panel_name,
@@ -2533,22 +2254,11 @@ def main() -> None:
                             post_mean=panel_elbo["post_mean"],
                             post_mean_std=panel_elbo["post_mean_std"],
                         )
-                    # if panel_name != "aggregate":
-                    #     strata_post_means.append(panel_elbo["post_mean"])
-                    # if panel_name == "aggregate":
-                    #     across = std_post_mean_across_strata(
-                    #         per_strata_post_mean=strata_post_means,
-                    #     )
-                    #     if across is not None:
-                    #         panel_save_kw["elbo_post_mean_std_across_strata"] = across
-                    #         panel_save_kw.pop("elbo_post_mean", None)
-                    #         panel_save_kw.pop("elbo_post_mean_std", None)
                 elif elbo_stats is not None:
                     panel_save_kw.pop("elbo_kl_per_head", None)
                     panel_save_kw.pop("elbo_post_mean", None)
                     panel_save_kw.pop("elbo_post_mean_std", None)
                     panel_save_kw.pop("elbo_l_nuisance_per_head", None)
-                    # panel_save_kw.pop("elbo_post_mean_std_across_strata", None)
                 if multi_decoder and n_q_p > 0:
                     panel_save_kw["theta_mean_per_head"] = batched_mean_theta_per_head(
                         decoder=model.decoder,
