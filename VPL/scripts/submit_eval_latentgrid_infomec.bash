@@ -43,9 +43,15 @@ split=all  # all | train | eval
 device=cuda  # auto | cuda | cpu
 dpi=200
 num_bins=10
+pref_diagonal=True  # sort-4goals: append pref_diagonal source column for InfoMEC
 
 num_inputs=${#INPUT_DIRS[@]}
 last_input_idx=$((num_inputs - 1))
+
+pref_diagonal_args=()
+if [ "${pref_diagonal}" = True ] || [ "${pref_diagonal}" = true ]; then
+  pref_diagonal_args=(--pref-diagonal)
+fi
 
 idx="${SLURM_ARRAY_TASK_ID:-0}"
 if [ "${idx}" -ge "${num_inputs}" ]; then
@@ -61,4 +67,5 @@ python scripts/plot_latentgrid_infomec.py \
   --split="${split}" \
   --device="${device}" \
   --dpi="${dpi}" \
-  --num-bins="${num_bins}"
+  --num-bins="${num_bins}" \
+  "${pref_diagonal_args[@]}"

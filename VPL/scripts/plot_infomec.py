@@ -183,6 +183,9 @@ class AnalysisCLI:
     num_bins: int = 10
     """Histogram bins when discretizing continuous sources."""
 
+    pref_diagonal: bool = False
+    """Sort-4goals InfoMEC only: append ``pref_diagonal`` source (3 classes) from vert/hori."""
+
     device: str = "auto"
     """torch device name, or 'auto'."""
 
@@ -741,6 +744,7 @@ def save_eval_artifacts_after_encode(
     learned_reward_sweep_outdir: Optional[Path] = None,
     learned_reward_sweep_comment: Optional[str] = None,
     query_source: np.ndarray | None = None,
+    pref_diagonal: bool = False,
 ) -> Dict[str, Any]:
     """Persist latents, NMI heatmap, latent 2D embedding, infomec_metrics.json, summary.txt under outdir.
 
@@ -886,6 +890,7 @@ def save_eval_artifacts_after_encode(
             "set_length_used": int(variant["set_size"]),
             "source_keys": source_keys,
             "source_names": source_names,
+            "pref_diagonal": pref_diagonal,
             "num_samples": int(len(obs1)),
             "num_sources": int(sources.shape[1]),
             "latent_dim": int(latents.shape[1]),
@@ -1177,6 +1182,75 @@ def infer_source_columns(
             columns.append(np.round(col).astype(np.int32))
             names.append(key if arr.shape[1] == 1 else f"{key}[{j}]")
     return np.stack(columns, axis=1), names
+
+
+PREF_DIAGONAL_SOURCE_NAME = "pref_diagonal"
+
+
+def is_sort_four_goals_env(env_name: str) -> bool:
+    """True for Ravens sort-easy-4goals gym ids."""
+    return parse_sort_n_goals(env_name=env_name) == 4
+
+
+def diagonality_from_vert_hori(*, vert_hori: np.ndarray) -> np.ndarray:
+    """
+    Derive ``pref_diagonal`` from ``(pref_vertical, pref_horizontal)``, each in ``{0,1,2}``.
+
+    * 0: exactly one axis is 0 (axis-aligned modes).
+    * 1: both equal and non-zero, i.e. ``[1,1]`` or ``[2,2]``.
+    * 2: both non-zero and unequal, i.e. ``[1,2]`` or ``[2,1]``.
+    """
+    vh = np.asarray(vert_hori, dtype=np.int32)
+    if vh.ndim != 2 or int(vh.shape[1]) != 2:
+        raise ValueError(f"expected vert_hori (N, 2), got {vh.shape!r}")
+    v = vh[:, 0]
+    h = vh[:, 1]
+    diag = np.full(v.shape[0], -1, dtype=np.int32)
+    one_zero = (v == 0) ^ (h == 0)
+    both_eq = (v == h) & (v != 0) & (h != 0)
+    both_neq = (v != 0) & (h != 0) & (v != h)
+    diag[one_zero] = 0
+    diag[both_eq] = 1
+    diag[both_neq] = 2
+    if np.any(diag < 0):
+        bad = np.where(diag < 0)[0][:5]
+        raise ValueError(
+            "diagonality_from_vert_hori: unmapped (pref_vertical, pref_horizontal) rows, "
+            f"e.g. {vert_hori[bad].tolist()}"
+        )
+    return diag
+
+
+def maybe_append_diagonality_source(
+    *,
+    sources: np.ndarray,
+    source_names: List[str],
+    pref_diagonal: bool,
+    env_name: str,
+) -> Tuple[np.ndarray, List[str]]:
+    """Append ``pref_diagonal`` column for sort-4goals InfoMEC: ``(N, 2)`` -> ``(N, 3)``."""
+    if not pref_diagonal:
+        return sources, source_names
+    if not is_sort_four_goals_env(env_name=env_name):
+        raise ValueError(
+            "pref_diagonal=True requires sort-easy-4goals env; "
+            f"got env={env_name!r}"
+        )
+    src = np.asarray(sources)
+    if src.ndim != 2 or int(src.shape[1]) < 2:
+        raise ValueError(
+            "pref_diagonal needs sources with >=2 columns "
+            f"(pref_vertical, pref_horizontal); got shape {src.shape!r}"
+        )
+    vert_hori = src[:, :2]
+    diag_col = diagonality_from_vert_hori(vert_hori=vert_hori)[:, None]  # (N, 1)
+    names = list(source_names)
+    if len(names) >= 2:
+        names_out = [*names[:2], PREF_DIAGONAL_SOURCE_NAME, *names[2:]]
+    else:
+        names_out = ["pref_vertical", "pref_horizontal", PREF_DIAGONAL_SOURCE_NAME]
+    sources_out = np.concatenate([vert_hori, diag_col, src[:, 2:]], axis=1)
+    return sources_out, names_out
 
 
 def model_encode_sources(model: torch.nn.Module) -> bool:
@@ -1947,6 +2021,7 @@ def prepare_infomec_eval_arrays(
     set_length: Optional[int],
     dataset_override: Optional[Path],
     device_str: str,
+    pref_diagonal: bool = False,
 ) -> Tuple[
     np.ndarray,
     np.ndarray,
@@ -1994,6 +2069,12 @@ def prepare_infomec_eval_arrays(
         source_cols.append(cols)
         source_names.extend(names)
     sources = np.concatenate(source_cols, axis=1)
+    sources, source_names = maybe_append_diagonality_source(
+        sources=sources,
+        source_names=source_names,
+        pref_diagonal=pref_diagonal,
+        env_name=str(variant.get("env", "")),
+    )
     query_source = slice_query_source(batch=batch, idx=idx)
     return (
         obs1,
@@ -2518,6 +2599,7 @@ def main(args: AnalysisCLI) -> None:
         set_length=args.set_length,
         dataset_override=args.dataset,
         device_str=args.device,
+        pref_diagonal=args.pref_diagonal,
     )
     print(
         f"Loaded eval split={args.split!r} pref_dataset="
@@ -2659,6 +2741,7 @@ def main(args: AnalysisCLI) -> None:
         learned_reward_mode=args.learned_reward_mode,
         learned_reward_max_comp=args.learned_reward_max_comp,
         query_source=query_source,
+        pref_diagonal=args.pref_diagonal,
     )
     if epoch_payload is not None:
         save_infomec_epoch_series_artifacts(

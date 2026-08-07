@@ -110,6 +110,9 @@ class LatentSweepHeatmapCLI:
     num_bins: int = 10
     """Histogram bins when discretizing continuous sources for InfoMEC."""
 
+    pref_diagonal: bool = False
+    """Sort-4goals InfoMEC only: append ``pref_diagonal`` source (3 classes) from vert/hori."""
+
     device: str = "auto"
     """Torch device for InfoMEC encode, or ``auto``."""
 
@@ -256,6 +259,7 @@ def enrich_rows_with_infomec(
     num_bins: int,
     device_str: str,
     outdir: Path,
+    pref_diagonal: bool = False,
 ) -> list[dict]:
     """Encode each subrun checkpoint once and attach InfoM / InfoE / InfoC to ``rows``."""
     row_by_run_dir = {Path(r["run_dir"]).resolve(): r for r in rows}
@@ -297,10 +301,12 @@ def enrich_rows_with_infomec(
         set_length=set_length,
         dataset_override=None,
         device_str=device_str,
+        pref_diagonal=pref_diagonal,
     )
     print(
         f"InfoMEC eval split={split!r} dataset={dataset_path} "
-        f"({len(obs1)} queries, device={device})"
+        f"({len(obs1)} queries, device={device}"
+        f"{', pref_diagonal=True' if pref_diagonal else ''})"
     )
 
     infomec_root = outdir / "infomec"
@@ -345,6 +351,7 @@ def enrich_rows_with_infomec(
             "latent_dim": row["latent_dim"],
             "infomec_split": split,
             "infomec_dataset": str(dataset_path),
+            "pref_diagonal": pref_diagonal,
             "checkpoint": ckpt_label,
             "selected_epoch": selected_epoch,
             "model_selection": model_selection_tag,
@@ -746,6 +753,7 @@ def main(args: LatentSweepHeatmapCLI) -> None:
             num_bins=args.num_bins,
             device_str=args.device,
             outdir=outdir,
+            pref_diagonal=args.pref_diagonal,
         )
         infomec_outdir = str(outdir / "infomec")
     infomec_evaluated = True
@@ -785,6 +793,7 @@ def main(args: LatentSweepHeatmapCLI) -> None:
         "infomec_evaluated": infomec_evaluated,
         "infomec_model_selection": args.model_selection.value,
         "infomec_split": args.split,
+        "pref_diagonal": args.pref_diagonal,
         "infomec_outdir": infomec_outdir,
         "figure": str(png_path),
         "metrics": metric_meta,

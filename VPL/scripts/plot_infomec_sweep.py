@@ -58,6 +58,9 @@ class SweepCLI:
     num_bins: int = 10
     """Histogram bins when discretizing continuous sources."""
 
+    pref_diagonal: bool = False
+    """Sort-4goals InfoMEC only: append ``pref_diagonal`` source (3 classes) from vert/hori."""
+
     device: str = "auto"
     """torch device name, or 'auto'."""
 
@@ -298,6 +301,7 @@ def main(args: SweepCLI) -> None:
         set_length=args.set_length,
         dataset_override=None,
         device_str=args.device,
+        pref_diagonal=args.pref_diagonal,
     )
     mode_color = plt_infomec.source_mode_labels_for_split(
         dataset_path=dataset_path, split=args.split
@@ -417,6 +421,7 @@ def main(args: SweepCLI) -> None:
             learned_reward_max_comp=args.learned_reward_max_comp,
             learned_reward_sweep_outdir=outdir,
             learned_reward_sweep_comment=comment,
+            pref_diagonal=args.pref_diagonal,
         )
 
         runs_data.append(
