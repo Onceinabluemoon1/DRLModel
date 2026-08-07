@@ -50,12 +50,13 @@ INPUT_DIRS=(
 #* override: sweep_param_value=0.01  (unset = auto-select from evals_latentgrid metrics)
 
 #* outputs (sort-easy): evals_rewardmap/<ts>_…/btl_rewards/nz=<nz>_recon=…_M=…_E=…_C=…/
-#*   nz=<nz>_00left.png … nz=<nz>_07bottom_right.png, nz=<nz>_08aggregate.png
+#*   nz=<nz>_00left.png … nz=<nz>_07bottom_right.png, nz=<nz>_08aggregate.png,
+#*   nz=<nz>_09latent_axes.png
 
 #* plot_latentgrid_rewardmap CLI
 topk=4  # among HP rows with ≥1 passing cell, keep up to this many lowest mean passing recon
 recon_loss_threshold=0.1  # optional; row filter + top-k/mean recon + InfoM tie-break on passing cells
-sweep_param_value=0.01  # ! optional override; unset = auto from evals_latentgrid metrics
+sweep_param_value=0.1  # ! optional override; unset = auto from evals_latentgrid metrics
 reward_mode=btl  # raw | btl | both
 model_selection=final  # best | final
 split=all  # all | train | eval

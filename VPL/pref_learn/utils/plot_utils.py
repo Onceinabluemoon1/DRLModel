@@ -2,6 +2,8 @@ import matplotlib
 import matplotlib.cm as cm
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.lines import Line2D
+from matplotlib.transforms import blended_transform_factory
 import torch
 import wandb
 from pref_learn.models.utils import get_all_posterior, get_biased
@@ -229,6 +231,240 @@ def _draw_per_head_mean_std(
 #     ax.set_ylim(0.0, max(ymax * 1.15, 1e-6))
 #     ax.tick_params(axis="y", labelsize=8)
 #     ax.grid(axis="y", alpha=0.25)
+
+
+_LATENT_JITTER_Y_LO = -0.35
+_LATENT_JITTER_Y_HI = 0.35
+_LATENT_JITTER_Y_PAD = 0.05
+_LATENT_JITTER_KL_MIN = 1e-3
+
+
+def _latent_jitter_head_order(
+    head_order: list[int],
+    kl_per_head: np.ndarray,
+    *,
+    kl_min: float = _LATENT_JITTER_KL_MIN,
+) -> list[int]:
+    """Heads to show in jitter scatters: ``head_order`` with per-head KL >= ``kl_min``."""
+    kl = np.asarray(kl_per_head, dtype=np.float64).reshape(-1)
+    return [
+        int(h)
+        for h in head_order
+        if int(h) < kl.shape[0] and float(kl[int(h)]) >= float(kl_min)
+    ]
+
+
+def _annotate_latent_jitter_modes_by_mean(
+    ax,
+    *,
+    vals: np.ndarray,
+    mode_arr: np.ndarray,
+    uniq_modes: list[int],
+    mode_names: list[str],
+    label_fontsize: int = 6,
+) -> None:
+    """Left of y-axis: mode names top→bottom by descending mean encoder μ (fits jitter y-span)."""
+    v = np.asarray(vals, dtype=np.float64).reshape(-1)
+    modes = np.asarray(mode_arr, dtype=np.int64).reshape(-1)
+    ranked: list[tuple[float, int]] = []
+    for mode in uniq_modes:
+        mask = modes == int(mode)
+        if not np.any(mask):
+            continue
+        ranked.append((float(np.mean(v[mask])), int(mode)))
+    if not ranked:
+        return
+    ranked.sort(key=lambda t: t[0], reverse=True)  # highest μ at top
+    n_lab = len(ranked)
+    y_top = _LATENT_JITTER_Y_HI - _LATENT_JITTER_Y_PAD
+    y_bot = _LATENT_JITTER_Y_LO + _LATENT_JITTER_Y_PAD
+    if n_lab == 1:
+        y_pos = np.asarray([0.0], dtype=np.float64)
+    else:
+        y_pos = np.linspace(y_top, y_bot, n_lab)
+    fs = min(label_fontsize, max(4, int(36 / n_lab)))
+    trans = blended_transform_factory(ax.transAxes, ax.transData)
+    for (_, mode), y_i in zip(ranked, y_pos):
+        name = (
+            mode_names[int(mode)]
+            if 0 <= int(mode) < len(mode_names)
+            else f"mode {int(mode)}"
+        )
+        ax.text(
+            -0.06,
+            float(y_i),
+            str(name),
+            transform=trans,
+            ha="right",
+            va="center",
+            fontsize=fs,
+            clip_on=False,
+        )
+
+
+def plot_latent_by_mode_overview(
+    *,
+    z: np.ndarray,
+    mode_idx: np.ndarray,
+    mode_names: list[str],
+    head_order: list[int],
+    elbo_kl_per_head: np.ndarray,
+    elbo_post_mean: np.ndarray,
+    elbo_post_mean_std: np.ndarray,
+    theta_mean_per_head: np.ndarray | None = None,
+    elbo_head_order: list[int] | None = None,
+    suptitle: str | None = None,
+    title_fontsize: int = 9,
+    scatter_s: float = 6.0,
+    scatter_alpha: float = 0.55,
+    rng_seed: int = 0,
+) -> plt.Figure:
+    """
+    Full-dataset latent overview (not mode-specific reward maps).
+
+    Top rows: one 1D jitter scatter per latent head with KL >= ``1e-3``
+    (``head_order`` = descending KL among shown heads).
+    Bottom row: pooled-strata diagnostics — per-head KL, ``\\bar{\\mu} \\pm std(\\mu)``,
+    optional ``\\theta`` (same panels as aggregate reward-map PNG).
+    """
+    z_arr = np.asarray(z, dtype=np.float64)
+    mode_arr = np.asarray(mode_idx, dtype=np.int64).reshape(-1)
+    if z_arr.ndim != 2 or mode_arr.shape[0] != z_arr.shape[0]:
+        raise ValueError(
+            f"z (N, Z) and mode_idx (N,) required; got {z_arr.shape!r}, {mode_arr.shape!r}"
+        )
+    nz = int(z_arr.shape[1])
+    if len(head_order) != nz:
+        raise ValueError(f"head_order len {len(head_order)} != nz {nz}")
+
+    scatter_head_order = _latent_jitter_head_order(
+        head_order=head_order,
+        kl_per_head=elbo_kl_per_head,
+    )
+    n_show = len(scatter_head_order)
+    n_diag = 2 + (1 if theta_mean_per_head is not None else 0)
+    ncols = max(min(4, max(n_show, 1)), n_diag)
+    nrows_latent = int(np.ceil(n_show / ncols)) if n_show > 0 else 0
+    nrows = nrows_latent + 1
+    fig_w = 4.2 * ncols
+    n_suptitle_lines = (suptitle.count("\n") + 1) if suptitle else 0
+    if suptitle:
+        title_h_in = 0.22 + n_suptitle_lines * 0.165 + 0.32
+        fig_h = 3.6 * nrows + title_h_in + 0.55
+        top = 1.0 - title_h_in / fig_h
+        suptitle_y = 1.0 - (0.06 / fig_h)
+    else:
+        fig_h = 3.6 * nrows + 0.55
+        top = 0.92
+        suptitle_y = None
+
+    fig, axes = plt.subplots(nrows, ncols, figsize=(fig_w, fig_h), squeeze=False)
+    rng = np.random.default_rng(seed=int(rng_seed))
+    cmap = plt.get_cmap("tab10")
+    uniq_modes = sorted(int(m) for m in np.unique(mode_arr))
+
+    #* latent 1D scatters (KL-desc head order; skip KL < 1e-3)
+    for slot, head_j in enumerate(scatter_head_order):
+        row, col = divmod(slot, ncols)
+        ax = axes[row, col]
+        vals = z_arr[:, int(head_j)]
+        ax.set_ylim(_LATENT_JITTER_Y_LO, _LATENT_JITTER_Y_HI)
+        for mode in uniq_modes:
+            mask = mode_arr == mode
+            if not np.any(mask):
+                continue
+            x = vals[mask]
+            y = rng.uniform(_LATENT_JITTER_Y_LO, _LATENT_JITTER_Y_HI, size=x.shape[0])
+            ax.scatter(
+                x,
+                y,
+                c=[cmap(mode % 10)],
+                s=scatter_s,
+                alpha=scatter_alpha,
+                linewidths=0,
+                edgecolors="none",
+            )
+        _annotate_latent_jitter_modes_by_mean(
+            ax,
+            vals=vals,
+            mode_arr=mode_arr,
+            uniq_modes=uniq_modes,
+            mode_names=mode_names,
+            label_fontsize=7,
+        )
+        kl_val = float(elbo_kl_per_head[int(head_j)]) if int(head_j) < len(elbo_kl_per_head) else float("nan")
+        ax.set_title(
+            rf"{latent_index_latex(int(head_j))} ($\mathrm{{KL}}$={kl_val:.3g})",
+            fontsize=title_fontsize,
+        )
+        ax.set_xlabel(r"encoder $\mu$", fontsize=8)
+        ax.set_yticks([])
+        ax.grid(axis="x", alpha=0.25)
+
+    for slot in range(n_show, nrows_latent * ncols):
+        row, col = divmod(slot, ncols)
+        axes[row, col].set_visible(False)
+
+    #* bottom row: full-dataset diagnostics (aggregate-style)
+    bar_order = elbo_head_order
+    diag_row = nrows_latent
+    _draw_per_head_kl_bars(
+        axes[diag_row, 0],
+        kl_per_head=elbo_kl_per_head,
+        title_fontsize=title_fontsize,
+        head_order=bar_order,
+    )
+    _draw_per_head_mean_std(
+        axes[diag_row, 1],
+        post_mean=elbo_post_mean,
+        post_mean_std=elbo_post_mean_std,
+        title_fontsize=title_fontsize,
+        head_order=bar_order,
+    )
+    if theta_mean_per_head is not None:
+        _draw_per_head_theta_bars(
+            axes[diag_row, 2],
+            theta_mean_per_head=theta_mean_per_head,
+            title_fontsize=title_fontsize,
+            head_order=bar_order,
+        )
+        diag_slots = {0, 1, 2}
+    else:
+        diag_slots = {0, 1}
+    for col in range(ncols):
+        if col not in diag_slots:
+            axes[diag_row, col].set_visible(False)
+
+    handles = [
+        Line2D(
+            [0],
+            [0],
+            marker="o",
+            linestyle="",
+            markersize=4,
+            markerfacecolor=cmap(int(mode) % 10),
+            markeredgecolor=cmap(int(mode) % 10),
+            label=(
+                mode_names[int(mode)]
+                if 0 <= int(mode) < len(mode_names)
+                else f"mode {int(mode)}"
+            ),
+        )
+        for mode in uniq_modes
+    ]
+    fig.legend(
+        handles=handles,
+        title="pref mode",
+        loc="lower center",
+        bbox_to_anchor=(0.5, 0.01),
+        ncol=min(8, max(len(handles), 1)),
+        fontsize=8,
+        frameon=True,
+    )
+    if suptitle:
+        fig.suptitle(suptitle, fontsize=9, y=suptitle_y, va="top")
+    fig.subplots_adjust(left=0.24, right=0.98, bottom=0.14, top=top, hspace=0.45, wspace=0.38)
+    return fig
 
 
 def per_head_l_nuisance(

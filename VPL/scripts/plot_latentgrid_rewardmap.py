@@ -49,6 +49,7 @@ from pref_learn.utils.plot_utils import (  # noqa: E402
     latent_index_latex,
     observation_xy_limits,
     per_head_l_nuisance,
+    plot_latent_by_mode_overview,
     plot_observation_rewards_by_annotator_mode,
 )
 
@@ -376,6 +377,9 @@ class LatentGridRewardMapCLI:
     """Raw stratified maps: ``(r-mean)/std`` per pref-mode subset; aggregate uses full-dataset mean/std."""
 
     dpi: int = 150
+
+    latent_by_mode_n_per_mode: int = 64
+    """Sort-easy stratified runs: samples per pref mode for ``latent_axes`` PNG."""
 
     sweep_param_rtol: float = 1e-5
     sweep_param_atol: float = 1e-8
@@ -888,6 +892,7 @@ def batched_per_head_elbo_stats(
         "prior_std": prior_std.detach().cpu().numpy(),
         "post_mean": post_mean.detach().cpu().numpy(),
         "post_mean_std": post_mean_std.detach().cpu().numpy(),
+        "query_latents": means.detach().cpu().numpy(),
     }
 
 
@@ -944,6 +949,7 @@ def batched_per_head_zq_std(
         "zq_std_per_head": zq_std.detach().cpu().numpy(),
         "zq_mean_per_head": zq_mean.detach().cpu().numpy(),
         "zq_bin_entropy_per_head": zq_bin_entropy.detach().cpu().numpy(),
+        "query_latents": z_q_all.detach().cpu().numpy(),
     }
 
 
@@ -1531,6 +1537,100 @@ def elbo_bar_head_order(*, kl_per_head: np.ndarray | None) -> list[int] | None:
         kl_per_head=kl_per_head,
         head_indices=list(range(kl.shape[0])),
     )
+
+
+def sample_latents_stratified_by_mode(
+    *,
+    query_latents: np.ndarray,
+    mode_labels: np.ndarray,
+    n_pref_modes: int,
+    n_per_mode: int,
+    seed: int = 0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """``(M·N, Z)`` latents and ``(M·N,)`` mode indices with ``N`` samples per mode."""
+    z = np.asarray(query_latents, dtype=np.float64)
+    labels = np.asarray(mode_labels, dtype=np.int64).reshape(-1)
+    if z.shape[0] != labels.shape[0]:
+        raise ValueError(
+            f"query_latents rows {z.shape[0]} != mode_labels {labels.shape[0]}"
+        )
+    rng = np.random.default_rng(seed=int(seed))
+    z_parts: list[np.ndarray] = []
+    m_parts: list[np.ndarray] = []
+    for mode in range(int(n_pref_modes)):
+        idx = np.flatnonzero(labels == mode)
+        if idx.size == 0:
+            continue
+        k = min(int(n_per_mode), int(idx.size))
+        pick = rng.choice(idx, size=k, replace=False)
+        z_parts.append(z[pick])
+        m_parts.append(np.full(k, mode, dtype=np.int64))
+    if not z_parts:
+        return np.empty((0, z.shape[1]), dtype=np.float64), np.empty((0,), dtype=np.int64)
+    return np.concatenate(z_parts, axis=0), np.concatenate(m_parts, axis=0)
+
+
+def save_latent_by_mode_overview_figure(
+    *,
+    query_latents: np.ndarray,
+    mode_labels: np.ndarray,
+    mode_names: list[str],
+    n_pref_modes: int,
+    n_per_mode: int,
+    kl_per_head: np.ndarray,
+    post_mean: np.ndarray,
+    post_mean_std: np.ndarray,
+    theta_mean_per_head: np.ndarray | None,
+    meta: dict[str, Any],
+    ckpt_label: str,
+    split: str,
+    btl_unit: RewardMapBtlUnit,
+    out_png: Path,
+    dpi: int,
+    viz_data_seed: int,
+    infomec: dict[str, float] | None = None,
+    recon_loss: float | None = None,
+) -> None:
+    """``nz=<nz>_09latent_axes.png``: 1D latent scatters + pooled diagnostics."""
+    z_sample, mode_sample = sample_latents_stratified_by_mode(
+        query_latents=query_latents,
+        mode_labels=mode_labels,
+        n_pref_modes=n_pref_modes,
+        n_per_mode=n_per_mode,
+        seed=viz_data_seed,
+    )
+    if z_sample.shape[0] == 0:
+        return
+    head_order = elbo_bar_head_order(kl_per_head=kl_per_head)
+    assert head_order is not None
+    bar_order = list(head_order)
+    suptitle = format_reward_map_suptitle(
+        meta=meta,
+        reward_mode="btl",
+        ckpt_label=ckpt_label,
+        split=split,
+        btl_unit=btl_unit,
+        infomec=infomec,
+        pref_mode_name="latent_axes (all strata)",
+        n_queries=int(z_sample.shape[0]),
+        recon_loss=recon_loss,
+    )
+    fig = plot_latent_by_mode_overview(
+        z=z_sample,
+        mode_idx=mode_sample,
+        mode_names=mode_names,
+        head_order=head_order,
+        elbo_kl_per_head=kl_per_head,
+        elbo_post_mean=post_mean,
+        elbo_post_mean_std=post_mean_std,
+        theta_mean_per_head=theta_mean_per_head,
+        elbo_head_order=bar_order,
+        suptitle=suptitle,
+        rng_seed=viz_data_seed,
+    )
+    out_png.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_png, dpi=dpi, bbox_inches="tight", pad_inches=0.16)
+    plt.close(fig)
 
 
 def flatten_obs_and_head_rewards(
@@ -2140,6 +2240,68 @@ def main() -> None:
                 device=device,
             )
 
+        query_latents: np.ndarray | None = None
+        kl_per_head_full: np.ndarray | None = None
+        post_mean_full: np.ndarray | None = None
+        post_mean_std_full: np.ndarray | None = None
+        if elbo_stats is not None:
+            query_latents = elbo_stats["query_latents"]
+            kl_per_head_full = elbo_stats["kl_per_head"]
+            post_mean_full = elbo_stats["post_mean"]
+            post_mean_std_full = elbo_stats["post_mean_std"]
+        elif qlae_head_stats is not None:
+            query_latents = qlae_head_stats["query_latents"]
+            kl_per_head_full = qlae_head_stats["zq_std_per_head"]
+            post_mean_full = qlae_head_stats["zq_mean_per_head"]
+            post_mean_std_full = qlae_head_stats["zq_std_per_head"]
+
+        if (
+            stratify_pref_mode
+            and query_latents is not None
+            and kl_per_head_full is not None
+            and post_mean_full is not None
+            and post_mean_std_full is not None
+            and pref_mode_labels is not None
+            and pref_mode_names is not None
+        ):
+            latent_stem = sort_easy_panel_stem(
+                latent_dim=nz,
+                panel_idx=n_pref_modes + 1,
+                panel_name="latent_axes",
+            )
+            latent_png = sort_easy_nz_png(
+                outdir=outdir,
+                reward_mode=modes[0],
+                latent_dim=nz,
+                stem=latent_stem,
+                **path_metrics,
+            )
+            save_latent_by_mode_overview_figure(
+                query_latents=query_latents,
+                mode_labels=pref_mode_labels,
+                mode_names=pref_mode_names,
+                n_pref_modes=n_pref_modes,
+                n_per_mode=args.latent_by_mode_n_per_mode,
+                kl_per_head=kl_per_head_full,
+                post_mean=post_mean_full,
+                post_mean_std=post_mean_std_full,
+                theta_mean_per_head=global_theta_mean,
+                meta=row,
+                ckpt_label=ckpt_label,
+                split=args.split,
+                btl_unit=args.btl_unit,
+                out_png=latent_png,
+                dpi=args.dpi,
+                viz_data_seed=args.viz_data_seed,
+                infomec=infomec,
+                recon_loss=recon_loss,
+            )
+            if latent_png.is_file():
+                entry["latent_axes_png"] = str(latent_png.relative_to(outdir))
+                tqdm.write(
+                    f"{row['comment']}: saved {entry['latent_axes_png']}"
+                )
+
         for mode in modes:
             rewards = batched_per_head_rewards_on_obs1(
                 model=model,
@@ -2351,15 +2513,18 @@ def main() -> None:
                     panel_save_kw["raw_reward_standardize"] = True
                     panel_save_kw["raw_standardize_scope"] = raw_standardize_scope
                 if elbo_stats is not None and isinstance(model, VAEModel) and n_q_p > 0:
-                    panel_elbo = batched_per_head_elbo_stats(
-                        model=model,
-                        obs1=obs_p,
-                        obs2=obs2_p,
-                        labels=labels_p,
-                        batch_size=batch_size,
-                        device=device,
-                        source=source_p,
-                    )
+                    if panel_name == "aggregate":
+                        panel_elbo = elbo_stats
+                    else:
+                        panel_elbo = batched_per_head_elbo_stats(
+                            model=model,
+                            obs1=obs_p,
+                            obs2=obs2_p,
+                            labels=labels_p,
+                            batch_size=batch_size,
+                            device=device,
+                            source=source_p,
+                        )
                     panel_save_kw["elbo_post_mean"] = panel_elbo["post_mean"]
                     panel_save_kw["elbo_post_mean_std"] = panel_elbo["post_mean_std"]
                     panel_save_kw.pop("elbo_l_nuisance_per_head", None)
