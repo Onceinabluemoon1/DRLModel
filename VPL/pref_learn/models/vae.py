@@ -3,6 +3,7 @@ import torch
 import torch.distributions as D
 import torch.nn as nn
 import torch.nn.functional as F
+from pref_learn.models.decoders import broadcast_obs_and_latent
 from pref_learn.models.flow import Flow
 from pref_learn.models.nets import (
     PairEncoder,
@@ -11,7 +12,12 @@ from pref_learn.models.nets import (
     reward_decoder_column_orth_penalty,
     reward_decoder_theta_sparsity,
 )
-from pref_learn.models.utils import Annealer, batch_encoder_nuisance_loss, cross_batch_std_mean, logvar_to_std
+from pref_learn.models.utils import (
+    Annealer,
+    batch_encoder_nuisance_loss,
+    cross_batch_std_mean,
+    logvar_to_std,
+)
 
 
 class VAEModel(nn.Module):
@@ -138,10 +144,13 @@ class VAEModel(nn.Module):
 
     def decode(self, obs, z) -> torch.Tensor:
         """
-        per-step reward decoding conditioned on latent z
-        z typically broadcasted as repeat(z, "B Z -> B A T Z")
-        (B, A, T, O + Z) -> (B, A, T, 1)
+        per-step reward decoding conditioned on latent z.
+
+        ``obs`` / ``z`` may already be ``(B, A, T, ·)``, or a policy batch
+        ``(B, O)`` / ``(B, T, O)`` with ``z`` of shape ``(B, Z)``.
+        Returns ``(B, A, T, 1)``.
         """
+        obs, z = broadcast_obs_and_latent(obs, z)
         decoder_input = torch.cat([obs, z], dim=-1)  # (B, A, T, O + Z)
         r = self.decoder(decoder_input)  # (B, A, T, 1)
         return r
@@ -211,9 +220,33 @@ class VAEModel(nn.Module):
             )
         return torch.cat(chunks, dim=0)  # (M, 1)
 
-    def get_reward(self, x):
-        r = self.decoder(x)  # (B, A, T, 1)
-        return r
+    def get_prob_reward(self, s_a, z, comparison_obs, **kwargs):
+        """Alias used by offline relabel (``vae_norm='prob'``)."""
+        return self.get_probabilistic_reward(
+            s_a=s_a, z=z, comparison_obs=comparison_obs, **kwargs
+        )
+
+    def get_reward(self, obs, z=None):
+        """Decoder reward for a policy batch or a concatenated decoder tensor.
+
+        ``get_reward(obs, z)`` is the relabel entry point: ``obs`` is
+        ``(B, O)`` / ``(B, T, O)`` / ``(B, A, T, O)`` and ``z`` is ``(B, Z)``.
+        ``get_reward(x)`` still accepts ``(B, A, T, O+Z)``. A flat
+        ``(B, O+Z)`` tensor is split with ``decoder.obs_dim``.
+        """
+        if z is None:
+            obs_dim = getattr(self.decoder, "obs_dim", None)
+            if (
+                obs_dim is not None
+                and torch.is_tensor(obs)
+                and obs.ndim < 4
+                and obs.shape[-1] > int(obs_dim)
+            ):
+                z = obs[..., int(obs_dim) :]
+                obs = obs[..., : int(obs_dim)]
+                return self.decode(obs, z)
+            return self.decoder(obs)
+        return self.decode(obs, z)
 
     def reparameterization(self, mean, std):
         epsilon = torch.randn_like(std).to(mean.device)

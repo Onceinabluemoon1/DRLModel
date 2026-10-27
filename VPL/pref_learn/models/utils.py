@@ -5,7 +5,6 @@ from pathlib import Path
 import numpy as np
 import torch
 from einops import rearrange
-from pref_learn.utils.data_utils import get_labels
 from torch.utils.data import DataLoader, Dataset
 
 
@@ -303,6 +302,9 @@ def get_latent(batch, env, reward_model, mode, num_samples):
 
     rewards1 = rearrange(rewards1, "(b s) t ... -> b s t ...", b=num_samples, s=set_size)
     rewards2 = rearrange(rewards2, "(b s) t ... -> b s t ...", b=num_samples, s=set_size)
+
+    # data_utils imports the offline RL stack; keep that off the model import path.
+    from pref_learn.utils.data_utils import get_labels
 
     labels = get_labels(rewards1, rewards2)
     # todo: why wasn't this needed before?

@@ -6,6 +6,34 @@ import torch
 from jaxrl_m.dataset import Dataset
 from tqdm import tqdm
 
+LATENT_REWARD_MODELS = ("VAE", "TCVAE", "QLAE")
+
+
+def _as_1d(x):
+    """Collapse decoder output ``(T, 1, 1, 1)`` or ``(T, 1)`` to ``(T,)``."""
+    if hasattr(x, "detach"):
+        x = x.detach()
+    if hasattr(x, "cpu"):
+        x = x.cpu().numpy()
+    return np.asarray(x).reshape(-1)
+
+
+def _score_latent_reward(reward_model, obs, z, *, comparison_obs, vae_norm):
+    """Score one trajectory with ``get_reward(obs, z)`` or BTL expectation."""
+    if vae_norm == "prob":
+        score_fn = getattr(reward_model, "get_probabilistic_reward", None) or getattr(
+            reward_model, "get_prob_reward", None
+        )
+        if score_fn is None:
+            raise AttributeError(
+                "vae_norm='prob' needs get_probabilistic_reward(s_a, z, comparison_obs)"
+            )
+        return score_fn(s_a=obs, z=z, comparison_obs=comparison_obs)
+    try:
+        return reward_model.get_reward(obs, z)
+    except TypeError:
+        return reward_model.get_reward(torch.cat([obs, z], dim=-1))
+
 
 def plot_observation_rewards(obs, r):
     fig, ax = plt.subplots()
@@ -225,7 +253,7 @@ def relabel_rewards_with_model(
             with torch.no_grad():
                 rewards = reward_model.sample_reward(input_obs)
                 next_rewards = reward_model.sample_reward(input_next_obs)
-        elif model_type == "VAE" or model_type == "TCVAE":
+        elif model_type in LATENT_REWARD_MODELS:
             with torch.no_grad():
                 if vae_sampling:
                     if sampled_z is None or traj_id % sample_every == 0:
@@ -246,28 +274,22 @@ def relabel_rewards_with_model(
                     .float()
                     .to(next(reward_model.parameters()).device)
                 )
-                if vae_norm == "prob":
-                    assert comparison_obs is not None
-                    rewards = reward_model.get_prob_reward(
-                        s_a=input_obs,
-                        z=batch_z,
-                        comparison_obs=comparison_obs,
-                    )
-                    next_rewards = reward_model.get_prob_reward(
-                        s_a=input_next_obs,
-                        z=batch_z,
-                        comparison_obs=comparison_obs,
-                    )
-                else:
-                    rewards = reward_model.get_reward(
-                        torch.cat([input_obs, batch_z], dim=-1)
-                    )
-                    next_rewards = reward_model.get_reward(
-                        torch.cat([input_next_obs, batch_z], dim=-1)
-                    )
-
-                    if vae_norm == "learned_norm":
-                        rewards = torch.exp((rewards - norm_z) * 1e-3)
+                rewards = _score_latent_reward(
+                    reward_model,
+                    input_obs,
+                    batch_z,
+                    comparison_obs=comparison_obs,
+                    vae_norm=vae_norm,
+                )
+                next_rewards = _score_latent_reward(
+                    reward_model,
+                    input_next_obs,
+                    batch_z,
+                    comparison_obs=comparison_obs,
+                    vae_norm=vae_norm,
+                )
+                if vae_norm == "learned_norm":
+                    rewards = torch.exp((rewards - norm_z) * 1e-3)
 
                 if append_goal:
                     if vae_sampling:
@@ -284,8 +306,8 @@ def relabel_rewards_with_model(
                     next_obs_list.append(
                         np.concatenate([next_obs, batch_z.cpu().numpy()], axis=-1)
                     )
-        new_rewards[start : end + 1] = rewards.squeeze().cpu().numpy()
-        new_next_rewards[start : end + 1] = next_rewards.squeeze().cpu().numpy()
+        new_rewards[start : end + 1] = _as_1d(rewards)
+        new_next_rewards[start : end + 1] = _as_1d(next_rewards)
         mode_mask[start : end + 1] = idx
 
     if len(obs_list) > 0:
@@ -301,7 +323,7 @@ def relabel_rewards_with_model(
         new_rewards = new_rewards * 1e-2
         dataset["rewards"] = new_rewards
         dataset["next_rewards"] = new_next_rewards
-    elif (model_type == "VAE" or model_type == "TCVAE") and vae_norm == "fixed":
+    elif model_type in LATENT_REWARD_MODELS and vae_norm == "fixed":
         print("VAE with fixed norm")
         for mode in range(env.get_num_modes()):
             id_r = np.argwhere(mode_mask == mode)
@@ -311,10 +333,10 @@ def relabel_rewards_with_model(
         new_rewards = new_rewards * 1e-2
         dataset["rewards"] = new_rewards
         dataset["next_rewards"] = new_next_rewards
-    elif (model_type == "VAE" or model_type == "TCVAE") and vae_norm == "prob":
+    elif model_type in LATENT_REWARD_MODELS and vae_norm == "prob":
         print("VAE with prob (BTL expected preference) scaling")
-        dataset["rewards"] = new_rewards.squeeze()
-        dataset["next_rewards"] = new_next_rewards.squeeze()
+        dataset["rewards"] = np.asarray(new_rewards).reshape(-1)
+        dataset["next_rewards"] = np.asarray(new_next_rewards).reshape(-1)
     elif vae_norm == "max":
         dataset["rewards"] = new_rewards / np.abs(new_rewards).max()
         dataset["next_rewards"] = new_next_rewards / np.abs(new_next_rewards).max()
