@@ -14,6 +14,65 @@ def split_obs_z(x: torch.Tensor, *, obs_dim: int) -> tuple[torch.Tensor, torch.T
     return obs, z
 
 
+def broadcast_obs_and_latent(
+    obs: torch.Tensor, z: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Align ``obs`` and ``z`` to decoder layout ``(B, A, T, ·)``.
+
+    Policy relabel scores one transition at a time, so ``obs`` is often
+    ``(B, O)`` or ``(B, T, O)`` and ``z`` is ``(B, Z)`` or a single ``(1, Z)``.
+    Preference training already passes ``(B, A, T, O)`` and ``(B, A, T, Z)``;
+    those tensors are returned unchanged.
+    """
+    if obs.ndim == 1:
+        obs = obs.unsqueeze(0)
+    if z.ndim == 1:
+        z = z.unsqueeze(0)
+    if obs.ndim == 2:
+        obs = ei.rearrange(obs, "B O -> B 1 1 O")
+    elif obs.ndim == 3:
+        obs = ei.rearrange(obs, "B T O -> B 1 T O")
+    elif obs.ndim != 4:
+        raise ValueError(
+            "obs must be (O,), (B, O), (B, T, O), or (B, A, T, O); "
+            f"got {tuple(obs.shape)}"
+        )
+
+    b_n, a_n, t_n, _ = obs.shape
+    if z.ndim == 2:
+        if z.shape[0] == 1 and b_n != 1:
+            z = ei.repeat(z, "1 Z -> B Z", B=b_n)
+        if z.shape[0] != b_n:
+            raise ValueError(
+                f"latent batch {z.shape[0]} does not match obs batch {b_n}"
+            )
+        z = ei.repeat(z, "B Z -> B A T Z", A=a_n, T=t_n)
+    elif z.ndim == 3:
+        # ``(B, T, Z)`` from a flat concatenated segment ``(B, T, O+Z)``.
+        if z.shape[0] == 1 and b_n != 1:
+            z = ei.repeat(z, "1 T Z -> B T Z", B=b_n)
+        if z.shape[0] != b_n or z.shape[1] != t_n or a_n != 1:
+            raise ValueError(
+                f"latent shape {tuple(z.shape)} is not aligned with obs "
+                f"{(b_n, a_n, t_n)}"
+            )
+        z = ei.rearrange(z, "B T Z -> B 1 T Z")
+    elif z.ndim == 4:
+        if z.shape[0] == 1 and b_n != 1 and z.shape[1] == a_n and z.shape[2] == t_n:
+            z = ei.repeat(z, "1 A T Z -> B A T Z", B=b_n)
+        if z.shape[0] != b_n or z.shape[1] != a_n or z.shape[2] != t_n:
+            raise ValueError(
+                f"latent shape {tuple(z.shape)} is not aligned with obs "
+                f"{(b_n, a_n, t_n)}"
+            )
+    else:
+        raise ValueError(
+            "z must be (Z,), (B, Z), (B, T, Z), or (B, A, T, Z); "
+            f"got {tuple(z.shape)}"
+        )
+    return obs, z
+
+
 class MultiplicativeDecoder(nn.Module):
     """Deterministic ``theta_j(s) = softplus(w_j(h))``; ``r = sum_j theta_j(s) z_j``.
 

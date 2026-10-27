@@ -9,6 +9,7 @@ import einops as ei
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from pref_learn.models.decoders import broadcast_obs_and_latent
 from pref_learn.models.nets import (
     PairEncoder,
     RewardDecoderConfig,
@@ -116,8 +117,32 @@ class QLAE(nn.Module):
         return self.quantizer(z=z_c)
 
     def decode(self, obs: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
+        """``(B, A, T, 1)`` reward. Flat ``(B, O)`` + ``(B, Z)`` is broadcast."""
+        obs, z = broadcast_obs_and_latent(obs, z)
         decoder_input = torch.cat([obs, z], dim=-1)
         return self.decoder(decoder_input)
+
+    def get_prob_reward(self, s_a, z, comparison_obs, **kwargs):
+        """Alias used by offline relabel (``vae_norm='prob'``)."""
+        return self.get_probabilistic_reward(
+            s_a=s_a, z=z, comparison_obs=comparison_obs, **kwargs
+        )
+
+    def get_reward(self, obs, z=None):
+        """Same batch contract as ``VAEModel.get_reward``."""
+        if z is None:
+            obs_dim = getattr(self.decoder, "obs_dim", None)
+            if (
+                obs_dim is not None
+                and torch.is_tensor(obs)
+                and obs.ndim < 4
+                and obs.shape[-1] > int(obs_dim)
+            ):
+                z = obs[..., int(obs_dim) :]
+                obs = obs[..., : int(obs_dim)]
+                return self.decode(obs, z)
+            return self.decoder(obs)
+        return self.decode(obs, z)
 
     def _as_batl_obs(self, obs: torch.Tensor) -> torch.Tensor:
         if obs.ndim == 2:
