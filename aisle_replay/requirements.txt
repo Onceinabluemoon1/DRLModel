@@ -1,0 +1,10 @@
+numpy>=1.26,<2
+pyyaml>=6
+pillow>=10
+# 下面这些只在训练和 YOLO11-seg 回放时需要。安全门测试不导入它们。
+# torch 请装 CPU 轮子，避免把 CUDA 轮子拉下来：
+#   pip install torch==2.5.1+cpu torchvision==0.20.1+cpu --index-url https://download.pytorch.org/whl/cpu
+torch==2.5.1
+torchvision==0.20.1
+ultralytics==8.3.40
+opencv-python-headless==4.10.0.84

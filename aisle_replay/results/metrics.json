@@ -1,0 +1,103 @@
+{
+  "data_source": "aisle_replay/synth.py 生成的合成 RGB-D 回放",
+  "vehicle": false,
+  "verb": "replay",
+  "image_hw": [
+    240,
+    320
+  ],
+  "device": "cpu",
+  "model": "YOLO11-seg",
+  "tote_1m_geometry_mae_cm": 0.0015985809016738628,
+  "tote_1m_geometry_max_cm": 0.0015985809016738628,
+  "tote_1m_geometry_frames": 5,
+  "missing": [],
+  "person_recall": 1.0,
+  "person_recall_hits": 24,
+  "person_recall_positives": 24,
+  "person_recall_iou": 0.5,
+  "person_recall_seed": 2026,
+  "tote_1m_detector_frames": 5,
+  "tote_1m_detector_hits": 5,
+  "tote_1m_detector_mae_cm": 7.925626093197025e-05,
+  "tote_1m_detector_max_cm": 7.925626093197025e-05,
+  "detector_forward_ms_median": 18.938302993774414,
+  "detector_forward_ms_min": 17.58885383605957,
+  "detector_predict_ms_median": 20.012725000015053,
+  "detector_predict_repeats": 15,
+  "detector_forward_includes": "Ultralytics 记的单张 inference 毫秒，不含预处理和 NMS。CPU，不是 TensorRT。",
+  "detector_predict_includes": "同一次调用的整段 predict 墙钟，含预处理、前向、NMS 和掩码。",
+  "yolo_replay": {
+    "empty": {
+      "expected": [
+        "OK",
+        "OK",
+        "OK"
+      ],
+      "actual": [
+        "OK",
+        "OK",
+        "OK"
+      ]
+    },
+    "person": {
+      "expected": [
+        "OK",
+        "OK",
+        "STOP_PERSON",
+        "STOP_PERSON"
+      ],
+      "actual": [
+        "OK",
+        "OK",
+        "STOP_PERSON",
+        "STOP_PERSON"
+      ]
+    },
+    "tote": {
+      "expected": [
+        "OK",
+        "OK",
+        "STOP_DISTANCE",
+        "OK"
+      ],
+      "actual": [
+        "OK",
+        "OK",
+        "STOP_DISTANCE",
+        "OK"
+      ]
+    },
+    "pallet": {
+      "expected": [
+        "OK",
+        "STOP_DISTANCE",
+        "OK"
+      ],
+      "actual": [
+        "OK",
+        "STOP_DISTANCE",
+        "OK"
+      ]
+    }
+  },
+  "person_clip_expected": [
+    "OK",
+    "OK",
+    "STOP_PERSON",
+    "STOP_PERSON"
+  ],
+  "person_clip_reasons": [
+    "OK",
+    "OK",
+    "STOP_PERSON",
+    "STOP_PERSON"
+  ],
+  "person_enter_frame": 2,
+  "person_stop_frame": 2,
+  "person_stop_delay_frames": 0,
+  "weights": "/workspace/aisle_replay/weights/yolo11n-seg-synth.pt",
+  "weights_sha256": "3e7b5d74cc93e7d0af5725a86cc87b618842abb632a2bfebd462198dfb684fc4",
+  "conf": 0.25,
+  "measure_wall_s": 3.839
+}

@@ -1,0 +1,10 @@
+# 回放安全门阈值。判断只读这份文件和观测里的米制距离。
+# 不读速度进程的输出，没有共形分位数。
+person_stop_m: 2.5
+object_stop_m: 1.0
+lane_half_width_m: 0.90
+forward_min_m: 0.05
+cruise_vx_m_s: 0.6
+cruise_wz_rad_s: 0.0
+# 人进入停止区后，STOP_PERSON 最迟出现在随后的那个感知帧（延迟 <= 1，即两个感知帧内）。
+max_person_stop_delay_frames: 1
